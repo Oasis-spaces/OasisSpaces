@@ -37,7 +37,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
-from semantics import UNRELIABLE, VOCABULARY, Detector, pixel_labels
+from semantics import (SEGMENTER_ID, UNRELIABLE, VOCABULARY, Detector, Segmenter,
+                       pixel_labels)
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
 MIN_ANCHORS = 12
@@ -268,6 +269,9 @@ def main():
     parser.add_argument("--no-semantics", action="store_true",
                         help="skip object detection: no labels on the cloud, and no "
                              "filtering of mirrors, windows and screens")
+    parser.add_argument("--no-outlines", action="store_true",
+                        help="label whole detection rectangles instead of cutting "
+                             "each one to the object's outline with SAM 2.1")
     parser.add_argument("--output", default=None,
                         help="output PLY (default <space>/cloud-dense.ply)")
     args = parser.parse_args()
@@ -383,6 +387,28 @@ def main():
             except Exception as exc:  # transformers or weights missing
                 label_index = None
                 print(f"Object detection unavailable ({exc}); continuing without labels")
+        if label_index is not None:
+            # A rectangle around a bed also holds floor and curtain; cut each
+            # one down to the object's own outline before labelling points.
+            meta["outlines"] = "boxes"
+            if not args.no_outlines and any(f["detections"] for f in frames):
+                try:
+                    segmenter = Segmenter(device=device)
+                    print(f"Object outlines: SAM 2.1 hiera-tiny on {segmenter.device}")
+                    for f in frames:
+                        name = images[f["id"]]["name"]
+                        done = segmenter.outline(Image.open(workspace / "images" / name),
+                                                 f["detections"])
+                        print(f"  {name}: {done}/{len(f['detections'])} outlined")
+                    del segmenter
+                    release_model_memory(torch)
+                    meta["outlines"] = SEGMENTER_ID
+                except Exception as exc:  # weights missing, or the model failed
+                    for f in frames:
+                        for det in f["detections"]:
+                            det.pop("mask", None)
+                    print(f"Object outlines unavailable ({exc}); "
+                          "labelling whole detection rectangles")
 
         fitted = np.array([f["s"] for f in frames if f["s"] is not None])
         if len(fitted) == 0:

@@ -85,7 +85,8 @@ def structure_stats(space: Path, units_per_metre: float | None) -> dict:
              and p.get("build", True) and p.get("source") != "inferred"]
     stats["walls"] = len(walls)
     if floors and to_m:
-        floor = max(floors, key=lambda p: p["points"])
+        floor = next((p for p in floors if p.get("label") == "floor"),
+                     max(floors, key=lambda p: p["points"]))
         stats["floor_m"] = (to_m(2 * floor["half_a"]), to_m(2 * floor["half_b"]))
     if walls and to_m:
         stats["wall_height_m"] = float(np.median([to_m(2 * w["half_b"]) for w in walls]))

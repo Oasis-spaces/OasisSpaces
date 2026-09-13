@@ -492,7 +492,7 @@ class Agent:
 
     def step_densify(self) -> bool:
         ok, _ = self.run([sys.executable, str(ROOT / "pipeline/densify.py"),
-                          str(self.space)], "densify", "MoGe-2 + object detection")
+                          str(self.space)], "densify", "MoGe-2 + object detection and outlines")
         if not ok:
             self.decide("densify", "stop", "densify failed")
             return False
@@ -622,6 +622,10 @@ class Agent:
             if d.get("depth_model") == "moge" and "labels" not in d:
                 return "warn", ("object detection did not run, so the cloud has no "
                                 "labels and mirrors/windows were not filtered; " + summary)
+            if d.get("depth_model") == "moge" and d.get("outlines") == "boxes":
+                return "warn", ("objects were labelled by whole detection rectangles, "
+                                "not their outlines, so furniture boxes take in the floor "
+                                "and walls around them; " + summary)
             if spread > GOOD_SCALE_SPREAD:
                 return "warn", "keyframes only loosely agree on scale: " + summary
             return "pass", summary

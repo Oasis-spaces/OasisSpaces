@@ -468,7 +468,12 @@ def classify_planes(planes: list[dict]) -> tuple[list[str], list[str], RoomConte
     # bottom, so the real floor can lie well below where the walls seem to end,
     # while a horizontal plane above that point is more likely a bed or table top.
     floor_idx: set[int] = set()
-    if horiz:
+    # shapes.py marks the floor and ceiling it found as height levels inside
+    # the walls; those are trusted over guessing from horizontal planes.
+    level_of = {p.get("level"): i for i, p in enumerate(planes) if p.get("level")}
+    if "floor" in level_of:
+        floor_idx = {level_of["floor"]}
+    elif horiz:
         max_area = max(plane_area(p) for _, p in horiz)
         candidates = [
             (i, p) for i, p in horiz
@@ -487,7 +492,8 @@ def classify_planes(planes: list[dict]) -> tuple[list[str], list[str], RoomConte
     if floor_idx:
         floor_z = min(planes[i]["center"][2] for i in floor_idx)
         floor_area = max(plane_area(planes[i]) for i in floor_idx)
-        floor_source = "floor plane"
+        floor_source = ("lowest level inside the walls" if "floor" in level_of
+                        else "floor plane")
         if room:
             # The floor gets resized to the walls' footprint, so size the room by it.
             floor_area = 4.0 * room["half_u"] * room["half_v"]
@@ -499,6 +505,9 @@ def classify_planes(planes: list[dict]) -> tuple[list[str], list[str], RoomConte
             if wall_top - floor_z > room_height:
                 room_height = wall_top - floor_z
                 height_source += "; measured from the floor plane to the wall tops"
+        if "ceiling" in level_of:
+            room_height = planes[level_of["ceiling"]]["center"][2] - floor_z
+            height_source = "floor level to ceiling level"
     else:
         floor_z = floor_est
         floor_area = max((plane_area(p) for _, p in horiz), default=0.0)

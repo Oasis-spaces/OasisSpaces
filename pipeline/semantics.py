@@ -13,9 +13,13 @@ shapes.py then builds furniture boxes from the labelled points, instead of
 inferring furniture from whatever the plane fitter left over.
 
 The detector is GroundingDINO-tiny through transformers. It answers in free
-text ("a wardrobe cabinet"), so phrases are mapped back onto VOCABULARY.
+text ("a wardrobe cabinet"), so phrases are mapped back onto VOCABULARY. A
+detection is a rectangle, and a rectangle around a bed also holds floor, wall
+and curtain, so SAM 2.1 (hiera-tiny) then cuts each rectangle down to the
+object's own outline, and only pixels inside the outline are labelled.
 
-Standalone check:
+Standalone check (draws the outlines to <image>-outlines.png in the current
+folder, so a space's frame folder is never touched):
     python3 pipeline/semantics.py <image> [more images ...]
 """
 
@@ -27,6 +31,10 @@ from pathlib import Path
 import numpy as np
 
 MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+SEGMENTER_ID = "facebook/sam2.1-hiera-tiny"
+# An outline covering less than this share of its rectangle means SAM
+# found nothing there, so the whole rectangle is used instead.
+MIN_OUTLINE_SHARE = 0.02
 
 # Worth building as furniture in the Blender room.
 FURNITURE = [
@@ -101,13 +109,80 @@ class Detector:
         return found
 
 
+class Segmenter:
+    """SAM 2.1 hiera-tiny, prompted with the detector's rectangles.
+
+    Preprocessing is done here (resize to 1024x1024, ImageNet normalisation,
+    masks upsampled from 256x256) rather than by transformers' Sam2Processor,
+    which needs torchvision; torch here is Homebrew's build, which OpenSplat is
+    linked against, so it is not swapped for a pip one."""
+
+    INPUT = 1024
+    MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+    STD = np.array([0.229, 0.224, 0.225], np.float32)
+
+    def __init__(self, device: str | None = None, work_size: int = 1024):
+        import torch
+        from transformers import Sam2Model
+
+        self.torch = torch
+        self.device = device or ("mps" if torch.backends.mps.is_available() else "cpu")
+        self.model = Sam2Model.from_pretrained(SEGMENTER_ID).to(self.device).eval()
+        self.work_size = work_size
+
+    def outline(self, img, detections: list[dict]) -> int:
+        """Give each detection a "mask" (booleans at the working size, clipped
+        to its rectangle) and the "mask_scale" from image pixels to it.
+        Returns how many detections got an outline."""
+        from PIL import Image
+
+        torch = self.torch
+        if not detections:
+            return 0
+        full = img.convert("RGB")
+        W, H = full.size
+        x = np.asarray(full.resize((self.INPUT, self.INPUT), Image.BILINEAR), np.float32)
+        x = (x / 255.0 - self.MEAN) / self.STD
+        pixels = torch.from_numpy(x.transpose(2, 0, 1).copy())[None].to(self.device)
+        sx, sy = self.INPUT / W, self.INPUT / H
+        boxes = torch.tensor([[[d["box"][0] * sx, d["box"][1] * sy,
+                                d["box"][2] * sx, d["box"][3] * sy] for d in detections]],
+                             dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            out = self.model(pixel_values=pixels, input_boxes=boxes, multimask_output=False)
+        scale = min(1.0, self.work_size / max(W, H))
+        size = (round(H * scale), round(W * scale))
+        low = out.pred_masks[0, :, :1].float().cpu()  # boxes x 1 x 256 x 256 logits
+        masks = (torch.nn.functional.interpolate(low, size, mode="bilinear",
+                                                 align_corners=False)[:, 0] > 0).numpy()
+        outlined = 0
+        for det, mask in zip(detections, masks):
+            x0, y0, x1, y1 = (int(round(v * scale)) for v in det["box"])
+            x0, y0 = max(x0, 0), max(y0, 0)
+            clipped = np.zeros_like(mask)
+            clipped[y0:y1 + 1, x0:x1 + 1] = mask[y0:y1 + 1, x0:x1 + 1]
+            box_area = max((x1 - x0 + 1) * (y1 - y0 + 1), 1)
+            if clipped.sum() >= MIN_OUTLINE_SHARE * box_area:
+                det["mask"], det["mask_scale"] = clipped, scale
+                outlined += 1
+        return outlined
+
+
 def pixel_labels(us: np.ndarray, vs: np.ndarray, detections: list[dict],
                  index: dict[str, int]) -> np.ndarray:
-    """Label index per pixel: the highest-scoring detection covering it."""
+    """Label index per pixel: the highest-scoring detection covering it, by
+    its outline when Segmenter gave it one, else by its rectangle."""
     labels = np.zeros(len(us), dtype=np.uint8)
     for det in sorted(detections, key=lambda d: d["score"]):
         x0, y0, x1, y1 = det["box"]
         inside = (us >= x0) & (us <= x1) & (vs >= y0) & (vs <= y1)
+        mask = det.get("mask")
+        if mask is not None:
+            at = np.flatnonzero(inside)
+            k = det["mask_scale"]
+            rows = np.minimum((vs[at] * k).astype(int), mask.shape[0] - 1)
+            cols = np.minimum((us[at] * k).astype(int), mask.shape[1] - 1)
+            inside = at[mask[rows, cols]]
         labels[inside] = index[det["label"]]
     return labels
 
@@ -115,13 +190,39 @@ def pixel_labels(us: np.ndarray, vs: np.ndarray, detections: list[dict],
 def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    from PIL import Image, ImageDraw
+
     detector = Detector()
     print(f"{MODEL_ID} on {detector.device}")
-    from PIL import Image
-    for path in sys.argv[1:]:
-        detections = detector.detect(Image.open(path))
+    found = {path: detector.detect(Image.open(path)) for path in sys.argv[1:]}
+    del detector
+    segmenter = Segmenter()
+    print(f"{SEGMENTER_ID} on {segmenter.device}")
+    for path, detections in found.items():
+        img = Image.open(path).convert("RGB")
+        outlined = segmenter.outline(img, detections)
         summary = ", ".join(f"{d['label']} {d['score']:.2f}" for d in detections)
-        print(f"{Path(path).name}: {summary or 'nothing detected'}")
+        print(f"{Path(path).name}: {summary or 'nothing detected'} "
+              f"({outlined} outlined)")
+        # Each outline tinted over the photo, with its rectangle drawn round it.
+        overlay = np.asarray(img).astype(np.float32)
+        palette = [(230, 60, 60), (60, 180, 75), (60, 110, 230), (240, 170, 40),
+                   (170, 70, 220), (40, 190, 200)]
+        draw_boxes = []
+        for i, det in enumerate(sorted(detections, key=lambda d: d["score"])):
+            colour = np.array(palette[i % len(palette)], np.float32)
+            if "mask" in det:
+                big = np.asarray(Image.fromarray(det["mask"]).resize(img.size))
+                overlay[big] = overlay[big] * 0.45 + colour * 0.55
+            draw_boxes.append((det, tuple(int(c) for c in colour)))
+        out = Image.fromarray(overlay.astype(np.uint8))
+        draw = ImageDraw.Draw(out)
+        for det, colour in draw_boxes:
+            draw.rectangle(det["box"], outline=colour, width=3)
+            draw.text((det["box"][0] + 6, det["box"][1] + 4), det["label"], fill=colour)
+        target = Path.cwd() / (Path(path).stem + "-outlines.png")
+        out.save(target)
+        print(f"  -> {target}")
 
 
 if __name__ == "__main__":

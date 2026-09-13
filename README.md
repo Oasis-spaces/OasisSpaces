@@ -140,11 +140,17 @@ the agent's judgement:
 
    It also runs `pipeline/semantics.py`: an open-vocabulary detector
    (GroundingDINO-tiny, local, no API) names the objects in each keyframe.
-   Every dense point knows the frame and pixel it came from, so those
-   detections label the points directly. Points on mirrors, windows and
-   screens are dropped instead, because monocular depth there is a
-   reflection or the view outside. `--no-semantics` turns this off.
+   A detection is a rectangle, and a rectangle round a bed also holds floor
+   and curtain, so SAM 2.1 (hiera-tiny, local) cuts each one to the object's
+   outline first (`--no-outlines` keeps rectangles). Every dense point knows
+   the frame and pixel it came from, so those outlines label the points
+   directly. Points on mirrors, windows and screens are dropped instead,
+   because monocular depth there is a reflection or the view outside.
+   `--no-semantics` turns this off.
 3. `pipeline/shapes.py` and `tools/classify_shapes.py` — planes and boxes.
+   Walls come from RANSAC; the floor and ceiling are the lowest upward-facing
+   and highest downward-facing height levels inside the walls, so a strip of
+   floor is enough and a lower corridor floor seen through a door is ignored.
    Detected furniture is excluded from plane fitting and becomes one box per
    object; whatever is left is grouped geometrically as before. The
    classifier keeps a detected object's identity but still applies its

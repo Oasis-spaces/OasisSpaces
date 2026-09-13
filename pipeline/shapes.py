@@ -5,7 +5,8 @@ Detects the geometric structure of a reconstructed space and regenerates
 it as clean parametric shapes:
 
   1. Estimate the up direction from the solved camera poses.
-  2. RANSAC plane detection -> floor and walls.
+  2. RANSAC plane detection -> walls; floor and ceiling as height levels
+     inside the walls.
   3. Cluster the remaining points -> furniture volumes (oriented boxes).
   4. Emit shapes.json (parameters) — the Blender builder
      (tools/blender_room.py) turns it into an editable .blend scene.
@@ -60,10 +61,11 @@ def estimate_up(model_dir: Path) -> np.ndarray:
 
 
 def ransac_plane(points, threshold, iterations=400, rng=None, normals=None,
-                 min_cos=0.85):
+                 min_cos=0.85, max_abs_up=None):
     """Plane with the most inliers. Given per-point normals, an inlier must
     also face the plane's way (within ~30°), so a plane stops counting the
-    furniture it slices through."""
+    furniture it slices through. With max_abs_up, only planes whose normal's
+    up component stays below it are tried (0.35: walls only)."""
     rng = rng or np.random.default_rng(0)
 
     def inliers(normal, d):
@@ -80,10 +82,14 @@ def ransac_plane(points, threshold, iterations=400, rng=None, normals=None,
         if norm < 1e-9:
             continue
         normal = normal / norm
+        if max_abs_up is not None and abs(normal[2]) > max_abs_up:
+            continue
         d = -normal @ sample[0]
         count = int(inliers(normal, d).sum())
         if count > best_inliers:
             best_inliers, best = count, (normal, d)
+    if best is None:
+        return None, None, np.zeros(len(points), bool)
     normal, d = best
     mask = inliers(normal, d)
     # refine with least squares on inliers
@@ -101,6 +107,34 @@ def ransac_plane(points, threshold, iterations=400, rng=None, normals=None,
 # wall found twice, or a wardrobe front beside it.
 WALL_MERGE_DEGREES = 10.0
 WALL_MERGE_METRES = 0.30
+
+
+# Floor and ceiling are found as height levels, not by RANSAC: a pan often
+# sees only a strip of the room's floor, and a plane fitter then prefers a
+# tilted plane joining it to a lower corridor floor seen through the door.
+# A level is a peak in the heights of points facing up (floor) or down
+# (ceiling) inside the walls, holding at least LEVEL_MIN_SHARE of them.
+LEVEL_NORMAL_DEGREES = 20.0
+LEVEL_MIN_SHARE = 0.10
+MIN_CEILING_METRES = 1.8   # or MIN_CEILING_FRAC of the scene without a scale
+MIN_CEILING_FRAC = 0.30
+
+
+def find_level(heights, bin_width, lowest):
+    """Height of the lowest (or highest) well-populated level, or None."""
+    if len(heights) < 1000:
+        return None
+    edges = np.arange(heights.min(), heights.max() + bin_width, bin_width)
+    if len(edges) < 2:
+        return float(np.median(heights))
+    counts, _ = np.histogram(heights, edges)
+    near = np.convolve(counts, [1, 1, 1], mode="same")  # a level may straddle two bins
+    peaks = np.where(near >= LEVEL_MIN_SHARE * len(heights))[0]
+    if len(peaks) == 0:
+        return None
+    k = peaks[0] if lowest else peaks[-1]
+    lo, hi = edges[max(k - 1, 0)], edges[min(k + 2, len(edges) - 1)]
+    return float(np.median(heights[(heights >= lo) & (heights <= hi)]))
 
 
 def oriented_rect(points_2d, trim=1.0):
@@ -248,6 +282,8 @@ def main():
     merge_distance = (WALL_MERGE_METRES * units_per_metre if units_per_metre
                       else extent * 0.03)
 
+    # Walls by RANSAC (vertical planes only); floor and ceiling come later,
+    # as height levels inside the walls.
     found = []
     for _ in range(args.max_walls + 2):
         active = np.where(remaining)[0]
@@ -255,13 +291,10 @@ def main():
             break
         normal, d, mask = ransac_plane(
             P[active], threshold, rng=rng,
-            normals=N[active] if N is not None else None)
-        if mask.sum() < len(P) * 0.02:
+            normals=N[active] if N is not None else None, max_abs_up=0.35)
+        if normal is None or mask.sum() < len(P) * 0.02:
             break
-        vertical = abs(normal[2])
-        kind = "floor_or_ceiling" if vertical > 0.85 else (
-            "wall" if vertical < 0.35 else "slanted")
-        found.append({"normal": normal, "idx": active[mask], "kind": kind})
+        found.append({"normal": normal, "idx": active[mask], "kind": "wall"})
         remaining[active[mask]] = False
 
     # One wall found twice, or a wardrobe front standing beside it: keep the
@@ -303,6 +336,36 @@ def main():
         wall_axis = np.array([1.0, 0.0, 0.0])
         print(f"turned the scene {np.degrees(angle):.1f} deg to line up with the walls")
 
+    walls_found = [f for f in found if f["kind"] == "wall"]
+    inside = np.ones(len(P), bool)
+    if len(walls_found) >= 2:
+        wall_xy = P[np.concatenate([f["idx"] for f in walls_found]), :2]
+        lo, hi = np.percentile(wall_xy, [1, 99], axis=0)
+        if np.all(hi - lo > extent * 0.05):
+            inside = np.all((P[:, :2] >= lo) & (P[:, :2] <= hi), axis=1)
+    cos_level = np.cos(np.radians(LEVEL_NORMAL_DEGREES))
+    faces = {"floor": N[:, 2] > cos_level if N is not None else np.ones(len(P), bool),
+             "ceiling": N[:, 2] < -cos_level if N is not None else np.ones(len(P), bool)}
+    levels = {}
+    for level in ("floor", "ceiling"):
+        pool = np.where(remaining & inside & faces[level])[0]
+        height = find_level(P[pool, 2], threshold, lowest=level == "floor") \
+            if len(pool) else None
+        if height is None:
+            continue
+        if level == "ceiling" and "floor" in levels:
+            min_height = (MIN_CEILING_METRES * units_per_metre if units_per_metre
+                          else MIN_CEILING_FRAC * extent)
+            if height - levels["floor"] < min_height:
+                continue  # a table or bed top, not the ceiling
+        idx = pool[np.abs(P[pool, 2] - height) < threshold]
+        levels[level] = height
+        found.append({"normal": np.array([0.0, 0.0, 1.0]), "idx": idx,
+                      "kind": "floor_or_ceiling", "level": level})
+        remaining[idx] = False
+        shown = f"{height / units_per_metre:.2f} m" if units_per_metre else f"{height:.2f}"
+        print(f"  {level} level at z = {shown} ({len(idx):,} pts inside the walls)")
+
     for f in found:
         normal, idx, kind = f["normal"], f["idx"], f["kind"]
         vertical = abs(normal[2])
@@ -328,6 +391,7 @@ def main():
             "axis_a": a.tolist(), "axis_b": b.tolist(),
             "half_a": float(half[0]), "half_b": float(half[1]),
             "points": int(len(idx)), "color": color.astype(int).tolist(),
+            **({"level": f["level"]} if "level" in f else {}),
         })
         print(f"  plane: {kind}, {len(idx):,} pts, "
               f"{2*half[0]:.1f} x {2*half[1]:.1f} units")
