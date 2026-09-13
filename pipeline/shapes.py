@@ -280,13 +280,20 @@ def main():
         print(f"leaving out {int(hanging.sum()):,} curtain points")
 
     if N is not None:
-        # Trust the cloud's normals only if they agree with the geometry: fit
-        # the dominant plane from positions alone and check its inliers.
-        n0, _, m0 = ransac_plane(P, threshold, rng=np.random.default_rng(3))
-        agreement = float(np.median(np.abs(N[m0] @ n0)))
+        # Trust the cloud's normals only if they agree with the geometry. Each
+        # sampled point's normal is compared with the surface its neighbours
+        # span. (Checking against one dominant plane instead failed on a good
+        # Colab cloud: the plane landed across furniture and scored 0.65.)
+        from scipy.spatial import cKDTree
+
+        sample = np.random.default_rng(3).choice(len(P), min(3000, len(P)), replace=False)
+        _, neighbours = cKDTree(P).query(P[sample], k=24)
+        local = P[neighbours] - P[neighbours].mean(axis=1, keepdims=True)
+        surface = np.linalg.svd(local, full_matrices=False)[2][:, 2, :]
+        agreement = float(np.median(np.abs(np.einsum("ij,ij->i", surface, N[sample]))))
         if agreement <= 0.8:
             N = None
-        print(f"normal agreement on the dominant plane: {agreement:.2f} "
+        print(f"normal agreement with the local surface: {agreement:.2f} "
               f"({'using' if N is not None else 'ignoring'} normals)")
     shapes = {"up": up.tolist(), "world": world.tolist(), "planes": [], "boxes": []}
     rng = np.random.default_rng(7)
