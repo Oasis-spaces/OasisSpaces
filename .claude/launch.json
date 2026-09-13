@@ -4,8 +4,26 @@
     {
       "name": "editor",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8734", "--bind", "127.0.0.1"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8734",
+        "--bind",
+        "127.0.0.1"
+      ],
       "port": 8734
+    },
+    {
+      "name": "site",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8735",
+        "--bind",
+        "127.0.0.1"
+      ],
+      "port": 8735
     }
   ]
 }

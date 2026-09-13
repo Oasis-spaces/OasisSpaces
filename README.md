@@ -4,8 +4,9 @@ Turn photos of any space into an editable 3D point cloud.
 
 **Run it for free:**
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sanskargupta1808/OasisSpaces/blob/main/notebooks/OasisSpaces_Colab.ipynb)
-— reconstruction on Google Colab's free GPU (unlocks the dense step), and the
-editor is hosted free at **https://oasisspaces.onrender.com**.
+— reconstruction on Google Colab's free GPU (unlocks the dense step). The public
+website is hosted free at **https://oasisspaces.onrender.com**, and the editor at
+**https://oasisspaces.onrender.com/editor/**.
 
 The idea (from [OasisSpaces.md](OasisSpaces.md)): capture a space from every
 angle, stitch the images together, and build a cloud of the whole space that
@@ -197,6 +198,7 @@ pipeline/splat_seed.py    OpenSplat project seeded from the dense cloud
 pipeline/pointcloud.py    PLY I/O, voxel downsample, outlier removal (numpy)
 tools/                    shape classifier, Blender room, OpenSplat binary + metallib
 scripts/process_video.sh  the full chain, video -> splat
+index.html, *.js, styles.css   the public website: landing page with 3D previews
 editor/index.html         browser point-cloud editor (Three.js)
 scripts/make_sample.py    synthetic demo room
 spaces/<name>/            one folder per captured space
