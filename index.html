@@ -2,10 +2,295 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="0; url=/editor/">
-<title>OasisSpaces</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oasis-spaces — Film your room once. Redesign it in 3D.</title>
+<meta name="description" content="Film a short walk-through on your phone. Oasis-spaces rebuilds your room in 3D, to scale, so you can move, remove and add furniture, ask for a new look, and see it before you change a thing.">
+<meta property="og:title" content="Oasis-spaces">
+<meta property="og:description" content="Film your room once. Redesign it in 3D.">
+<meta name="theme-color" content="#F1F2ED">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{"imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+}}
+</script>
 </head>
 <body>
-<p>Opening the <a href="/editor/">OasisSpaces editor</a>…</p>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav" id="nav">
+  <div class="wrap nav__row">
+    <a class="wordmark" href="#top" aria-label="Oasis-spaces, home">Oasis<span>-</span>spaces</a>
+    <nav class="nav__links" id="nav-links" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#editor">Editor</a>
+      <a href="#redesign">Redesign</a>
+      <a href="#faq">FAQ</a>
+      <a class="nav__links-cta" href="#suggest">Send a suggestion</a>
+    </nav>
+    <a class="btn btn--ink btn--sm nav__cta" href="#suggest">Send a suggestion</a>
+    <button class="nav__toggle" id="nav-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="nav-links">
+      <span></span><span></span>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" id="top">
+  <div class="wrap hero__grid">
+    <div class="hero__copy">
+      <div class="hero__top reveal">
+        <p class="eyebrow">Room reconstruction &amp; redesign</p>
+        <span class="soon"><span class="dot"></span>Launching soon</span>
+      </div>
+      <h1 class="display reveal-lines">
+        <span class="line"><span>Film your room once.</span></span>
+        <span class="line"><span><em>Redesign it in 3D.</em></span></span>
+      </h1>
+      <p class="lede reveal" style="--d:.25s">Walk through a room with your phone. Oasis-spaces rebuilds it in 3D, to scale, so you can move, remove and add furniture, ask for a new look, and see it before you change a thing.</p>
+      <div class="hero__cta reveal" style="--d:.35s">
+        <a class="btn btn--ink" href="#how">See how it works
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 8h11M9 4l4 4-4 4"/></svg></a>
+        <a class="btn btn--ghost" href="#suggest">Send a suggestion</a>
+      </div>
+      <dl class="hero__facts reveal" style="--d:.5s">
+        <div><dt>Input</dt><dd>A 30–90 second phone video</dd></div>
+        <div><dt>Output</dt><dd>A room model, measured in metres</dd></div>
+        <div><dt>Hardware</dt><dd>None. No LiDAR, no scanner</dd></div>
+      </dl>
+    </div>
+    <div class="hero__stage reveal" style="--d:.2s">
+      <div class="stage" id="hero-stage">
+        <canvas id="hero-canvas" aria-label="A bedroom assembling itself from scanned points"></canvas>
+        <div class="stage__status"><span class="dot"></span><span id="hero-status">Reading frames</span></div>
+        <button class="tool stage__replay" id="hero-replay" type="button">Replay</button>
+      </div>
+      <p class="stage__caption">From the points in your video to a room you can edit. Drag to look around.</p>
+    </div>
+  </div>
+</section>
+
+<section class="how" id="how">
+  <div class="wrap">
+    <div class="section__head">
+      <p class="eyebrow reveal">How it works</p>
+      <h2 class="display-2 reveal" style="--d:.1s">Four steps from a video to a room you can change.</h2>
+    </div>
+    <ol class="steps">
+      <li class="step reveal" style="--d:0s">
+        <span class="step__num">01</span>
+        <h3>Film</h3>
+        <p>Walk slowly around the room with your phone, 30 to 90 seconds, keeping the walls and floor in frame. No special hardware.</p>
+      </li>
+      <li class="step reveal" style="--d:.12s">
+        <span class="step__num">02</span>
+        <h3>Rebuild</h3>
+        <p>We recover where the camera was for every frame, measure depth in metres, and find the walls, the floor and each piece of furniture. The result is to scale, not a guess.</p>
+      </li>
+      <li class="step reveal" style="--d:.24s">
+        <span class="step__num">03</span>
+        <h3>Edit</h3>
+        <p>Drag pieces across the floor, take things out, turn or resize them, and add new ones from the library. Every change stays in proportion to the real room.</p>
+      </li>
+      <li class="step reveal" style="--d:.36s">
+        <span class="step__num">04</span>
+        <h3>Redesign</h3>
+        <p>Ask for a new look. Suggestions are grounded in your room — its size, its light, what already fits — and you can walk through the result before you commit.</p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="editor" id="editor">
+  <div class="wrap editor__grid">
+    <div class="editor__copy">
+      <p class="eyebrow reveal">The editor</p>
+      <h2 class="display-2 reveal" style="--d:.1s">Rearrange the room without lifting a thing.</h2>
+      <p class="body reveal" style="--d:.2s">Select a piece to see its real dimensions. Drag it across the floor, turn it, resize it, or take it out. Add something new from the library. Undo when you change your mind.</p>
+      <ul class="checks reveal" style="--d:.3s">
+        <li>Dimensions in metres, taken from your room</li>
+        <li>Pieces stay on the floor and inside the walls</li>
+        <li>A library of beds, seating, tables, storage, lighting and plants</li>
+      </ul>
+    </div>
+    <div class="editor__stage reveal" style="--d:.15s">
+      <div class="stage stage--tall" id="editor-stage">
+        <canvas id="editor-canvas" aria-label="An editable 3D room"></canvas>
+        <p class="stage__hint" id="editor-hint">Click a piece to select it, then drag it across the floor.</p>
+        <div class="stage__label" id="editor-label" hidden></div>
+        <div class="toolbar" id="editor-toolbar">
+          <button class="tool" type="button" data-act="add">Add</button>
+          <button class="tool" type="button" data-act="rotate" data-needs-selection>Rotate</button>
+          <button class="tool" type="button" data-act="smaller" data-needs-selection aria-label="Smaller">−</button>
+          <button class="tool" type="button" data-act="larger" data-needs-selection aria-label="Larger">+</button>
+          <button class="tool tool--danger" type="button" data-act="remove" data-needs-selection>Remove</button>
+          <button class="tool" type="button" data-act="undo">Undo</button>
+          <div class="toolbar__menu" id="editor-add-menu" hidden>
+            <button class="tool" type="button" data-type="armchair">Armchair</button>
+            <button class="tool" type="button" data-type="sofa">Sofa</button>
+            <button class="tool" type="button" data-type="sidetable">Bedside table</button>
+            <button class="tool" type="button" data-type="desk">Desk</button>
+            <button class="tool" type="button" data-type="chair">Chair</button>
+            <button class="tool" type="button" data-type="shelf">Open shelf</button>
+            <button class="tool" type="button" data-type="wardrobe">Wardrobe</button>
+            <button class="tool" type="button" data-type="lamp">Floor lamp</button>
+            <button class="tool" type="button" data-type="plant">Plant</button>
+            <button class="tool" type="button" data-type="rug">Rug</button>
+          </div>
+        </div>
+      </div>
+      <p class="stage__caption">Interactive preview. The real editor works on the room you filmed.</p>
+    </div>
+  </div>
+</section>
+
+<section class="redesign" id="redesign">
+  <div class="wrap">
+    <div class="section__head section__head--split">
+      <div>
+        <p class="eyebrow reveal">AI redesign</p>
+        <h2 class="display-2 reveal" style="--d:.1s">A second opinion that has seen your room.</h2>
+      </div>
+      <p class="body reveal" style="--d:.2s">Suggestions come from the room you filmed: where the window is, how much floor is free, what already fits. Try one, compare it with the original, keep what you like.</p>
+    </div>
+    <div class="redesign__panel reveal" style="--d:.15s">
+      <div class="stage stage--wide" id="redesign-stage">
+        <canvas id="redesign-canvas" aria-label="The same room, restyled"></canvas>
+        <div class="compare" role="group" aria-label="Compare">
+          <button type="button" data-view="before">Before</button>
+          <button type="button" data-view="after" class="is-on">After</button>
+        </div>
+      </div>
+      <aside class="suggest">
+        <p class="eyebrow">Suggestions for this room</p>
+        <div class="styles" id="redesign-styles">
+          <button class="chip is-on" type="button" data-style="warm">Warm minimal</button>
+          <button class="chip" type="button" data-style="coastal">Coastal</button>
+          <button class="chip" type="button" data-style="japandi">Japandi</button>
+          <button class="chip" type="button" data-style="midcentury">Mid-century</button>
+        </div>
+        <div class="suggest__card">
+          <p class="suggest__title" id="suggest-title">Warm minimal</p>
+          <p id="suggest-text"></p>
+          <ul class="suggest__list" id="suggest-list"></ul>
+        </div>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<section class="promise">
+  <div class="wrap">
+    <p class="eyebrow reveal">What you get</p>
+    <div class="promise__grid">
+      <div class="promise__item reveal" style="--d:0s">
+        <h3>To scale</h3>
+        <p>Dimensions in metres. Walls squared, the floor sized to the room, furniture where it really stands. Measure a wall in the model and it matches the tape.</p>
+      </div>
+      <div class="promise__item reveal" style="--d:.12s">
+        <h3>Two views of one room</h3>
+        <p>A photoreal view for looking around, and a clean model for editing. They line up, because they come from the same video.</p>
+      </div>
+      <div class="promise__item reveal" style="--d:.24s">
+        <h3>Yours to keep</h3>
+        <p>Your video, your room, your model. Export the room model when you are done and use it wherever you like.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="faq" id="faq">
+  <div class="wrap faq__grid">
+    <div>
+      <p class="eyebrow reveal">Questions</p>
+      <h2 class="display-2 reveal" style="--d:.1s">Before you film.</h2>
+    </div>
+    <div class="faq__list reveal" style="--d:.15s">
+      <details open>
+        <summary>What do I need to film?<span class="plus" aria-hidden="true"></span></summary>
+        <div class="answer">A phone, and 30 to 90 seconds. Walk slowly, keep the walls and floor in frame, avoid spinning on the spot, and finish where you started so the ends of the video connect.</div>
+      </details>
+      <details>
+        <summary>Does it work in any room?<span class="plus" aria-hidden="true"></span></summary>
+        <div class="answer">It works best in rooms with some texture and even light. Bare white walls, mirrors and large windows are harder. When a capture is not good enough, we say so and tell you what to film again, rather than hand you a poor model.</div>
+      </details>
+      <details>
+        <summary>How accurate is the model?<span class="plus" aria-hidden="true"></span></summary>
+        <div class="answer">It is measured in metres from your video, so proportions and placement are right and the room is the size it really is. Check any dimension that matters for a purchase with a tape measure before you buy.</div>
+      </details>
+      <details>
+        <summary>What can I add to the room?<span class="plus" aria-hidden="true"></span></summary>
+        <div class="answer">Beds, seating, tables, storage, lighting and plants from the library, placed to scale. The library grows with what people ask for, so if a piece is missing, tell us.</div>
+      </details>
+      <details>
+        <summary>What happens to my video?<span class="plus" aria-hidden="true"></span></summary>
+        <div class="answer">It is used to build your room and for nothing else. You can delete the video and the model whenever you like.</div>
+      </details>
+      <details>
+        <summary>When can I use it?<span class="plus" aria-hidden="true"></span></summary>
+        <div class="answer">Soon. We are finishing the first release now; the previews on this page show what the editor and the redesign will do. If there is something you would want it to handle, tell us in the suggestion box below.</div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section class="contact" id="suggest">
+  <div class="wrap contact__grid">
+    <div>
+      <p class="eyebrow reveal">Launching soon</p>
+      <h2 class="display-2 reveal" style="--d:.1s">Tell us what you would want it to do.</h2>
+      <p class="body reveal" style="--d:.2s">We are finishing the first release. A room type, a piece of furniture, a style, something the editor should handle: every suggestion is read, and the useful ones shape what ships.</p>
+      <p class="contact__direct reveal" style="--d:.3s">Or write to us directly: <a href="mailto:contact@oasis-spaces.info">contact@oasis-spaces.info</a></p>
+    </div>
+    <form class="form reveal" id="suggest-form" style="--d:.15s" novalidate>
+      <div class="field">
+        <label for="f-suggestion">Your suggestion</label>
+        <textarea id="f-suggestion" name="suggestion" rows="5" required placeholder="I would use it for… It should also…"></textarea>
+      </div>
+      <div class="field">
+        <label for="f-email">Your email <span class="field__hint">optional, if you would like a reply</span></label>
+        <input id="f-email" name="email" type="email" autocomplete="email">
+      </div>
+      <div class="form__actions">
+        <button class="btn btn--ink" type="submit">Send suggestion
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 8h11M9 4l4 4-4 4"/></svg></button>
+        <p class="form__note" id="form-note">Opens in your mail app, addressed to contact@oasis-spaces.info.</p>
+      </div>
+      <div class="form__done" id="form-done" hidden>
+        <p class="form__done-title">Thank you.</p>
+        <p>Your mail app should have opened with the suggestion filled in. If it did not, send it to
+          <a href="mailto:contact@oasis-spaces.info">contact@oasis-spaces.info</a>
+          <button class="tool" type="button" id="copy-address">Copy address</button></p>
+      </div>
+    </form>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div>
+      <a class="wordmark" href="#top">Oasis<span>-</span>spaces</a>
+      <p class="foot__tag">Film your room once. Redesign it in 3D.</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href="#how">How it works</a>
+      <a href="#editor">Editor</a>
+      <a href="#redesign">Redesign</a>
+      <a href="#faq">FAQ</a>
+      <a href="#suggest">Suggestions</a>
+      <a href="mailto:contact@oasis-spaces.info">contact@oasis-spaces.info</a>
+    </nav>
+    <small>© 2026 Oasis-spaces · Launching soon</small>
+  </div>
+</footer>
+
+<script type="module" src="main.js"></script>
 </body>
 </html>
