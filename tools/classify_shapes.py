@@ -240,13 +240,70 @@ def place_walls(walls: list[dict], room: dict, floor_z: float, height: float) ->
         })
 
 
-def square_up_room(planes: list[dict], labels: list[str], ctx: RoomContext) -> int:
+# A wall can run on past the room's outermost perpendicular wall, because it
+# lines up with a wall of the next space (the corridor beyond a door) and the
+# plane fit took both. The cameras stood inside the room, so a stretch beyond a
+# crossing wall with (almost) no camera on that side is outside it: cut it off.
+PAST_WALL_MIN_FRAC = 0.10        # a crossing wall this far in from a wall's end (share of its length)
+OUTSIDE_CAMERA_MAX_SHARE = 0.10  # at most this share of the cameras beyond it
+# A wall whose ends end up this close together (share of the room side) after
+# joining and trimming has collapsed: it is not built.
+COLLAPSED_WALL_FRAC = 0.05
+
+
+def trim_past_walls(walls: list[dict], room: dict, cameras: list | None) -> list[str]:
+    """Cut each wall back to its outermost crossing wall on any side the
+    cameras never stood on. Returns notes on what was cut."""
+    if not cameras:
+        return []
+    cams = [to_room(room, c) for c in cameras]
+    notes = []
+    for w in walls:
+        axis = 0 if w["along"] == "u" else 1
+        positions = [c[axis] for c in cams]
+        tol = PAST_WALL_MIN_FRAC * (w["hi"] - w["lo"])
+        crossing = [c["offset"] for c in walls if c["along"] != w["along"]
+                    and w["lo"] + tol < c["offset"] < w["hi"] - tol
+                    and c["lo"] - tol <= w["offset"] <= c["hi"] + tol]
+        if not crossing:
+            continue
+        outer_hi, outer_lo = max(crossing), min(crossing)
+        if sum(x > outer_hi for x in positions) <= OUTSIDE_CAMERA_MAX_SHARE * len(positions):
+            notes.append(("hi", w, w["hi"] - outer_hi))
+            w["hi"] = outer_hi
+        if sum(x < outer_lo for x in positions) <= OUTSIDE_CAMERA_MAX_SHARE * len(positions):
+            notes.append(("lo", w, outer_lo - w["lo"]))
+            w["lo"] = outer_lo
+    return notes
+
+
+def drop_collapsed(walls: list[dict], room: dict) -> list[dict]:
+    """Mark walls that joined down to (almost) nothing as not built; return the rest."""
+    kept = []
+    for w in walls:
+        side = 2 * (room["half_u"] if w["along"] == "u" else room["half_v"])
+        if w["hi"] - w["lo"] < COLLAPSED_WALL_FRAC * side:
+            w["plane"]["build"] = False
+            w["plane"]["reason"] = "collapsed to nothing when its corners were joined"
+        else:
+            kept.append(w)
+    return kept
+
+
+def square_up_room(planes: list[dict], labels: list[str], ctx: RoomContext,
+                   cameras: list | None = None) -> int:
     """Regularise walls the way room scanners do: exactly vertical, along the
     room's axes, spanning floor to room height, with ends meeting the nearest
-    perpendicular wall. Positions across the room stay as measured, and gaps in
-    the middle of a wall (doorways) are left open. Returns walls changed."""
-    walls = room_walls([p for p, lab in zip(planes, labels) if lab == "wall"], ctx.room)
+    perpendicular wall and not running on past the room (trim_past_walls).
+    Positions across the room stay as measured, and gaps in the middle of a
+    wall (doorways) are left open. Returns walls changed."""
+    walls = room_walls([p for p, lab in zip(planes, labels)
+                        if lab == "wall" and p.get("build", True)], ctx.room)
     join_corners(walls, ctx.room)
+    for end, w, cut in trim_past_walls(walls, ctx.room, cameras):
+        print(f"cut {cut:.2f} units off a wall's {end} end: it ran on past the room, "
+              "away from every camera")
+    walls = drop_collapsed(walls, ctx.room)
     place_walls(walls, ctx.room, ctx.floor_z, ctx.room_height)
     return len(walls)
 
@@ -404,6 +461,10 @@ def finish_room(data: dict, units_per_metre: float | None = None) -> list[str]:
         w["index"] = index[id(w["plane"])]
     furniture = [b for _, b in built]
     join_corners(walls, room)
+    for end, w, cut in trim_past_walls(walls, room, data.get("cameras")):
+        notes.append(f"cut {size(cut)} off W{w['index']}: it ran on past the room, "
+                     "where no camera stood")
+    walls = drop_collapsed(walls, room)
     notes += contain_furniture(walls, furniture, room, size)
     join_corners(walls, room)
     before = len(walls)
@@ -747,6 +808,22 @@ def main(argv: list[str] | None = None) -> int:
     boxes = data.get("boxes", [])
 
     plane_labels, plane_reasons, ctx = classify_planes(planes)
+    for plane, label in zip(planes, plane_labels):
+        plane["label"] = label
+    if ctx.room:
+        squared = square_up_room(planes, plane_labels, ctx, data.get("cameras"))
+        # Re-measure the footprint from the squared walls so the floor meets
+        # them, and judge furniture against that room rather than the raw one.
+        room = room_footprint([p for p, lab in zip(planes, plane_labels)
+                               if lab == "wall" and p.get("build", True)]) or ctx.room
+        for plane, label in zip(planes, plane_labels):
+            if label in ("floor", "ceiling"):
+                fit_plane_to_room(plane, room)
+        ctx.room = room
+        ctx.floor_area = 4.0 * room["half_u"] * room["half_v"]
+        data["room"] = room
+        print(f"squared up {squared} wall(s) to the room's axes and joined their corners; "
+              f"floor sized to the {2 * room['half_u']:.2f} x {2 * room['half_v']:.2f} footprint")
     box_results = []
     for box in boxes:
         label, why, metrics = classify_box(box, ctx)
@@ -770,19 +847,6 @@ def main(argv: list[str] | None = None) -> int:
                 why = f"detected as {detected}"
         box_results.append((label, why, metrics))
 
-    for plane, label in zip(planes, plane_labels):
-        plane["label"] = label
-    if ctx.room:
-        squared = square_up_room(planes, plane_labels, ctx)
-        # Re-measure the footprint from the squared walls so the floor meets them.
-        room = room_footprint([p for p, lab in zip(planes, plane_labels) if lab == "wall"]) \
-            or ctx.room
-        for plane, label in zip(planes, plane_labels):
-            if label in ("floor", "ceiling"):
-                fit_plane_to_room(plane, room)
-        data["room"] = room
-        print(f"squared up {squared} wall(s) to the room's axes and joined their corners; "
-              f"floor sized to the {2 * room['half_u']:.2f} x {2 * room['half_v']:.2f} footprint")
     for box, (label, why, _) in zip(boxes, box_results):
         box["label"] = label
         box["reason"] = why

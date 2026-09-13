@@ -387,6 +387,9 @@ def main():
     if model_dir is not None and (model_dir / "images.bin").exists():
         cams = np.array([-v["R"].T @ v["t"] for v in
                          read_images_bin(model_dir / "images.bin").values()]) @ world.T
+        # Where the phone stood, seen from above: the cameras are inside the
+        # room, so the classifier can tell a room's side of a wall from the other.
+        shapes["cameras"] = np.round(cams[:, :2], 4).tolist()
         near, far = ((FRONT_MIN_METRES * units_per_metre, FRONT_MAX_METRES * units_per_metre)
                      if units_per_metre else (FRONT_MIN_FRAC * extent, FRONT_MAX_FRAC * extent))
         not_hanging = ~np.isin(point_labels, hanging_ids) \

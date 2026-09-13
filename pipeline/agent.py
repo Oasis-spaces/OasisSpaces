@@ -78,6 +78,13 @@ NOISY_WALL_RMS_PCT = 1.5
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 
+def problem_text(problem) -> str:
+    """A render-check problem as text: a plain phrase, or {what, severity}."""
+    if isinstance(problem, dict):
+        return f"{problem.get('what', '?')} ({problem.get('severity', 'unrated')})"
+    return str(problem)
+
+
 class Agent:
     def __init__(self, source: Path, name: str, fps: float, do_splat: bool,
                  allow_retry: bool = True, use_claude: bool = True):
@@ -425,9 +432,16 @@ class Agent:
             "plausibly: walls upright and meeting sensibly, furniture on the floor "
             "at a believable size and place, nothing floating or cutting through "
             "walls. List what is missing separately from what is wrong.\n"
-            'Fields: {"plausible": boolean, "problems": array of short phrases '
-            '(things that are wrong), "missing": array of short phrases (not '
-            'captured), "advice": array of short instructions for the next capture}')
+            "Grade every problem. structural: the room itself is wrong - a wall "
+            "standing free or ending in open floor, walls not meeting, the floor or "
+            "ceiling running past the walls, the room far too big or small for the "
+            "video, furniture floating, sunk into the floor or cutting through a wall. "
+            "minor: everything else, such as furniture proportions or placement "
+            "details. A room with any structural problem is not plausible.\n"
+            'Fields: {"plausible": boolean, "problems": array of {"what": short '
+            'phrase, "severity": "structural" or "minor"} (things that are wrong), '
+            '"missing": array of short phrases (not captured), "advice": array of '
+            'short instructions for the next capture}')
         images = [render] + ([plan] if plan.exists() else []) + self.room_frames(1)
         verdict = self.advisor.ask_json(prompt, images)
         if not verdict:
@@ -436,7 +450,7 @@ class Agent:
             return
         self.judged("blender", verdict,
                     ("plausible room" if verdict.get("plausible") else "not a plausible room")
-                    + (f" - wrong: {', '.join(verdict.get('problems', [])[:3])}"
+                    + (f" - wrong: {', '.join(problem_text(p) for p in verdict['problems'][:3])}"
                        if verdict.get("problems") else "")
                     + (f"; missing: {', '.join(verdict.get('missing', [])[:3])}"
                        if verdict.get("missing") else ""))
@@ -719,9 +733,15 @@ class Agent:
                 return "warn", ("Claude's " + " and ".join(unchecked) + " gave no answer"
                                 + (f" ({self.advisor.reason})" if self.advisor.reason else "")
                                 + ", so the built room was not checked")
-            if verdict is not None and verdict.get("plausible") is False:
-                return "warn", ("Claude judged the built room implausible: "
-                                + ", ".join(verdict.get("problems", [])[:3]))
+            if verdict is not None:
+                structural = [p for p in verdict.get("problems") or []
+                              if isinstance(p, dict) and p.get("severity") == "structural"]
+                # Claude may call a room plausible and still list a free-standing
+                # wall; a structural problem warns whatever the yes/no says.
+                if verdict.get("plausible") is False or structural:
+                    shown = structural or verdict.get("problems") or []
+                    return "warn", ("Claude found the built room wrong: "
+                                    + ", ".join(problem_text(p) for p in shown[:3]))
             if s["walls"] < 2:
                 return "warn", f"only {s['walls']} wall(s) found"
             if not s["objects"]:

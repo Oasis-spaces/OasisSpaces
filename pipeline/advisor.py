@@ -9,11 +9,15 @@ agent.py asks those here, and keeps its numeric guards as the safety net, so
 an opinion never overrides a measurement.
 
 Backends, tried in order:
-  1. the `claude` CLI in headless mode, which uses your existing Claude login
+  1. a relay, when OASIS_CLAUDE_RELAY names a folder: the question and the
+     paths of its images are written there, and tools/claude_relay.py on
+     another machine with a `claude` login answers it. This is how a pipeline
+     on a Colab GPU gets Claude's checks without an API key;
+  2. the `claude` CLI in headless mode, which uses your existing Claude login
      and needs no API key (run `claude login` once if the session expired);
-  2. the Anthropic API, when the `anthropic` SDK is installed and a key is in
+  3. the Anthropic API, when the `anthropic` SDK is installed and a key is in
      the environment;
-  3. offline: no model, so callers fall back to their own rules.
+  4. offline: no model, so callers fall back to their own rules.
 
 Standalone check:
     python3 pipeline/advisor.py [image ...]
@@ -27,9 +31,15 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
 MODEL = "claude-opus-5"
+RELAY_ENV = "OASIS_CLAUDE_RELAY"
+# A relayed question waits for downloads on the other machine plus Claude's
+# own answer, so it gets far longer than a local call.
+RELAY_WAIT_SECONDS = 900
 
 
 class Advisor:
@@ -49,6 +59,8 @@ class Advisor:
         return self.backend != "offline"
 
     def _pick_backend(self) -> str:
+        if os.getenv(RELAY_ENV):
+            return "relay"
         if shutil.which("claude"):
             return "cli"
         if importlib.util.find_spec("anthropic") and (
@@ -85,6 +97,36 @@ class Advisor:
             return None
         return payload.get("result")
 
+    def _ask_relay(self, prompt: str, images: list[Path]) -> str | None:
+        """Leave the question in the relay folder and wait for the answer that
+        tools/claude_relay.py uploads: requests/<id>.json in, responses/<id>.json out."""
+        root = Path(os.environ[RELAY_ENV])
+        (root / "requests").mkdir(parents=True, exist_ok=True)
+        (root / "responses").mkdir(parents=True, exist_ok=True)
+        name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.json"
+        request = {"prompt": prompt, "model": self.model,
+                   "images": [str(p.resolve()) for p in images]}
+        pending = root / "requests" / f".{name}.tmp"
+        pending.write_text(json.dumps(request))
+        pending.rename(root / "requests" / name)  # appears whole, never half-written
+        answer = root / "responses" / name
+        deadline = time.time() + RELAY_WAIT_SECONDS
+        while time.time() < deadline:
+            if answer.exists():
+                try:
+                    reply = json.loads(answer.read_text())
+                except json.JSONDecodeError:
+                    time.sleep(1)  # still arriving
+                    continue
+                if reply.get("error"):
+                    self._disable(f"relay: {reply['error']}")
+                    return None
+                return reply.get("result")
+            time.sleep(2)
+        self._disable(f"no answer from the Claude relay within {RELAY_WAIT_SECONDS}s "
+                      "(is tools/claude_relay.py running?)")
+        return None
+
     def _ask_api(self, prompt: str, images: list[Path], max_tokens: int) -> str | None:
         import base64
         import mimetypes
@@ -120,8 +162,12 @@ class Advisor:
         if not self.available:
             return None
         paths = [Path(p) for p in images if Path(p).exists()]
-        answer = (self._ask_cli(prompt, paths) if self.backend == "cli"
-                  else self._ask_api(prompt, paths, max_tokens))
+        if self.backend == "relay":
+            answer = self._ask_relay(prompt, paths)
+        elif self.backend == "cli":
+            answer = self._ask_cli(prompt, paths)
+        else:
+            answer = self._ask_api(prompt, paths, max_tokens)
         if answer:
             self.calls += 1
         return answer
