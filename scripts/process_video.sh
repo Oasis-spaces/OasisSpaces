@@ -29,13 +29,9 @@ echo "=== [5/6] Blender scene ==="
     | grep -E "saved|rendered" || true
 
 echo "=== [6/6] Gaussian splat ==="
-BEST=$(ls -S "$SPACE"/workspace/sparse/*/points3D.bin | head -1 | xargs dirname)
-echo "splat seed model: $BEST"
-rm -rf "$SPACE/splat-project" && mkdir -p "$SPACE/splat-project"
-ln -s "$PWD/$BEST/cameras.bin" "$PWD/$BEST/images.bin" "$PWD/$BEST/points3D.bin" \
-      "$SPACE/splat-project/"
-ln -s "$PWD/$SPACE/workspace/images" "$SPACE/splat-project/images"
+python3 pipeline/splat_seed.py "$SPACE"
 tools/opensplat "$SPACE/splat-project" -n 10000 -d 4 \
     -o "$PWD/$SPACE/splat.ply" | tail -3
+python3 pipeline/splat_export.py "$SPACE/splat.ply"
 
-echo "CHAIN DONE: $SPACE (cloud.ply, cloud-dense.ply, room.blend, splat.ply)"
+echo "CHAIN DONE: $SPACE (cloud.ply, cloud-dense.ply, room.blend, splat.ply, splat.splat)"

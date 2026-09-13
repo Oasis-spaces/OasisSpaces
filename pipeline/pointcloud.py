@@ -29,9 +29,25 @@ _PLY_TYPES = {
 class PointCloud:
     points: np.ndarray  # (N, 3) float32
     colors: np.ndarray  # (N, 3) uint8
+    normals: np.ndarray | None = None  # (N, 3) float32 unit vectors, if known
+    labels: np.ndarray | None = None  # (N,) uint8 index into label_names
+    label_names: list[str] | None = None  # index 0 is always "unlabelled"
 
     def __len__(self) -> int:
         return len(self.points)
+
+    def subset(self, keep: np.ndarray) -> PointCloud:
+        """The points picked by a boolean mask or index array."""
+        return PointCloud(self.points[keep], self.colors[keep],
+                          None if self.normals is None else self.normals[keep],
+                          None if self.labels is None else self.labels[keep],
+                          self.label_names)
+
+    def points_labelled(self, name: str) -> np.ndarray:
+        """Boolean mask of the points carrying this label."""
+        if self.labels is None or not self.label_names or name not in self.label_names:
+            return np.zeros(len(self), bool)
+        return self.labels == self.label_names.index(name)
 
 
 def load_ply(path: str | Path) -> PointCloud:
@@ -43,13 +59,20 @@ def load_ply(path: str | Path) -> PointCloud:
         fmt = None
         vertex_count = 0
         properties: list[tuple[str, str]] = []  # (name, numpy dtype code)
+        label_names: list[str] | None = None
         in_vertex_element = False
         while True:
             line = f.readline()
             if not line:
                 raise ValueError(f"{path}: unexpected end of header")
             tokens = line.decode("ascii", "replace").strip().split()
-            if not tokens or tokens[0] == "comment":
+            if not tokens:
+                continue
+            if tokens[0] == "comment":
+                if len(tokens) > 2 and tokens[1] == "label_names":
+                    # Names can contain spaces ("chest of drawers"), so the
+                    # rest of the line is one comma-separated list.
+                    label_names = " ".join(tokens[2:]).split(",")
                 continue
             if tokens[0] == "format":
                 fmt = tokens[1]
@@ -88,29 +111,45 @@ def load_ply(path: str | Path) -> PointCloud:
             colors = colors.astype(np.uint8)
     else:
         colors = np.full((len(points), 3), 180, dtype=np.uint8)
-    return PointCloud(points, colors)
+    normals = None
+    if "nx" in columns:
+        normals = np.column_stack(
+            [columns["nx"], columns["ny"], columns["nz"]]
+        ).astype(np.float32)
+    labels = columns["label"].astype(np.uint8) if "label" in columns else None
+    return PointCloud(points, colors, normals, labels, label_names)
 
 
 def save_ply(cloud: PointCloud, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")]
+    if cloud.normals is not None:
+        fields += [("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4")]
+    fields += [("red", "u1"), ("green", "u1"), ("blue", "u1")]
+    if cloud.labels is not None:
+        fields += [("label", "u1")]
+    names_comment = (f"comment label_names {','.join(cloud.label_names)}\n"
+                     if cloud.labels is not None and cloud.label_names else "")
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
         f"element vertex {len(cloud)}\n"
-        "property float x\nproperty float y\nproperty float z\n"
-        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
-        "end_header\n"
+        + names_comment
+        + "".join(f"property {'float' if kind == '<f4' else 'uchar'} {name}\n"
+                  for name, kind in fields)
+        + "end_header\n"
     )
-    record = np.dtype(
-        [("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
-         ("red", "u1"), ("green", "u1"), ("blue", "u1")]
-    )
-    data = np.empty(len(cloud), dtype=record)
+    data = np.empty(len(cloud), dtype=np.dtype(fields))
     points = cloud.points.astype(np.float32)
     data["x"], data["y"], data["z"] = points[:, 0], points[:, 1], points[:, 2]
+    if cloud.normals is not None:
+        normals = cloud.normals.astype(np.float32)
+        data["nx"], data["ny"], data["nz"] = normals[:, 0], normals[:, 1], normals[:, 2]
     colors = cloud.colors.astype(np.uint8)
     data["red"], data["green"], data["blue"] = colors[:, 0], colors[:, 1], colors[:, 2]
+    if cloud.labels is not None:
+        data["label"] = cloud.labels.astype(np.uint8)
     with open(path, "wb") as f:
         f.write(header.encode("ascii"))
         f.write(data.tobytes())
@@ -128,7 +167,7 @@ def trim_far_points(cloud: PointCloud, factor: float = 10.0) -> PointCloud:
     if cutoff <= 0:
         return cloud
     keep = dist <= cutoff
-    return PointCloud(cloud.points[keep], cloud.colors[keep])
+    return cloud.subset(keep)
 
 
 def _voxel_indices(points: np.ndarray, voxel_size: float) -> np.ndarray:
@@ -144,7 +183,7 @@ def voxel_downsample(cloud: PointCloud, voxel_size: float) -> PointCloud:
         return cloud
     keys = _voxel_indices(cloud.points, voxel_size)
     _, keep = np.unique(keys, return_index=True)
-    return PointCloud(cloud.points[keep], cloud.colors[keep])
+    return cloud.subset(keep)
 
 
 def remove_outliers(
@@ -178,4 +217,4 @@ def remove_outliers(
                 neighbor_counts[hit] += counts[pos_clipped[hit]]
 
     keep = (neighbor_counts[inverse] - 1) >= min_neighbors
-    return PointCloud(cloud.points[keep], cloud.colors[keep])
+    return cloud.subset(keep)

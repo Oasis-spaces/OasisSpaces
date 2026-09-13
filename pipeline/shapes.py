@@ -5,7 +5,8 @@ Detects the geometric structure of a reconstructed space and regenerates
 it as clean parametric shapes:
 
   1. Estimate the up direction from the solved camera poses.
-  2. RANSAC plane detection -> floor and walls.
+  2. RANSAC plane detection -> walls; floor and ceiling as height levels
+     inside the walls.
   3. Cluster the remaining points -> furniture volumes (oriented boxes).
   4. Emit shapes.json (parameters) — the Blender builder
      (tools/blender_room.py) turns it into an editable .blend scene.
@@ -25,7 +26,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+from densify import read_images_bin
 from pointcloud import load_ply
+from semantics import FURNITURE, HANGING
 
 
 def read_camera_rotations(path):
@@ -58,8 +61,20 @@ def estimate_up(model_dir: Path) -> np.ndarray:
     return up / np.linalg.norm(up)
 
 
-def ransac_plane(points, threshold, iterations=400, rng=None):
+def ransac_plane(points, threshold, iterations=400, rng=None, normals=None,
+                 min_cos=0.85, max_abs_up=None):
+    """Plane with the most inliers. Given per-point normals, an inlier must
+    also face the plane's way (within ~30°), so a plane stops counting the
+    furniture it slices through. With max_abs_up, only planes whose normal's
+    up component stays below it are tried (0.35: walls only)."""
     rng = rng or np.random.default_rng(0)
+
+    def inliers(normal, d):
+        mask = np.abs(points @ normal + d) < threshold
+        if normals is not None:
+            mask &= np.abs(normals @ normal) > min_cos
+        return mask
+
     best_inliers, best = 0, None
     for _ in range(iterations):
         sample = points[rng.choice(len(points), 3, replace=False)]
@@ -68,27 +83,107 @@ def ransac_plane(points, threshold, iterations=400, rng=None):
         if norm < 1e-9:
             continue
         normal = normal / norm
+        if max_abs_up is not None and abs(normal[2]) > max_abs_up:
+            continue
         d = -normal @ sample[0]
-        distance = np.abs(points @ normal + d)
-        inliers = int((distance < threshold).sum())
-        if inliers > best_inliers:
-            best_inliers, best = inliers, (normal, d)
+        count = int(inliers(normal, d).sum())
+        if count > best_inliers:
+            best_inliers, best = count, (normal, d)
+    if best is None:
+        return None, None, np.zeros(len(points), bool)
     normal, d = best
-    mask = np.abs(points @ normal + d) < threshold
+    mask = inliers(normal, d)
     # refine with least squares on inliers
     inlier_pts = points[mask]
     centroid = inlier_pts.mean(axis=0)
     _, _, Vt = np.linalg.svd(inlier_pts - centroid, full_matrices=False)
     normal = Vt[2]
     d = -normal @ centroid
-    mask = np.abs(points @ normal + d) < threshold
+    mask = inliers(normal, d)
     return normal, d, mask
 
 
-def oriented_rect(points_2d):
-    """Tight rectangle (center, axes 2x2, half-sizes) around 2D points."""
-    lo, hi = np.percentile(points_2d, [1, 99], axis=0)
+# Walls this close to parallel, this near each other (metres, or 3% of the
+# scene without a metric scale) and overlapping along their length are one
+# wall found twice, or a wardrobe front beside it.
+WALL_MERGE_DEGREES = 10.0
+WALL_MERGE_METRES = 0.30
+
+
+# Floor and ceiling are found as height levels, not by RANSAC: a pan often
+# sees only a strip of the room's floor, and a plane fitter then prefers a
+# tilted plane joining it to a lower corridor floor seen through the door.
+# A level is a peak in the heights of points facing up (floor) or down
+# (ceiling) inside the walls, holding at least LEVEL_MIN_SHARE of them.
+LEVEL_NORMAL_DEGREES = 20.0
+LEVEL_MIN_SHARE = 0.10
+MIN_CEILING_METRES = 1.8   # or MIN_CEILING_FRAC of the scene without a scale
+MIN_CEILING_FRAC = 0.30
+
+
+# A wall can be the front of built-in furniture: a wardrobe along a wall shows
+# its doors as one flat plane, and the room's real wall (or the wardrobe's back,
+# seen through an open section) stands a little behind it. Each wall records
+# a flat surface this far behind it, away from the cameras, when there is
+# enough of one; Claude's structure review then decides from the frames whether
+# the wall is a furniture front (pipeline/agent.py). Nearer than the minimum is
+# skirting or curtains; a room seen through a doorway is further than the max.
+FRONT_MIN_METRES, FRONT_MAX_METRES = 0.25, 0.90
+FRONT_MIN_FRAC, FRONT_MAX_FRAC = 0.03, 0.12   # of the scene, without a metric scale
+FRONT_MIN_SHARE = 0.15   # points on the surface behind, as a share of the wall's own
+FRONT_MIN_SPAN = 0.30    # share of the wall's length the surface behind covers
+
+
+def find_level(heights, bin_width, lowest):
+    """Height of the lowest (or highest) well-populated level, or None."""
+    if len(heights) < 1000:
+        return None
+    edges = np.arange(heights.min(), heights.max() + bin_width, bin_width)
+    if len(edges) < 2:
+        return float(np.median(heights))
+    counts, _ = np.histogram(heights, edges)
+    near = np.convolve(counts, [1, 1, 1], mode="same")  # a level may straddle two bins
+    peaks = np.where(near >= LEVEL_MIN_SHARE * len(heights))[0]
+    if len(peaks) == 0:
+        return None
+    k = peaks[0] if lowest else peaks[-1]
+    lo, hi = edges[max(k - 1, 0)], edges[min(k + 2, len(edges) - 1)]
+    return float(np.median(heights[(heights >= lo) & (heights <= hi)]))
+
+
+def oriented_rect(points_2d, trim=1.0):
+    """Rectangle (center, half-sizes) around 2D points, ignoring the outer
+    `trim` percent on each side."""
+    lo, hi = np.percentile(points_2d, [trim, 100 - trim], axis=0)
     return (lo + hi) / 2, (hi - lo) / 2
+
+
+def along_wall(normal):
+    """Horizontal direction running along a wall."""
+    a = np.cross(normal, [0, 0, 1.0])
+    return a / np.linalg.norm(a) if np.linalg.norm(a) > 1e-6 else np.array([1.0, 0, 0])
+
+
+def overlapping(P, wall, other):
+    """Do two walls share part of their length?"""
+    a = along_wall(wall["normal"])
+    lo1, hi1 = np.percentile(P[wall["idx"]] @ a, [5, 95])
+    lo2, hi2 = np.percentile(P[other["idx"]] @ a, [5, 95])
+    return max(lo1, lo2) < min(hi1, hi2)
+
+
+def dominant_wall_axis(walls):
+    """The room's main horizontal direction: wall directions folded to 90
+    degrees and averaged, weighted by points, so floors can line up with it."""
+    if not walls:
+        return None
+    total = np.zeros(2)
+    for w in walls:
+        a = along_wall(w["normal"])
+        angle = np.arctan2(a[1], a[0])
+        total += len(w["idx"]) * np.array([np.cos(4 * angle), np.sin(4 * angle)])
+    angle = np.arctan2(total[1], total[0]) / 4
+    return np.array([np.cos(angle), np.sin(angle), 0.0])
 
 
 def cluster_grid(points, cell):
@@ -137,16 +232,19 @@ def main():
 
     # cap points for speed
     if len(cloud) > 800_000:
-        pick = np.random.default_rng(0).choice(len(cloud), 800_000, replace=False)
-        pts, cols = cloud.points[pick].astype(np.float64), cloud.colors[pick]
-    else:
-        pts, cols = cloud.points.astype(np.float64), cloud.colors
+        cloud = cloud.subset(
+            np.random.default_rng(0).choice(len(cloud), 800_000, replace=False))
+    pts, cols = cloud.points.astype(np.float64), cloud.colors
 
     sparse_dir = space / "workspace" / "sparse"
-    if sparse_dir.exists():
-        models = sorted(sparse_dir.iterdir())
-        up = estimate_up(models[-1] if len(models) == 1 else
-                         max(models, key=lambda d: (d / "points3D.bin").stat().st_size))
+    models = [d for d in sparse_dir.iterdir() if (d / "points3D.bin").exists()] \
+        if sparse_dir.exists() else []
+    densify_meta = space / "densify.json"
+    if densify_meta.exists():
+        # The dense cloud lives in the frame of the model densify used.
+        up = estimate_up(Path(json.loads(densify_meta.read_text())["model_dir"]))
+    elif models:
+        up = estimate_up(max(models, key=lambda d: (d / "points3D.bin").stat().st_size))
     else:
         up = np.array([0.0, 0.0, 1.0])  # no camera solve: assume Z-up
     print(f"up vector: {np.round(up, 3)}")
@@ -160,63 +258,237 @@ def main():
     y = np.cross(z, x)
     world = np.stack([x, y, z])
     P = pts @ world.T
+    N = cloud.normals.astype(np.float64) @ world.T if cloud.normals is not None else None
 
     extent = np.linalg.norm(np.percentile(P, 98, 0) - np.percentile(P, 2, 0))
     threshold = extent * 0.012
     remaining = np.ones(len(P), bool)
+    point_labels = cloud.labels
+    names = cloud.label_names or []
+    furniture_ids = [names.index(n) for n in FURNITURE if n in names]
+    if point_labels is not None and furniture_ids:
+        detected_points = np.isin(point_labels, furniture_ids)
+        # Detected furniture is neither wall nor floor: keep it out of the
+        # plane fitting, and build boxes from it below.
+        remaining[detected_points] = False
+        print(f"detected furniture on {int(detected_points.sum()):,} points")
+    hanging_ids = [names.index(n) for n in HANGING if n in names]
+    if point_labels is not None and hanging_ids:
+        hanging = np.isin(point_labels, hanging_ids)
+        # Curtains: neither a wall to fit nor furniture to box.
+        remaining[hanging] = False
+        print(f"leaving out {int(hanging.sum()):,} curtain points")
+
+    if N is not None:
+        # Trust the cloud's normals only if they agree with the geometry: fit
+        # the dominant plane from positions alone and check its inliers.
+        n0, _, m0 = ransac_plane(P, threshold, rng=np.random.default_rng(3))
+        agreement = float(np.median(np.abs(N[m0] @ n0)))
+        if agreement <= 0.8:
+            N = None
+        print(f"normal agreement on the dominant plane: {agreement:.2f} "
+              f"({'using' if N is not None else 'ignoring'} normals)")
     shapes = {"up": up.tolist(), "world": world.tolist(), "planes": [], "boxes": []}
     rng = np.random.default_rng(7)
+    units_per_metre = None
+    if densify_meta.exists():
+        units_per_metre = json.loads(densify_meta.read_text()).get("colmap_units_per_metre")
+    merge_distance = (WALL_MERGE_METRES * units_per_metre if units_per_metre
+                      else extent * 0.03)
 
+    # Walls by RANSAC (vertical planes only); floor and ceiling come later,
+    # as height levels inside the walls.
+    found = []
     for _ in range(args.max_walls + 2):
         active = np.where(remaining)[0]
         if len(active) < 5000:
             break
-        normal, d, mask = ransac_plane(P[active], threshold, rng=rng)
-        if mask.sum() < len(P) * 0.02:
+        normal, d, mask = ransac_plane(
+            P[active], threshold, rng=rng,
+            normals=N[active] if N is not None else None, max_abs_up=0.35)
+        if normal is None or mask.sum() < len(P) * 0.02:
             break
-        idx = active[mask]
+        found.append({"normal": normal, "idx": active[mask], "kind": "wall"})
+        remaining[active[mask]] = False
+
+    # One wall found twice, or a wardrobe front standing beside it: keep the
+    # plane with more points; the other's points return to the leftovers.
+    walls = sorted((f for f in found if f["kind"] == "wall"), key=lambda f: -len(f["idx"]))
+    for i, keep in enumerate(walls):
+        if keep.get("merged"):
+            continue
+        for other in walls[i + 1:]:
+            if other.get("merged"):
+                continue
+            if abs(keep["normal"] @ other["normal"]) < np.cos(np.radians(WALL_MERGE_DEGREES)):
+                continue
+            gap = abs(np.median((P[other["idx"]] - P[keep["idx"]].mean(axis=0)) @ keep["normal"]))
+            if gap > merge_distance or not overlapping(P, keep, other):
+                continue
+            other["merged"] = True
+            remaining[other["idx"]] = True
+            shown = f"{gap / units_per_metre:.2f} m" if units_per_metre else f"{gap:.2f} units"
+            print(f"  merged a duplicate wall ({len(other['idx']):,} pts, {shown} "
+                  f"from a larger one)")
+    found = [f for f in found if not f.get("merged")]
+    wall_axis = dominant_wall_axis([f for f in found if f["kind"] == "wall"])
+    if wall_axis is not None:
+        # Turn the scene about the vertical so the room's main wall direction
+        # runs along +x. Walls, floor and furniture boxes (which are built along
+        # the x/y axes) then all share the room's orientation. A pure rotation:
+        # nothing is re-measured.
+        angle = float(np.arctan2(wall_axis[1], wall_axis[0]))
+        cos_t, sin_t = np.cos(angle), np.sin(angle)
+        turn = np.array([[cos_t, sin_t, 0.0], [-sin_t, cos_t, 0.0], [0.0, 0.0, 1.0]])
+        P = P @ turn.T
+        if N is not None:
+            N = N @ turn.T
+        for f in found:
+            f["normal"] = turn @ f["normal"]
+        world = turn @ world
+        shapes["world"] = world.tolist()
+        wall_axis = np.array([1.0, 0.0, 0.0])
+        print(f"turned the scene {np.degrees(angle):.1f} deg to line up with the walls")
+
+    walls_found = [f for f in found if f["kind"] == "wall"]
+    inside = np.ones(len(P), bool)
+    if len(walls_found) >= 2:
+        wall_xy = P[np.concatenate([f["idx"] for f in walls_found]), :2]
+        lo, hi = np.percentile(wall_xy, [1, 99], axis=0)
+        if np.all(hi - lo > extent * 0.05):
+            inside = np.all((P[:, :2] >= lo) & (P[:, :2] <= hi), axis=1)
+    cos_level = np.cos(np.radians(LEVEL_NORMAL_DEGREES))
+    faces = {"floor": N[:, 2] > cos_level if N is not None else np.ones(len(P), bool),
+             "ceiling": N[:, 2] < -cos_level if N is not None else np.ones(len(P), bool)}
+    levels = {}
+    for level in ("floor", "ceiling"):
+        pool = np.where(remaining & inside & faces[level])[0]
+        height = find_level(P[pool, 2], threshold, lowest=level == "floor") \
+            if len(pool) else None
+        if height is None:
+            continue
+        if level == "ceiling" and "floor" in levels:
+            min_height = (MIN_CEILING_METRES * units_per_metre if units_per_metre
+                          else MIN_CEILING_FRAC * extent)
+            if height - levels["floor"] < min_height:
+                continue  # a table or bed top, not the ceiling
+        idx = pool[np.abs(P[pool, 2] - height) < threshold]
+        levels[level] = height
+        found.append({"normal": np.array([0.0, 0.0, 1.0]), "idx": idx,
+                      "kind": "floor_or_ceiling", "level": level})
+        remaining[idx] = False
+        shown = f"{height / units_per_metre:.2f} m" if units_per_metre else f"{height:.2f}"
+        print(f"  {level} level at z = {shown} ({len(idx):,} pts inside the walls)")
+
+    # What stands behind each wall (see FRONT_MIN_METRES). The cameras are in
+    # the room, so "behind" is the side away from them.
+    model_dir = Path(json.loads(densify_meta.read_text())["model_dir"]) \
+        if densify_meta.exists() else None
+    if model_dir is not None and (model_dir / "images.bin").exists():
+        cams = np.array([-v["R"].T @ v["t"] for v in
+                         read_images_bin(model_dir / "images.bin").values()]) @ world.T
+        near, far = ((FRONT_MIN_METRES * units_per_metre, FRONT_MAX_METRES * units_per_metre)
+                     if units_per_metre else (FRONT_MIN_FRAC * extent, FRONT_MAX_FRAC * extent))
+        not_hanging = ~np.isin(point_labels, hanging_ids) \
+            if point_labels is not None and hanging_ids else np.ones(len(P), bool)
+        for f in (x for x in found if x["kind"] == "wall"):
+            n = f["normal"] / np.linalg.norm(f["normal"])
+            a = along_wall(n)
+            centre = P[f["idx"]].mean(axis=0)
+            side = np.sign(np.median((cams - centre) @ n))
+            if side == 0:
+                continue
+            outward = -side * n
+            t = P @ a
+            lo, hi = np.percentile(t[f["idx"]], [2, 98])
+            depth = (P - centre) @ outward
+            behind = (depth > near) & (depth < far) & (t > lo) & (t < hi) & not_hanging
+            if N is not None:
+                behind &= np.abs(N @ n) > 0.85
+            if behind.sum() < FRONT_MIN_SHARE * len(f["idx"]):
+                continue
+            span_lo, span_hi = np.percentile(t[behind], [5, 95])
+            if span_hi - span_lo < FRONT_MIN_SPAN * (hi - lo):
+                continue
+            back = float(np.percentile(depth[behind], 95))
+            ends = [centre[:2] + (value - centre @ a) * a[:2] for value in (span_lo, span_hi)]
+            f["behind"] = {"depth": back, "points": int(behind.sum()),
+                           "outward": outward[:2].tolist(),
+                           "span_xy": [e.tolist() for e in ends],
+                           "top": float(np.percentile(P[behind, 2], 95))}
+            shown = f"{back / units_per_metre:.2f} m" if units_per_metre else f"{back:.2f}"
+            print(f"  wall with a surface {shown} behind it over "
+                  f"{(span_hi - span_lo) / (hi - lo):.0%} of its length "
+                  f"({int(behind.sum()):,} pts): maybe a furniture front")
+
+    for f in found:
+        normal, idx, kind = f["normal"], f["idx"], f["kind"]
         vertical = abs(normal[2])
-        kind = "floor_or_ceiling" if vertical > 0.85 else (
-            "wall" if vertical < 0.35 else "slanted")
-        # plane frame for the rectangle
         n = normal if normal[2] >= 0 or vertical <= 0.85 else -normal
-        a = np.cross(n, [0, 0, 1.0])
+        # Floors and ceilings take their axes from the walls, so they line up
+        # with the room instead of sitting at an arbitrary angle.
+        if kind == "floor_or_ceiling" and wall_axis is not None:
+            a = wall_axis - n * (wall_axis @ n)
+        else:
+            a = np.cross(n, [0, 0, 1.0])
         if np.linalg.norm(a) < 1e-6:
             a = np.array([1.0, 0.0, 0.0])
         a /= np.linalg.norm(a)
         b = np.cross(n, a)
         uv = np.column_stack([P[idx] @ a, P[idx] @ b])
-        center_uv, half = oriented_rect(uv)
-        center = center_uv[0] * a + center_uv[1] * b - d * n
+        # Floors pick up stray points far from the room; trim harder.
+        center_uv, half = oriented_rect(uv, trim=5.0 if kind == "floor_or_ceiling" else 1.0)
+        offset = float(np.median(P[idx] @ n))
+        center = center_uv[0] * a + center_uv[1] * b + offset * n
         color = cols[idx].mean(axis=0)
         shapes["planes"].append({
             "kind": kind, "normal": n.tolist(), "center": center.tolist(),
             "axis_a": a.tolist(), "axis_b": b.tolist(),
             "half_a": float(half[0]), "half_b": float(half[1]),
-            "points": int(mask.sum()), "color": color.astype(int).tolist(),
+            "points": int(len(idx)), "color": color.astype(int).tolist(),
+            **({"level": f["level"]} if "level" in f else {}),
+            **({"behind": f["behind"]} if "behind" in f else {}),
         })
-        print(f"  plane: {kind}, {mask.sum():,} pts, "
+        print(f"  plane: {kind}, {len(idx):,} pts, "
               f"{2*half[0]:.1f} x {2*half[1]:.1f} units")
-        remaining[idx] = False
 
-    # furniture: cluster what's left
+    def add_box(members, source, detected=None):
+        lo, hi = np.percentile(P[members], [2, 98], axis=0)
+        if np.any(hi - lo < extent * 0.01):
+            return
+        box = {"min": lo.tolist(), "max": hi.tolist(),
+               "points": int(len(members)), "source": source,
+               "color": cols[members].mean(axis=0).astype(int).tolist()}
+        if detected:
+            box["detected"] = detected
+        shapes["boxes"].append(box)
+        print(f"  box ({source}): {detected or 'unlabelled'}, {len(members):,} pts, "
+              f"size {np.round(hi - lo, 1).tolist()}")
+
+    # Detected furniture: one box per object, clustered so that two chairs
+    # side by side do not merge into one.
+    min_points = max(2000, int(len(P) * 0.002))
+    if point_labels is not None:
+        for name in FURNITURE:
+            if name not in names:
+                continue
+            idx = np.where(point_labels == names.index(name))[0]
+            if len(idx) < min_points:
+                continue
+            groups = cluster_grid(P[idx], cell=extent * 0.02)
+            for group in np.unique(groups):
+                members = idx[groups == group]
+                if len(members) >= min_points:
+                    add_box(members, "detected", name)
+
+    # Whatever the planes and the detector left over, grouped geometrically.
     leftover = np.where(remaining)[0]
     if len(leftover):
-        labels = cluster_grid(P[leftover], cell=extent * 0.02)
-        for lab in np.unique(labels):
-            members = leftover[labels == lab]
-            if len(members) < len(P) * 0.005:
-                continue
-            lo, hi = np.percentile(P[members], [2, 98], axis=0)
-            if np.any(hi - lo < extent * 0.01):
-                continue
-            shapes["boxes"].append({
-                "min": lo.tolist(), "max": hi.tolist(),
-                "points": int(len(members)),
-                "color": cols[members].mean(axis=0).astype(int).tolist(),
-            })
-            print(f"  box: {len(members):,} pts, size "
-                  f"{np.round(hi - lo, 1).tolist()}")
+        groups = cluster_grid(P[leftover], cell=extent * 0.02)
+        for group in np.unique(groups):
+            members = leftover[groups == group]
+            if len(members) >= len(P) * 0.005:
+                add_box(members, "geometry")
 
     out = space / "shapes.json"
     out.write_text(json.dumps(shapes, indent=1))
