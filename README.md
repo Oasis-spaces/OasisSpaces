@@ -6,8 +6,8 @@ Turn photos of any space into an editable 3D point cloud.
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Oasis-spaces/OasisSpaces/blob/main/notebooks/OasisSpaces_Colab.ipynb)
 — the whole pipeline (cameras, metric dense cloud, Blender room, Gaussian splat) on
 Google Colab's free GPU, one stage at a time. The public
-website is hosted free at **https://oasisspaces.onrender.com**, and the editor at
-**https://oasisspaces.onrender.com/editor/**.
+website is hosted free at **https://oasisspaces-0ddh.onrender.com**, and the editor at
+**https://oasisspaces-0ddh.onrender.com/editor/**.
 
 The idea (from [OasisSpaces.md](OasisSpaces.md)): capture a space from every
 angle, stitch the images together, and build a cloud of the whole space that
