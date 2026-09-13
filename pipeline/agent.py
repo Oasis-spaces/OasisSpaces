@@ -825,6 +825,7 @@ class Agent:
             "evaluation": row,
             "capture_advice": self.advice,
         }
+        self.space.mkdir(parents=True, exist_ok=True)  # a stage run before its prerequisites
         (self.space / "agent-report.json").write_text(json.dumps(report, indent=2) + "\n")
 
         print(f"\n{'=' * 70}\nAgent report for {self.name} "
