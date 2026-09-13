@@ -26,6 +26,7 @@ Output lands in spaces/<name>/:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import struct
 import subprocess
@@ -87,26 +88,92 @@ def solved_models(sparse_dir: Path) -> list[Path]:
     return sorted(d for d in sparse_dir.iterdir() if (d / "images.bin").exists())
 
 
-def camera_path_jump(model: Path) -> float:
-    """Largest camera move between consecutive video frames, as a fraction of
-    the scene's size. A coherent walkthrough stays well under 0.1. A global
-    solve that glued separate pieces together at different scales makes the
-    camera jump by more than the whole scene, while each piece's reprojection
-    error still looks healthy."""
+def camera_path(model: Path):
+    """Frames in video order: names, camera centres, frame numbers, and the
+    scene's size (5-95 percentile extent of the points), or None when the
+    model is too small to judge."""
     from densify import read_images_bin, read_points3d_bin
 
     images = sorted(read_images_bin(model / "images.bin").values(),
                     key=lambda v: v["name"])
     points = np.array(list(read_points3d_bin(model / "points3D.bin").values()))
     if len(images) < 3 or len(points) < 100:  # too few points to size the scene
-        return 0.0
+        return None
+    names = [v["name"] for v in images]
     centers = np.array([-v["R"].T @ v["t"] for v in images])
-    index = np.array([int("".join(filter(str.isdigit, v["name"])) or 0)
-                      for v in images])
+    index = np.array([int("".join(filter(str.isdigit, name)) or 0) for name in names])
+    scene = float(np.linalg.norm(np.percentile(points, 95, 0) - np.percentile(points, 5, 0)))
+    return names, centers, index, scene
+
+
+def camera_path_jump(model: Path, skip=()) -> float:
+    """Largest camera move between consecutive video frames, as a fraction of
+    the scene's size. A coherent walkthrough stays well under 0.1. A global
+    solve that glued separate pieces together at different scales makes the
+    camera jump by more than the whole scene, while each piece's reprojection
+    error still looks healthy. Frames in `skip` (detours) are left out."""
+    path = camera_path(model)
+    if path is None:
+        return 0.0
+    names, centers, index, scene = path
+    keep = np.array([name not in set(skip) for name in names])
+    centers, index = centers[keep], index[keep]
+    if len(centers) < 2 or scene <= 0:
+        return 0.0
     steps = np.linalg.norm(np.diff(centers, axis=0), axis=1) \
         / np.maximum(np.diff(index), 1)
-    scene = np.linalg.norm(np.percentile(points, 95, 0) - np.percentile(points, 5, 0))
-    return float(steps.max() / scene) if scene > 0 else 0.0
+    return float(steps.max() / scene)
+
+
+# A few frames the solver placed wrongly show up as a detour: the camera leaps
+# away and leaps straight back a few frames later, landing near where it left.
+# A quick pan onto something seen for a moment does this (walkthrough frames
+# 112-114 matched 86-376 points, against ~3,000 for their neighbours, and sat
+# 3.3 units away). Unlike pieces glued at different scales, the path either
+# side agrees, so only those frames are dropped from the model.
+DETOUR_STEP = 0.1          # a leap: a per-frame move above this share of the scene...
+DETOUR_MEDIAN_FACTOR = 8   # ...and this many times the median move
+MAX_DETOUR_FRAMES = 6
+
+
+def detour_frames(model: Path) -> list[str]:
+    """Names of frames on a detour (see DETOUR_STEP)."""
+    path = camera_path(model)
+    if path is None:
+        return []
+    names, centers, index, scene = path
+    steps = np.linalg.norm(np.diff(centers, axis=0), axis=1) / np.maximum(np.diff(index), 1)
+    leaps = np.where((steps > DETOUR_STEP * scene)
+                     & (steps > DETOUR_MEDIAN_FACTOR * np.median(steps)))[0]
+    misplaced = set()
+    for a in leaps:
+        for b in leaps[leaps > a]:
+            if b - a > MAX_DETOUR_FRAMES:
+                break
+            back = np.linalg.norm(centers[b + 1] - centers[a]) / max(index[b + 1] - index[a], 1)
+            if back <= DETOUR_STEP * scene:
+                misplaced.update(range(a + 1, b + 1))
+                break
+    return [names[i] for i in sorted(misplaced)]
+
+
+def drop_detours(model: Path, workspace: Path, log: Path) -> list[str]:
+    """Remove detour frames from a model, and record them in
+    workspace/dropped-frames.json."""
+    names = detour_frames(model)
+    if not names:
+        return []
+    listing = workspace / f"dropped-frames-{model.name}.txt"
+    listing.write_text("\n".join(names) + "\n")
+    run(["colmap", "image_deleter", "--input_path", str(model),
+         "--output_path", str(model), "--image_names_path", str(listing)], log)
+    record_path = workspace / "dropped-frames.json"
+    record = json.loads(record_path.read_text()) if record_path.exists() else {}
+    record[model.name] = names
+    record_path.write_text(json.dumps(record, indent=1) + "\n")
+    print(f"  model {model.name}: dropped {len(names)} misplaced frame(s) "
+          f"({', '.join(names)})")
+    return names
 
 
 def require_binary(name: str, install_hint: str) -> None:
@@ -250,7 +317,9 @@ def sparse_reconstruction(
                 # most points.
                 main_model = max(solved_models(sparse_dir),
                                  key=lambda m: (m / "points3D.bin").stat().st_size)
-                jump = camera_path_jump(main_model)
+                # A detour of a few misplaced frames is dropped below, so it
+                # does not condemn the whole solve.
+                jump = camera_path_jump(main_model, skip=detour_frames(main_model))
                 if jump > MAX_PATH_JUMP:
                     problem = (f"between two consecutive frames the camera jumps "
                                f"{jump:.1f}x the scene's size, so it joined separate "
@@ -276,6 +345,11 @@ def sparse_reconstruction(
             "Capture more overlapping photos (60-80% overlap between shots) "
             f"and retry. Log: {log}"
         )
+
+    if sequential:
+        (workspace / "dropped-frames.json").unlink(missing_ok=True)
+        for model in models:
+            drop_detours(model, workspace, log)
 
     # The mapper may fragment a difficult capture into several models;
     # export each and keep the one with the most points.
@@ -398,7 +472,8 @@ def main() -> None:
     # solve. Wipe everything derived, including old frames.
     for stale in [workspace / "database.db", workspace / "sparse",
                   workspace / "sparse-global-rejected", workspace / "dense", images_dir,
-                  *workspace.glob("model_*.ply"), workspace / "sparse.ply"]:
+                  *workspace.glob("model_*.ply"), workspace / "sparse.ply",
+                  workspace / "dropped-frames.json", *workspace.glob("dropped-frames-*.txt")]:
         if stale.is_dir():
             shutil.rmtree(stale)
         elif stale.exists():

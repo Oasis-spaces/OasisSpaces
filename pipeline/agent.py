@@ -392,6 +392,10 @@ class Agent:
             "total": total,
             "fraction": round(frames / total, 3) if total else 0.0,
             "path_jump": round(camera_path_jump(best), 3),
+            # Misplaced frames reconstruct.py removed (see detour_frames).
+            "dropped_frames": (json.loads(dropped.read_text()).get(best.name, [])
+                               if (dropped := self.space / "workspace"
+                                   / "dropped-frames.json").exists() else []),
             "rejected_global": (self.space / "workspace" / "sparse-global-rejected").exists(),
         }
 

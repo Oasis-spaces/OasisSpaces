@@ -103,6 +103,11 @@ def read_points3d_bin(path):
     return points
 
 
+MIN_KEYFRAMES = 12
+MAX_KEYFRAMES = 30
+FRAMES_PER_KEYFRAME = 7
+
+
 def pick_keyframes(images, count):
     """Evenly spread keyframes, preferring frames with many 3D observations."""
     ordered = sorted(images.items(), key=lambda kv: kv[1]["name"])
@@ -259,9 +264,12 @@ def main():
     parser.add_argument("space", help="space folder (e.g. spaces/first-test)")
     parser.add_argument("--model-dir", default=None,
                         help="COLMAP model dir (default: workspace/sparse/<best>)")
-    parser.add_argument("--keyframes", type=int, default=12)
-    parser.add_argument("--stride", type=int, default=4,
-                        help="back-project every Nth pixel of the full frame (default 4)")
+    parser.add_argument("--keyframes", type=int, default=None,
+                        help="frames to fuse (default: one per ~7 registered frames, "
+                             f"{MIN_KEYFRAMES} to {MAX_KEYFRAMES})")
+    parser.add_argument("--stride", type=int, default=None,
+                        help="back-project every Nth pixel of the full frame (default 4 "
+                             "for 12 keyframes, wider with more so the cloud keeps its size)")
     parser.add_argument("--depth-model", choices=["moge", "da2"], default="moge",
                         help="monocular depth network (default moge)")
     parser.add_argument("--work-size", type=int, default=1280,
@@ -293,8 +301,15 @@ def main():
     cameras = read_cameras_bin(model_dir / "cameras.bin")
     images = read_images_bin(model_dir / "images.bin")
     points3d = read_points3d_bin(model_dir / "points3D.bin")
-    keys = pick_keyframes(images, args.keyframes)
-    print(f"{len(images)} registered frames; densifying {len(keys)} keyframes")
+    # A short pan needs few keyframes; a walk through several rooms needs more
+    # viewpoints. More keyframes sample every Nth pixel more sparsely, so the
+    # fused cloud (and memory on an 8 GB Mac) stays about the same size.
+    keyframes = args.keyframes or int(np.clip(round(len(images) / FRAMES_PER_KEYFRAME),
+                                              MIN_KEYFRAMES, MAX_KEYFRAMES))
+    args.stride = args.stride or max(4, round(4 * np.sqrt(keyframes / MIN_KEYFRAMES)))
+    keys = pick_keyframes(images, keyframes)
+    print(f"{len(images)} registered frames; densifying {len(keys)} keyframes, "
+          f"every {args.stride}th pixel")
 
     import torch
     from PIL import Image
