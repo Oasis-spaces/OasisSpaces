@@ -11,6 +11,12 @@ Usage:
     python3 pipeline/reconstruct.py <images_dir | video_file> --name kitchen
     python3 pipeline/reconstruct.py walkthrough.mp4 --name loft --fps 2
     python3 pipeline/reconstruct.py photos/ --name office --dense
+    python3 pipeline/reconstruct.py room.mov --name room --mapper incremental
+
+Mapping uses COLMAP's global mapper (GLOMAP, built into COLMAP 4.x) by
+default: it solves all cameras at once and fragments hard captures far less
+than the incremental mapper, which remains available as --mapper incremental
+and as an automatic fallback.
 
 Output lands in spaces/<name>/:
     workspace/   COLMAP database, extracted frames, sparse model
@@ -21,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -34,19 +41,72 @@ from pointcloud import (
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+# Largest believable camera move between consecutive video frames, as a
+# fraction of the scene's size (coherent models stay under ~0.1).
+MAX_PATH_JUMP = 0.3
+# Random seeds tried for the global mapper before falling back to incremental.
+GLOBAL_MAPPER_SEEDS = (0, 1, 2)
+# COLMAP 4.x feature types: classic SIFT, or the learned ALIKED detector, which
+# finds far more on the low-texture surfaces (white walls) that SIFT has
+# nothing to grip. ALIKED is matched by brute force, not LightGlue: on this
+# CPU-only build LightGlue took 99 s for one frame's neighbours and then
+# crashed inside Apple's ONNX runtime, while brute force matched 42 frames in
+# 3 s, and the pan capture solved 42/42 frames in one model with it.
+FEATURE_TYPES = {
+    "sift": ("SIFT", "SIFT_BRUTEFORCE"),
+    "aliked": ("ALIKED_N16ROT", "ALIKED_BRUTEFORCE"),
+}
 
 
-def run(command: list[str], log_file: Path) -> None:
+def run(command: list[str], log_file: Path, check: bool = True) -> bool:
+    """Run a step, logging its output. With check=False, report failure
+    instead of exiting so the caller can fall back."""
     print(f"  $ {' '.join(command[:4])} ...")
     with open(log_file, "a") as log:
         log.write(f"\n=== {' '.join(command)} ===\n")
         log.flush()
         result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode != 0:
+        if not check:
+            return False
         sys.exit(
             f"Step failed ({command[0]} {command[1] if len(command) > 1 else ''}), "
             f"see log: {log_file}"
         )
+    return True
+
+
+def registered_images(model: Path) -> int:
+    """Number of frames COLMAP solved a camera for (images.bin header)."""
+    with open(model / "images.bin", "rb") as f:
+        return struct.unpack("<Q", f.read(8))[0]
+
+
+def solved_models(sparse_dir: Path) -> list[Path]:
+    """Model folders (COLMAP 4 also leaves a project.ini beside them)."""
+    return sorted(d for d in sparse_dir.iterdir() if (d / "images.bin").exists())
+
+
+def camera_path_jump(model: Path) -> float:
+    """Largest camera move between consecutive video frames, as a fraction of
+    the scene's size. A coherent walkthrough stays well under 0.1. A global
+    solve that glued separate pieces together at different scales makes the
+    camera jump by more than the whole scene, while each piece's reprojection
+    error still looks healthy."""
+    from densify import read_images_bin, read_points3d_bin
+
+    images = sorted(read_images_bin(model / "images.bin").values(),
+                    key=lambda v: v["name"])
+    points = np.array(list(read_points3d_bin(model / "points3D.bin").values()))
+    if len(images) < 3 or len(points) < 100:  # too few points to size the scene
+        return 0.0
+    centers = np.array([-v["R"].T @ v["t"] for v in images])
+    index = np.array([int("".join(filter(str.isdigit, v["name"])) or 0)
+                      for v in images])
+    steps = np.linalg.norm(np.diff(centers, axis=0), axis=1) \
+        / np.maximum(np.diff(index), 1)
+    scene = np.linalg.norm(np.percentile(points, 95, 0) - np.percentile(points, 5, 0))
+    return float(steps.max() / scene) if scene > 0 else 0.0
 
 
 def require_binary(name: str, install_hint: str) -> None:
@@ -137,42 +197,79 @@ def gpu_flags(subcommand: str, new_prefix: str, old_prefix: str) -> list[str]:
 
 
 def sparse_reconstruction(
-    workspace: Path, images_dir: Path, sequential: bool, log: Path
+    workspace: Path, images_dir: Path, sequential: bool, mapper: str,
+    features: str, log: Path
 ) -> Path:
     database = workspace / "database.db"
     sparse_dir = workspace / "sparse"
     sparse_dir.mkdir(parents=True, exist_ok=True)
+    extractor_type, matcher_type = FEATURE_TYPES[features]
 
-    print("COLMAP: extracting features")
+    print(f"COLMAP: extracting features ({extractor_type})")
     run(
         ["colmap", "feature_extractor",
          "--database_path", str(database),
          "--image_path", str(images_dir),
          "--ImageReader.camera_model", "OPENCV",
          "--ImageReader.single_camera", "1",
+         "--FeatureExtraction.type", extractor_type,
          *gpu_flags("feature_extractor", "FeatureExtraction", "SiftExtraction")],
         log,
     )
 
     matcher = "sequential_matcher" if sequential else "exhaustive_matcher"
-    print(f"COLMAP: matching features ({matcher})")
+    print(f"COLMAP: matching features ({matcher}, {matcher_type})")
     run(
         ["colmap", matcher,
          "--database_path", str(database),
+         "--FeatureMatching.type", matcher_type,
          *gpu_flags(matcher, "FeatureMatching", "SiftMatching")],
         log,
     )
 
-    print("COLMAP: mapping (sparse reconstruction) — this is the slow part")
-    run(
-        ["colmap", "mapper",
-         "--database_path", str(database),
-         "--image_path", str(images_dir),
-         "--output_path", str(sparse_dir)],
-        log,
-    )
+    mapping_args = ["--database_path", str(database),
+                    "--image_path", str(images_dir),
+                    "--output_path", str(sparse_dir)]
+    if mapper == "global":
+        rejected = workspace / "sparse-global-rejected"
+        shutil.rmtree(rejected, ignore_errors=True)
+        # The global solve varies from run to run on hard captures, and a
+        # re-solve only costs the mapping (features and matches are reused),
+        # so try a few seeds before falling back to the slower incremental mapper.
+        for attempt, seed in enumerate(GLOBAL_MAPPER_SEEDS, 1):
+            print("COLMAP: global mapping (all cameras solved together)"
+                  + (f", attempt {attempt} with seed {seed}" if attempt > 1 else ""))
+            problem = None
+            if not run(["colmap", "global_mapper", "--default_random_seed", str(seed),
+                        *mapping_args], log, check=False):
+                problem = "the global mapper failed"
+            elif not solved_models(sparse_dir):
+                problem = "the global mapper registered nothing"
+            elif sequential:
+                # Check the model everything downstream uses: the one with the
+                # most points.
+                main_model = max(solved_models(sparse_dir),
+                                 key=lambda m: (m / "points3D.bin").stat().st_size)
+                jump = camera_path_jump(main_model)
+                if jump > MAX_PATH_JUMP:
+                    problem = (f"between two consecutive frames the camera jumps "
+                               f"{jump:.1f}x the scene's size, so it joined separate "
+                               f"pieces at inconsistent scales")
+            if problem is None:
+                break
+            print(f"Global model rejected: {problem}.")
+            # Keep the latest rejected attempt for debugging, out of downstream's way.
+            shutil.rmtree(rejected, ignore_errors=True)
+            sparse_dir.rename(rejected)
+            sparse_dir.mkdir()
+        else:
+            print("Falling back to the incremental mapper.")
+            mapper = "incremental"
+    if mapper == "incremental":
+        print("COLMAP: incremental mapping — this is the slow part")
+        run(["colmap", "mapper", *mapping_args], log)
 
-    models = sorted(d for d in sparse_dir.iterdir() if d.is_dir())
+    models = solved_models(sparse_dir)
     if not models:
         sys.exit(
             "COLMAP could not register the images into a model. "
@@ -182,6 +279,8 @@ def sparse_reconstruction(
 
     # The mapper may fragment a difficult capture into several models;
     # export each and keep the one with the most points.
+    total_frames = sum(1 for p in images_dir.iterdir()
+                       if p.suffix.lower() in IMAGE_EXTENSIONS)
     best_ply, best_model, best_points = None, None, -1
     for model in models:
         model_ply = workspace / f"model_{model.name}.ply"
@@ -193,7 +292,8 @@ def sparse_reconstruction(
             log,
         )
         n = len(load_ply(model_ply))
-        print(f"  model {model.name}: {n:,} points")
+        print(f"  model {model.name}: {n:,} points, "
+              f"{registered_images(model)} of {total_frames} frames")
         if n > best_points:
             best_ply, best_model, best_points = model_ply, model, n
     if len(models) > 1:
@@ -266,6 +366,14 @@ def main() -> None:
     parser.add_argument("--name", required=True, help="space name (output folder)")
     parser.add_argument("--fps", type=float, default=2.0,
                         help="frames per second to extract from video (default 2)")
+    parser.add_argument("--features", choices=list(FEATURE_TYPES), default="sift",
+                        help="feature type: COLMAP's SIFT, or learned ALIKED + "
+                             "LightGlue (slower on a CPU-only build, better on "
+                             "low-texture walls)")
+    parser.add_argument("--mapper", choices=["global", "incremental"],
+                        default="global",
+                        help="COLMAP mapper (default global; incremental is "
+                             "the pre-4.0 behaviour)")
     parser.add_argument("--dense", action="store_true",
                         help="attempt CUDA dense reconstruction after SfM")
     parser.add_argument("--voxel", type=float, default=None,
@@ -289,7 +397,7 @@ def main() -> None:
     # previous attempt (or a different --fps / source) would corrupt the
     # solve. Wipe everything derived, including old frames.
     for stale in [workspace / "database.db", workspace / "sparse",
-                  workspace / "dense", images_dir,
+                  workspace / "sparse-global-rejected", workspace / "dense", images_dir,
                   *workspace.glob("model_*.ply"), workspace / "sparse.ply"]:
         if stale.is_dir():
             shutil.rmtree(stale)
@@ -312,7 +420,8 @@ def main() -> None:
         sys.exit(f"{source} is neither an image folder nor a video file")
 
     sparse_ply, best_model = sparse_reconstruction(
-        workspace, images_dir, sequential=is_video, log=log
+        workspace, images_dir, sequential=is_video, mapper=args.mapper,
+        features=args.features, log=log
     )
 
     result_ply = sparse_ply
