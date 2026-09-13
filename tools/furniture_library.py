@@ -94,14 +94,26 @@ def build_block(name, lo, hi, color):
     return _finish(name, lo, hi, [part])
 
 
-def build_bed(name, lo, hi, color):
-    """Low base, slightly inset mattress, one pillow near the head end."""
+def _facing(facing):
+    """"+x" / "-y" style direction -> (axis index, +1 or -1), or None."""
+    if not facing or len(facing) != 2 or facing[1] not in "xy" or facing[0] not in "+-":
+        return None
+    return (0 if facing[1] == "x" else 1), (1 if facing[0] == "+" else -1)
+
+
+def build_bed(name, lo, hi, color, facing=None):
+    """Low base, slightly inset mattress, one pillow near the head end. With
+    `facing` ("+x", "-y", ...) the head is at that end; without it, at the
+    `hi` end of the longer side."""
     lo, hi, d = _dims(lo, hi)
     mat = _material(name, color)
     cx, cy = (lo.x + hi.x) / 2, (lo.y + hi.y) / 2
 
     # the longer horizontal side is the bed's length; head at its `hi` end
     length_axis = 0 if d.x >= d.y else 1
+    head_sign = 1
+    if _facing(facing):
+        length_axis, head_sign = _facing(facing)
     width_axis = 1 - length_axis
     length, width = d[length_axis], d[width_axis]
 
@@ -131,8 +143,9 @@ def build_bed(name, lo, hi, color):
     p_size[length_axis] = 0.18 * length
     p_size[width_axis] = 0.55 * width
     p_center = [cx, cy, lo.z + base_h + mattress_h + pillow_h / 2]
-    p_center[length_axis] = (
-        hi[length_axis] - inset - 0.06 * length - p_size[length_axis] / 2)
+    head_end = hi[length_axis] if head_sign > 0 else lo[length_axis]
+    p_center[length_axis] = head_end - head_sign * (
+        inset + 0.06 * length + p_size[length_axis] / 2)
     parts.append(_box(f"{name}.pillow", p_center, p_size, mat))
 
     return _finish(name, lo, hi, parts)
@@ -192,14 +205,18 @@ def build_table(name, lo, hi, color):
     return _finish(name, lo, hi, parts)
 
 
-def build_wardrobe(name, lo, hi, color):
+def build_wardrobe(name, lo, hi, color, facing=None):
     """Tall body with two front door panels split by a thin inset gap,
-    plus small handles either side of the split."""
+    plus small handles either side of the split. With `facing` ("+x", ...)
+    the doors face that way; without it, the `hi` end of the shorter side."""
     lo, hi, d = _dims(lo, hi)
     mat = _material(name, color)
 
     # the shorter horizontal side is the depth; the front faces its hi end
     depth_axis = 0 if d.x <= d.y else 1
+    front_sign = 1
+    if _facing(facing):
+        depth_axis, front_sign = _facing(facing)
     width_axis = 1 - depth_axis
     depth, width = d[depth_axis], d[width_axis]
 
@@ -209,7 +226,8 @@ def build_wardrobe(name, lo, hi, color):
     door_w = (width - 2 * margin - gap) / 2
     door_h = d.z - 2 * margin
     mid_w = (lo[width_axis] + hi[width_axis]) / 2
-    mid_d = (lo[depth_axis] + hi[depth_axis]) / 2 - door_t / 2
+    mid_d = (lo[depth_axis] + hi[depth_axis]) / 2 - front_sign * door_t / 2
+    front = hi[depth_axis] if front_sign > 0 else lo[depth_axis]
 
     body_center = [0.0, 0.0, (lo.z + hi.z) / 2]
     body_size = [0.0, 0.0, d.z]
@@ -219,7 +237,7 @@ def build_wardrobe(name, lo, hi, color):
     body_size[depth_axis] = depth - door_t
     parts = [_box(f"{name}.body", body_center, body_size, mat)]
 
-    door_front = hi[depth_axis] - door_t / 2
+    door_front = front - front_sign * door_t / 2
     handle_s = min(0.035 * width, 0.5 * door_t + 0.02 * width)
     handle_z = lo.z + 0.52 * d.z
     for side, tag in ((-1, "left"), (1, "right")):
@@ -234,7 +252,7 @@ def build_wardrobe(name, lo, hi, color):
         handle_center = [0.0, 0.0, handle_z]
         handle_size = [0.0, 0.0, 3 * handle_s]
         handle_center[width_axis] = mid_w + side * (gap / 2 + 1.5 * handle_s)
-        handle_center[depth_axis] = hi[depth_axis] + handle_s / 2
+        handle_center[depth_axis] = front + front_sign * handle_s / 2
         handle_size[width_axis] = handle_s
         handle_size[depth_axis] = handle_s
         parts.append(_box(
@@ -280,10 +298,13 @@ LIBRARY = {
 }
 
 
-def build(label, name, lo, hi, color):
+def build(label, name, lo, hi, color, facing=None):
     """Build furniture for a detected box; unknown labels become a block.
+    `facing` ("+x", "-y", ...) turns beds (head end) and wardrobes (doors).
 
     Returns the parent Empty holding all created mesh parts.
     """
     builder = LIBRARY.get(label, build_block)
+    if builder in (build_bed, build_wardrobe):
+        return builder(name, lo, hi, color, facing=facing)
     return builder(name, lo, hi, color)

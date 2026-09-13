@@ -45,7 +45,7 @@ RELAY_WAIT_SECONDS = 900
 class Advisor:
     """One place to ask Claude, whichever way this machine can reach it."""
 
-    def __init__(self, model: str = MODEL, timeout: int = 300, enabled: bool = True):
+    def __init__(self, model: str = MODEL, timeout: int = 600, enabled: bool = True):
         self.model = model
         self.timeout = timeout
         self.calls = 0

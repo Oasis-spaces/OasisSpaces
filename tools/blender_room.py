@@ -87,7 +87,8 @@ for i, box in enumerate(shapes["boxes"], 1):
     label = box.get("label", "block")
     name = next_name(label.capitalize())
     if furniture_library is not None:
-        furniture_library.build(label, name, list(lo), list(hi), box["color"])
+        furniture_library.build(label, name, list(lo), list(hi), box["color"],
+                                facing=box.get("facing"))
     else:
         bpy.ops.mesh.primitive_cube_add(size=1)
         obj = bpy.context.active_object

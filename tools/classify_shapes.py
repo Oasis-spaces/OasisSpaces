@@ -424,6 +424,64 @@ def close_room(walls: list[dict], boxes: list[dict], room: dict, size) -> list[s
     return notes
 
 
+# A bed's head end within this distance of a wall (or of a wardrobe in front
+# of one) is taken to touch it: the headboard and pillows hide that stretch.
+HEAD_SNAP_METRES = 0.60
+HEAD_SNAP_FRAC = 0.20  # of the room's width, without a metric scale
+
+
+def orient_furniture(boxes: list[dict], room: dict, size, units_per_metre=None) -> list[str]:
+    """Decide which way furniture faces, for the Blender builders: a
+    wardrobe's doors face the middle of the room, and a bed's head goes to the
+    nearer wall along its length (moving up to it when the gap is small).
+    Writes box["facing"] as "+x", "-x", "+y" or "-y"; the scene is turned to
+    the walls, so the room's sides run along x and y."""
+    corners = [from_room(room, su * room["half_u"], sv * room["half_v"])
+               for su in (-1, 1) for sv in (-1, 1)]
+    bounds_lo = [min(c[k] for c in corners) for k in (0, 1)]
+    bounds_hi = [max(c[k] for c in corners) for k in (0, 1)]
+    centre = room["center"]
+    width = min(bounds_hi[0] - bounds_lo[0], bounds_hi[1] - bounds_lo[1])
+    snap = HEAD_SNAP_METRES * units_per_metre if units_per_metre else HEAD_SNAP_FRAC * width
+    notes = []
+    for b in boxes:
+        label = b.get("label")
+        if label not in ("wardrobe", "bed"):
+            continue
+        span = [b["max"][k] - b["min"][k] for k in (0, 1)]
+        mid = [(b["max"][k] + b["min"][k]) / 2 for k in (0, 1)]
+        if label == "wardrobe":
+            axis = 0 if span[0] <= span[1] else 1  # depth runs along the shorter side
+            b["facing"] = ("+" if centre[axis] > mid[axis] else "-") + "xy"[axis]
+            continue
+        axis = 0 if span[0] >= span[1] else 1  # length runs along the longer side
+        other = 1 - axis
+        # What the head could meet at each end: the wall, or a wardrobe standing
+        # between the bed and that wall.
+        stop_lo, stop_hi = bounds_lo[axis], bounds_hi[axis]
+        for o in boxes:
+            if o is b or o.get("label") != "wardrobe":
+                continue
+            if o["max"][other] <= b["min"][other] or o["min"][other] >= b["max"][other]:
+                continue
+            if o["max"][axis] <= b["min"][axis]:
+                stop_lo = max(stop_lo, o["max"][axis])
+            elif o["min"][axis] >= b["max"][axis]:
+                stop_hi = min(stop_hi, o["min"][axis])
+        gap_lo, gap_hi = b["min"][axis] - stop_lo, stop_hi - b["max"][axis]
+        if gap_hi <= gap_lo:
+            b["facing"] = "+" + "xy"[axis]
+            if 0 < gap_hi <= snap:
+                b["max"][axis] = stop_hi
+                notes.append(f"moved the bed's head {size(gap_hi)} up to the wall behind it")
+        else:
+            b["facing"] = "-" + "xy"[axis]
+            if 0 < gap_lo <= snap:
+                b["min"][axis] = stop_lo
+                notes.append(f"moved the bed's head {size(gap_lo)} up to the wall behind it")
+    return notes
+
+
 def finish_room(data: dict, units_per_metre: float | None = None) -> list[str]:
     """Rest furniture on the floor, keep it inside the walls, and close the
     room with inferred walls. Works on built walls and boxes only, and starts
@@ -479,6 +537,7 @@ def finish_room(data: dict, units_per_metre: float | None = None) -> list[str]:
         if plane.get("label") in ("floor", "ceiling"):
             fit_plane_to_room(plane, final)
     data["room"] = final
+    notes += orient_furniture(furniture, final, size, units_per_metre)
     notes.append(f"room {size(2 * final['half_u'])} x {size(2 * final['half_v'])}, "
                  f"{sum(1 for p in planes if p.get('label') == 'wall' and p.get('build', True))} "
                  "walls, floor sized to match")

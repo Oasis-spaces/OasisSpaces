@@ -747,6 +747,25 @@ async function main() {
         params.get("url") || "train.splat",
         location.href,
     );
+    // OasisSpaces: pipeline/splat_export.py writes <name>.view.json beside a
+    // splat with a camera from the capture, so the page opens where the splat
+    // is sharp instead of at the demo scene's camera.
+    if (!location.hash && params.get("url")) {
+        try {
+            const viewUrl = new URL(
+                url.pathname.replace(/\.(splat|ply)$/i, ".view.json"),
+                url,
+            );
+            const viewReq = await fetch(viewUrl, { credentials: "omit" });
+            if (viewReq.ok) {
+                const view = await viewReq.json();
+                if (Array.isArray(view.viewMatrix) && view.viewMatrix.length === 16) {
+                    viewMatrix = view.viewMatrix;
+                    carousel = false;
+                }
+            }
+        } catch (err) {}
+    }
     const req = await fetch(url, {
         mode: "cors", // no-cors, *cors, same-origin
         credentials: "omit", // include, *same-origin, omit

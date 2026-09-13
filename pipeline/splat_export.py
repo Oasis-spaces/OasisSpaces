@@ -9,12 +9,17 @@ the scene appears as it streams in. The walkthrough's 46 MB splat.ply becomes
 mid-transfer with "No buffer space available". The view-dependent colour
 (higher spherical harmonics) is dropped, as the viewer ignores it anyway.
 
+It also writes <name>.view.json: the pose of the capture frame that shows the
+most of the room (see start_view). splat-viewer opens there instead of
+at its demo camera, which sits somewhere no frame was taken and shows a smear.
+
 Usage:
     python3 pipeline/splat_export.py spaces/<name>/splat.ply [out.splat]
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -63,6 +68,61 @@ def ply_to_splat(src: Path, dst: Path) -> int:
     return len(out)
 
 
+START_STEP_IN = 0.0  # stepping in made the viewer draw nothing for the walkthrough; revisit
+
+
+def start_view(space: Path) -> dict | None:
+    """A viewer camera at the capture frame that shows the most of the room:
+    it faces the middle of the solved points and sees many of them from far
+    away. (Most matched points alone picks close-ups of textured surfaces.)"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from densify import read_images_bin, read_points3d_bin
+
+    candidates = []
+    meta = space / "densify.json"
+    if meta.exists():
+        candidates.append(Path(json.loads(meta.read_text())["model_dir"]))
+    candidates += sorted((p.parent for p in (space / "workspace" / "sparse").glob("*/images.bin")),
+                         key=lambda d: -(d / "images.bin").stat().st_size)
+    candidates.append(space / "splat-project")
+    model = next((d for d in candidates
+                  if (d / "images.bin").exists() and (d / "points3D.bin").exists()), None)
+    if model is None:
+        return None
+    images = read_images_bin(model / "images.bin")
+    points = read_points3d_bin(model / "points3D.bin")
+    if not points:
+        return None
+    xyz = np.array(list(points.values()))
+    centre = np.median(xyz, axis=0)
+    best, best_score = None, -1.0
+    for im in images.values():
+        R, t = im["R"], im["t"]
+        ahead = R @ centre + t
+        if ahead[2] <= 0 or ahead[2] / np.linalg.norm(ahead) < np.cos(np.radians(45)):
+            continue  # the middle of the room is not in front of this camera
+        seen = [points[i] for i in im["point3D_ids"] if i >= 0 and i in points]
+        if len(seen) < 50:
+            continue
+        depth = float(np.median((np.array(seen) @ R.T + t)[:, 2]))
+        score = np.sqrt(len(seen)) * depth
+        if score > best_score:
+            best, best_score = im, score
+    if best is None:
+        best = max(images.values(), key=lambda im: int((im["point3D_ids"] >= 0).sum()))
+    R, t = best["R"], best["t"].copy()
+    # Splats often keep a haze of stray Gaussians right around the recorded
+    # camera positions, so step forward a third of the way to what the frame
+    # looks at (moving the camera forward lowers every point's depth).
+    seen = [points[i] for i in best["point3D_ids"] if i >= 0 and i in points]
+    if seen:
+        t[2] -= START_STEP_IN * float(np.median((np.array(seen) @ R.T + t)[:, 2]))
+    # Column-major world-to-camera matrix, the layout splat-viewer's view uses.
+    view = [R[0][0], R[1][0], R[2][0], 0, R[0][1], R[1][1], R[2][1], 0,
+            R[0][2], R[1][2], R[2][2], 0, t[0], t[1], t[2], 1]
+    return {"frame": best["name"], "viewMatrix": [round(float(v), 5) for v in view]}
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
@@ -71,6 +131,11 @@ def main() -> None:
     count = ply_to_splat(src, dst)
     print(f"{count:,} gaussians -> {dst} ({dst.stat().st_size / 1e6:.1f} MB, "
           f"from {src.stat().st_size / 1e6:.1f} MB)")
+    view = start_view(src.parent)
+    if view:
+        view_path = dst.with_name(dst.stem + ".view.json")
+        view_path.write_text(json.dumps(view) + "\n")
+        print(f"starting camera: {view['frame']} -> {view_path}")
 
 
 if __name__ == "__main__":
