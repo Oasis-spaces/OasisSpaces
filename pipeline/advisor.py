@@ -127,18 +127,20 @@ class Advisor:
         return answer
 
     def ask_json(self, prompt: str, images=(), max_tokens: int = 1024) -> dict | None:
-        """Same, parsed as the JSON object in the reply."""
-        answer = self.ask(prompt + "\n\nReply with a single JSON object and nothing else.",
-                          images, max_tokens)
-        if not answer:
-            return None
-        start, end = answer.find("{"), answer.rfind("}")
-        if start < 0 or end <= start:
-            return None
-        try:
-            return json.loads(answer[start:end + 1])
-        except json.JSONDecodeError:
-            return None
+        """Same, parsed as the JSON object in the reply. An empty or unreadable
+        reply is asked once more before giving up."""
+        for _ in range(2):
+            answer = self.ask(prompt + "\n\nReply with a single JSON object and nothing else.",
+                              images, max_tokens)
+            start, end = (answer.find("{"), answer.rfind("}")) if answer else (-1, -1)
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(answer[start:end + 1])
+                except json.JSONDecodeError:
+                    pass
+            if not self.available:
+                break
+        return None
 
 
 def main() -> None:

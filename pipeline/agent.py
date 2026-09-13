@@ -85,6 +85,7 @@ class Agent:
         self.advice: list[str] = []
         self.judgements: list[dict] = []
         self.gates: dict[str, dict] = {}
+        self.use_claude = use_claude
         self.advisor = Advisor(enabled=use_claude)
 
     def sample_frames(self, count: int = 3) -> list[Path]:
@@ -245,7 +246,9 @@ class Agent:
             tag = "W" if p["kind"] == "wall" else "F"
             candidates.append({"id": f"{tag}{i}", "label": p.get("label", p["kind"]),
                                "size": [size(2 * p["half_a"]), size(2 * p["half_b"])],
-                               "points": p["points"]})
+                               "points": p["points"],
+                               **({"surface_behind": size(p["behind"]["depth"])}
+                                  if p.get("behind") else {})})
         for i, b in enumerate(shapes["boxes"]):
             candidates.append({"id": f"B{i}", "label": b.get("label"),
                                "detected_as": b.get("detected"),
@@ -270,14 +273,24 @@ class Agent:
             "wall patch, or a fragment of a bigger piece of furniture. Relabel only boxes "
             "that are a whole piece of furniture of their own; 'block' is for real "
             "furniture that fits no other type, not for leftovers. "
-            "Rejected boxes stay rejected. Only act where the images make you confident.\n"
+            "Rejected boxes stay rejected. "
+            "A wall with surface_behind has another flat surface that far behind it, "
+            "outside the room: the wall may be the front of built-in furniture (the "
+            "doors of a fitted wardrobe or cupboard) with the room's real wall behind. "
+            "If the frames show built-in furniture along that wall, list it in "
+            "furniture_fronts: the wall moves back and the space in front of it becomes "
+            "a wardrobe. If it is simply the wall, leave it. "
+            "Only act where the images make you confident.\n"
             'Fields: {"drop_walls": [{"id": string, "why": string}], '
+            '"furniture_fronts": [{"id": string, "why": string}], '
             '"drop_boxes": [{"id": string, "why": string}], '
             '"relabel_boxes": [{"id": string, "label": string, "why": string}], '
             '"notes": one sentence}')
         verdict = self.advisor.ask_json(prompt, [plan, *self.room_frames(3)],
                                         max_tokens=2048)
         if not verdict:
+            print(f"    claude (structure): no usable answer"
+                  + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
             return
         applied = self.apply_structure_review(shapes, verdict)
         shapes_path.write_text(json.dumps(shapes, indent=1) + "\n")
@@ -290,12 +303,23 @@ class Agent:
         applied = []
         walls = {i: p for i, p in enumerate(shapes["planes"])
                  if p["kind"] == "wall" and p.get("build", True)}
+        fronted = set()
+        for item in verdict.get("furniture_fronts") or []:
+            ident = str(item.get("id", ""))
+            i = int(ident[1:]) if ident[:1] == "W" and ident[1:].isdigit() else None
+            if i not in walls or not walls[i].get("behind"):
+                applied.append(f"ignored {ident}: not a wall with a surface behind it")
+                continue
+            applied.append(self.build_front(shapes, i, item.get("why", "")))
+            fronted.add(i)
         biggest = max(walls, key=lambda i: walls[i]["points"]) if walls else None
         can_drop = len(walls) // 2  # never remove more than half the walls
         for item in verdict.get("drop_walls") or []:
             ident = str(item.get("id", ""))
             i = int(ident[1:]) if ident[:1] == "W" and ident[1:].isdigit() else None
-            if i not in walls:
+            if i in fronted:
+                applied.append(f"kept {ident}: it was moved back as a furniture front")
+            elif i not in walls:
                 applied.append(f"ignored {ident}: not a wall candidate")
             elif i == biggest:
                 applied.append(f"kept {ident}: the largest wall is never dropped")
@@ -335,6 +359,41 @@ class Agent:
                 boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
         return applied
 
+    def build_front(self, shapes: dict, i: int, why: str) -> str:
+        """Wall i is the front of built-in furniture: move the wall back to the
+        surface behind it, and fill the space between with a wardrobe box that
+        stands on the floor and covers the measured stretch of that surface."""
+        plane = shapes["planes"][i]
+        behind = plane.pop("behind")
+        c, a, normal = plane["center"], plane["axis_a"], plane["normal"]
+        out = behind["outward"]
+        # The wall was squared up after shapes.py measured it: step back along
+        # its current normal, turned to point away from the room.
+        sign = 1.0 if normal[0] * out[0] + normal[1] * out[1] >= 0 else -1.0
+        step = [sign * normal[0], sign * normal[1]]
+        depth = behind["depth"]
+        ts = [max(-plane["half_a"], min(plane["half_a"],
+                                        (x - c[0]) * a[0] + (y - c[1]) * a[1]))
+              for x, y in behind["span_xy"]]
+        corners = [(c[0] + t * a[0] + k * depth * step[0], c[1] + t * a[1] + k * depth * step[1])
+                   for t in ts for k in (0.0, 1.0)]
+        level = shapes.get("room_level") or {}
+        floor_z = level.get("floor_z", c[2] - plane["half_b"])
+        top = max(behind["top"], floor_z + 0.5 * plane["half_b"])
+        shapes["boxes"].append({
+            "min": [min(x for x, _ in corners), min(y for _, y in corners), floor_z],
+            "max": [max(x for x, _ in corners), max(y for _, y in corners), top],
+            "points": behind["points"], "source": "front", "detected": "wardrobe",
+            "label": "wardrobe", "build": True, "color": plane["color"],
+            "reason": f"Claude: built-in furniture in front of W{i}: {why}",
+        })
+        plane["center"] = [c[0] + depth * step[0], c[1] + depth * step[1], c[2]]
+        plane["review"] = f"Claude: furniture front, moved back to the wall behind: {why}"
+        units = self.densify_metrics().get("colmap_units_per_metre")
+        shown = f"{depth / units:.2f} m" if units else f"{depth:.2f} units"
+        return (f"W{i} is a furniture front: moved it back {shown} and built "
+                f"B{len(shapes['boxes']) - 1} wardrobe in front of it")
+
     def render_verdict(self) -> None:
         """Claude looks at the built room, from an angle and from above, next to
         a photo of the real one."""
@@ -365,6 +424,8 @@ class Agent:
         images = [render] + ([plan] if plan.exists() else []) + self.room_frames(1)
         verdict = self.advisor.ask_json(prompt, images)
         if not verdict:
+            print(f"    claude (blender): no usable answer"
+                  + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
             return
         self.judged("blender", verdict,
                     ("plausible room" if verdict.get("plausible") else "not a plausible room")
@@ -639,6 +700,14 @@ class Agent:
                 return "stop", "fewer than two planes found, so there is no room shell"
             verdict = next((j for j in reversed(self.judgements)
                             if j["stage"] == "blender"), None)
+            # A check that never ran is not a pass.
+            unchecked = [name for stage_name, name in (("structure", "structure review"),
+                                                      ("blender", "render check"))
+                         if not any(j["stage"] == stage_name for j in self.judgements)]
+            if self.use_claude and unchecked:
+                return "warn", ("Claude's " + " and ".join(unchecked) + " gave no answer"
+                                + (f" ({self.advisor.reason})" if self.advisor.reason else "")
+                                + ", so the built room was not checked")
             if verdict is not None and verdict.get("plausible") is False:
                 return "warn", ("Claude judged the built room implausible: "
                                 + ", ".join(verdict.get("problems", [])[:3]))

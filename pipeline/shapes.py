@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
+from densify import read_images_bin
 from pointcloud import load_ply
 from semantics import FURNITURE, HANGING
 
@@ -118,6 +119,19 @@ LEVEL_NORMAL_DEGREES = 20.0
 LEVEL_MIN_SHARE = 0.10
 MIN_CEILING_METRES = 1.8   # or MIN_CEILING_FRAC of the scene without a scale
 MIN_CEILING_FRAC = 0.30
+
+
+# A wall can be the front of built-in furniture: a wardrobe along a wall shows
+# its doors as one flat plane, and the room's real wall (or the wardrobe's back,
+# seen through an open section) stands a little behind it. Each wall records
+# a flat surface this far behind it, away from the cameras, when there is
+# enough of one; Claude's structure review then decides from the frames whether
+# the wall is a furniture front (pipeline/agent.py). Nearer than the minimum is
+# skirting or curtains; a room seen through a doorway is further than the max.
+FRONT_MIN_METRES, FRONT_MAX_METRES = 0.25, 0.90
+FRONT_MIN_FRAC, FRONT_MAX_FRAC = 0.03, 0.12   # of the scene, without a metric scale
+FRONT_MIN_SHARE = 0.15   # points on the surface behind, as a share of the wall's own
+FRONT_MIN_SPAN = 0.30    # share of the wall's length the surface behind covers
 
 
 def find_level(heights, bin_width, lowest):
@@ -366,6 +380,47 @@ def main():
         shown = f"{height / units_per_metre:.2f} m" if units_per_metre else f"{height:.2f}"
         print(f"  {level} level at z = {shown} ({len(idx):,} pts inside the walls)")
 
+    # What stands behind each wall (see FRONT_MIN_METRES). The cameras are in
+    # the room, so "behind" is the side away from them.
+    model_dir = Path(json.loads(densify_meta.read_text())["model_dir"]) \
+        if densify_meta.exists() else None
+    if model_dir is not None and (model_dir / "images.bin").exists():
+        cams = np.array([-v["R"].T @ v["t"] for v in
+                         read_images_bin(model_dir / "images.bin").values()]) @ world.T
+        near, far = ((FRONT_MIN_METRES * units_per_metre, FRONT_MAX_METRES * units_per_metre)
+                     if units_per_metre else (FRONT_MIN_FRAC * extent, FRONT_MAX_FRAC * extent))
+        not_hanging = ~np.isin(point_labels, hanging_ids) \
+            if point_labels is not None and hanging_ids else np.ones(len(P), bool)
+        for f in (x for x in found if x["kind"] == "wall"):
+            n = f["normal"] / np.linalg.norm(f["normal"])
+            a = along_wall(n)
+            centre = P[f["idx"]].mean(axis=0)
+            side = np.sign(np.median((cams - centre) @ n))
+            if side == 0:
+                continue
+            outward = -side * n
+            t = P @ a
+            lo, hi = np.percentile(t[f["idx"]], [2, 98])
+            depth = (P - centre) @ outward
+            behind = (depth > near) & (depth < far) & (t > lo) & (t < hi) & not_hanging
+            if N is not None:
+                behind &= np.abs(N @ n) > 0.85
+            if behind.sum() < FRONT_MIN_SHARE * len(f["idx"]):
+                continue
+            span_lo, span_hi = np.percentile(t[behind], [5, 95])
+            if span_hi - span_lo < FRONT_MIN_SPAN * (hi - lo):
+                continue
+            back = float(np.percentile(depth[behind], 95))
+            ends = [centre[:2] + (value - centre @ a) * a[:2] for value in (span_lo, span_hi)]
+            f["behind"] = {"depth": back, "points": int(behind.sum()),
+                           "outward": outward[:2].tolist(),
+                           "span_xy": [e.tolist() for e in ends],
+                           "top": float(np.percentile(P[behind, 2], 95))}
+            shown = f"{back / units_per_metre:.2f} m" if units_per_metre else f"{back:.2f}"
+            print(f"  wall with a surface {shown} behind it over "
+                  f"{(span_hi - span_lo) / (hi - lo):.0%} of its length "
+                  f"({int(behind.sum()):,} pts): maybe a furniture front")
+
     for f in found:
         normal, idx, kind = f["normal"], f["idx"], f["kind"]
         vertical = abs(normal[2])
@@ -392,6 +447,7 @@ def main():
             "half_a": float(half[0]), "half_b": float(half[1]),
             "points": int(len(idx)), "color": color.astype(int).tolist(),
             **({"level": f["level"]} if "level" in f else {}),
+            **({"behind": f["behind"]} if "behind" in f else {}),
         })
         print(f"  plane: {kind}, {len(idx):,} pts, "
               f"{2*half[0]:.1f} x {2*half[1]:.1f} units")
