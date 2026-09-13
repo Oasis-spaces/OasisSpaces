@@ -320,6 +320,8 @@ class Agent:
         fronted = set()
         for item in verdict.get("furniture_fronts") or []:
             ident = str(item.get("id", ""))
+            if not ident:
+                continue  # an empty placeholder entry, not a decision
             i = int(ident[1:]) if ident[:1] == "W" and ident[1:].isdigit() else None
             if i not in walls or not walls[i].get("behind"):
                 applied.append(f"ignored {ident}: not a wall with a surface behind it")
