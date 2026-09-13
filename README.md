@@ -3,7 +3,7 @@
 Turn photos of any space into an editable 3D point cloud.
 
 **Run it for free:**
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/sanskargupta1808/OasisSpaces/blob/main/notebooks/OasisSpaces_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Oasis-spaces/OasisSpaces/blob/main/notebooks/OasisSpaces_Colab.ipynb)
 — reconstruction on Google Colab's free GPU (unlocks the dense step). The public
 website is hosted free at **https://oasisspaces.onrender.com**, and the editor at
 **https://oasisspaces.onrender.com/editor/**.
