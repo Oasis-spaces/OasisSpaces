@@ -8,3 +8,8 @@ nohup.out
 # (the Render build does this at deploy time)
 spaces/
 .venv/
+
+# OpenSplat build for this Mac (AGPL-3.0, locally patched): build it from
+# source on each machine rather than publishing the binary
+tools/opensplat
+tools/default.metallib
