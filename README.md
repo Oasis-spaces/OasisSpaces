@@ -160,7 +160,10 @@ the agent's judgement:
 4. `tools/blender_room.py` — a parametric Blender room.
 5. `pipeline/splat_seed.py` then `tools/opensplat` — a Gaussian splat. The
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's
-   sparse points, so low-texture walls start filled in.
+   sparse points, so low-texture walls start filled in. `pipeline/splat_export.py`
+   then writes `splat.splat` beside `splat.ply`: the viewer's compact format,
+   about 8x smaller. Open it with
+   `splat-viewer/index.html?url=../spaces/<name>/splat.splat`.
 
 `tools/opensplat` loads its Metal shaders from `tools/default.metallib`;
 keep the two files together.

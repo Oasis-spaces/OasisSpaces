@@ -626,6 +626,10 @@ class Agent:
                           "-o", str(self.space / "splat.ply")], "splat", "10000 steps")
         self.decide("splat", "accept" if ok else "skip",
                     "trained" if ok else "OpenSplat failed; see the log")
+        if ok:
+            # The viewer loads the compact copy; the .ply stays the full result.
+            self.run([sys.executable, str(ROOT / "pipeline/splat_export.py"),
+                      str(self.space / "splat.ply")], "splat export", "compact copy for the viewer")
         return ok
 
     # ---------------------------------------------------------------- advice
