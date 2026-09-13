@@ -38,7 +38,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
 from semantics import (SEGMENTER_ID, UNRELIABLE, VOCABULARY, Detector, Segmenter,
-                       pixel_labels)
+                       default_device, pixel_labels)
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
 MIN_ANCHORS = 12
@@ -234,7 +234,9 @@ def release_model_memory(torch) -> None:
     import gc
 
     gc.collect()
-    if torch.backends.mps.is_available():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
         torch.mps.empty_cache()
 
 
@@ -314,7 +316,7 @@ def main():
     import torch
     from PIL import Image
 
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    device = default_device()
     if args.depth_model == "moge":
         predictor = MoGeDepth(device, args.work_size)
         print(f"MoGe-2 ({MOGE_CHECKPOINT}) on {device}")

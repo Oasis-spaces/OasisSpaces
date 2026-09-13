@@ -11,6 +11,7 @@ mesh object per detected shape (Floor, Wall_1..N, Furniture_1..N), saves a
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -156,9 +157,19 @@ print(f"saved {blend_path}")
 
 if render_path:
     scene = bpy.context.scene
-    scene.render.engine = "BLENDER_WORKBENCH"
-    scene.display.shading.color_type = "MATERIAL"
-    scene.display.shading.show_object_outline = True
+    # Workbench needs a GPU display context. On a machine without one (Colab),
+    # set OASIS_RENDER_ENGINE=CYCLES to render on the CPU instead.
+    if os.environ.get("OASIS_RENDER_ENGINE", "").upper() == "CYCLES":
+        scene.render.engine = "CYCLES"
+        scene.cycles.device = "CPU"
+        scene.cycles.samples = 16
+        world = bpy.data.worlds.get("World") or bpy.data.worlds.new("World")
+        scene.world = world
+        world.color = (0.8, 0.8, 0.8)
+    else:
+        scene.render.engine = "BLENDER_WORKBENCH"
+        scene.display.shading.color_type = "MATERIAL"
+        scene.display.shading.show_object_outline = True
     scene.render.resolution_x = RES_X
     scene.render.resolution_y = RES_Y
     plan_path = str(Path(render_path).with_name(Path(render_path).stem + "-plan.png"))

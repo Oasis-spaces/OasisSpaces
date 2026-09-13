@@ -53,6 +53,15 @@ HANGING = ["curtain"]
 VOCABULARY = FURNITURE + UNRELIABLE + STRUCTURE
 
 
+def default_device() -> str:
+    """The GPU this machine has: CUDA (Colab), Apple's MPS (Mac), or CPU."""
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    return "mps" if torch.backends.mps.is_available() else "cpu"
+
+
 def canonical(phrase: str) -> str | None:
     """Map the detector's free text back onto VOCABULARY."""
     text = phrase.lower()
@@ -71,7 +80,7 @@ class Detector:
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
         self.torch = torch
-        self.device = device or ("mps" if torch.backends.mps.is_available() else "cpu")
+        self.device = device or default_device()
         self.processor = AutoProcessor.from_pretrained(MODEL_ID)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
             MODEL_ID).to(self.device).eval()
@@ -126,7 +135,7 @@ class Segmenter:
         from transformers import Sam2Model
 
         self.torch = torch
-        self.device = device or ("mps" if torch.backends.mps.is_available() else "cpu")
+        self.device = device or default_device()
         self.model = Sam2Model.from_pretrained(SEGMENTER_ID).to(self.device).eval()
         self.work_size = work_size
 

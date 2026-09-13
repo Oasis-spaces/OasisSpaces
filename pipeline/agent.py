@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -55,6 +56,12 @@ from reconstruct import (  # noqa: E402
 )
 
 STAGES = ["reconstruct", "densify", "shapes", "splat"]
+
+# Tools that live in different places per machine: set BLENDER / OPENSPLAT to
+# override (the Colab notebook installs both under /opt and /content).
+BLENDER = (os.environ.get("BLENDER") or shutil.which("blender")
+           or "/Applications/Blender.app/Contents/MacOS/Blender")
+OPENSPLAT = os.environ.get("OPENSPLAT") or str(ROOT / "tools/opensplat")
 
 # A capture is in good shape when most frames land in one model; below the
 # partial mark, later stages would only rebuild a fragment of the room.
@@ -608,7 +615,7 @@ class Agent:
                     f"{metrics.get('boxes', 0)} boxes worth building"
                     + (f"; found {', '.join(metrics['objects'])}" if metrics.get("objects") else ""),
                     metrics)
-        self.run(["/Applications/Blender.app/Contents/MacOS/Blender", "--background",
+        self.run([BLENDER, "--background",
                   "--python", str(ROOT / "tools/blender_room.py"), "--",
                   str(self.space / "shapes.json"), str(self.space / "room.blend"),
                   str(self.space / "room-render.png")], "blender", "build the room")
@@ -621,7 +628,7 @@ class Agent:
         if not ok:
             self.decide("splat", "skip", "could not build the splat project")
             return False
-        ok, _ = self.run([str(ROOT / "tools/opensplat"), str(self.space / "splat-project"),
+        ok, _ = self.run([OPENSPLAT, str(self.space / "splat-project"),
                           "-n", "10000", "-d", "4",
                           "-o", str(self.space / "splat.ply")], "splat", "10000 steps")
         self.decide("splat", "accept" if ok else "skip",
