@@ -19,7 +19,9 @@ or smears. For a flat surface (the floor now; walls use the same steps):
   4. blobs: flat Gaussians carry the filled photo into the splat, only where
      the floor was never seen, fading out over the last 12 cm into the filmed
      floor instead of stopping at an edge. Stray blobs in those holes at floor
-     level, guesses the training made with no view, are removed first.
+     level, guesses the training made with no view, are removed first, and so
+     is haze over the whole open floor: soft blobs within 60 cm of it that no
+     dense-cloud surface supports.
 
 Writes <surface>-photo.png, -unknown.png and -filled.png beside the space for
 inspection. Used by tools/splat_edit.py fill-floor.
@@ -48,6 +50,8 @@ FRAME_STEP = 2              # every other frame is plenty for the photo
 MAX_DISTANCE_M = 5.0        # farther views are too coarse to use
 MIN_COS = 0.2               # nor views more oblique than ~78 degrees
 CLUTTER_ABOVE_M = (0.10, 0.60)  # blobs this high over the floor are things on it
+HAZE_TOP_M = 0.60           # soft blobs this low over open floor may be haze...
+HAZE_SUPPORT_M = 0.06       # ...when no dense-cloud surface is this close
 
 
 @dataclass
@@ -296,6 +300,31 @@ def fill_floor(room, arr: np.ndarray, log=print) -> np.ndarray:
             under[max(r0[0], 0):max(r1[0], 0), max(c0[0], 0):max(c1[0], 0)] = True
     blocked = standing | under
 
+    # Haze over the floor: soft or oversized blobs hanging within HAZE_TOP_M
+    # of it over open floor, with no dense-cloud surface near them. Training
+    # left them over floor no frame saw clearly; next to a clean floor they
+    # read as fog. Something real on the floor has dense points, so it stays.
+    from scipy.spatial import cKDTree
+
+    rise = scene[:, 2] - height
+    band_idx = np.flatnonzero(inside & (rise > 0.04 * m) & (rise < HAZE_TOP_M * m))
+    r, c = surface.pixel(scene[band_idx])
+    ok = (r >= 0) & (r < rows) & (c >= 0) & (c < cols)
+    open_floor = np.zeros(len(band_idx), bool)
+    open_floor[ok] = ~binary_dilation(blocked, iterations=4)[r[ok], c[ok]]
+    band_idx = band_idx[open_floor]
+    above = dense[(level > 0.04 * m) & (level < (HAZE_TOP_M + 0.1) * m)]
+    support = (cKDTree(above).query(scene[band_idx])[0] if len(above)
+               else np.full(len(band_idx), np.inf))
+    soft = (alpha[band_idx] < 0.6) | (scale[band_idx] > 0.05 * m)
+    haze_idx = band_idx[((support > HAZE_SUPPORT_M * m) & soft) | (alpha[band_idx] < 0.2)]
+    if len(haze_idx):
+        keep = np.ones(len(arr), bool)
+        keep[haze_idx] = False
+        arr, scene, colours = arr[keep], scene[keep], colours[keep]
+        alpha, scale, inside = alpha[keep], scale[keep], inside[keep]
+    log(f"  cleared {len(haze_idx):,} hazy blobs over the open floor")
+
     solid = (alpha > 0.3) & (scene[:, 2] > height + 0.05 * m)
     blob_points = np.stack([arr["x"], arr["y"], arr["z"]], axis=1)[solid].astype(np.float64)
     photo, seen_weight = photograph(space, room, surface, log, occluders=blob_points)
@@ -358,18 +387,6 @@ def fill_floor(room, arr: np.ndarray, log=print) -> np.ndarray:
     guess = np.zeros(len(arr), bool)
     guess[in_grid] = holes[r[in_grid], c[in_grid]]
     guess &= inside & (scene[:, 2] < height + 0.04 * m)
-    # Haze over the filled floor: soft or oversized blobs hanging low where
-    # the dense cloud has nothing standing. They sat over floor no frame saw
-    # clearly, and next to the clean fill they read as fog.
-    near_fill = np.zeros((gh, gw), bool)
-    near_fill[distance_transform_edt(~holes) * BLOB_SPACING_M <= FEATHER_M] = True
-    near_fill &= ~blocked_small
-    over = np.zeros(len(arr), bool)
-    over[in_grid] = near_fill[r[in_grid], c[in_grid]]
-    haze = (over & inside & (scene[:, 2] >= height + 0.04 * m) & (scene[:, 2] < height + 0.5 * m)
-            & ((alpha < 0.6) | (scale > 0.05 * m)))
-    log(f"  removed {int(haze.sum()):,} hazy blobs hanging over the filled floor")
-    guess |= haze
     distance_in = distance_transform_edt(~holes) * BLOB_SPACING_M      # metres from the nearest hole
     opacity = np.where(holes, 0.9, 0.9 * np.clip(1 - distance_in / FEATHER_M, 0, 1))
     # Under furniture next to a hole, keep going a little at full strength, out of sight.
