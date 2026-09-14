@@ -154,7 +154,9 @@ the agent's judgement:
    and highest downward-facing height levels inside the walls, so a strip of
    floor is enough and a lower corridor floor seen through a door is ignored.
    Detected furniture is excluded from plane fitting and becomes one box per
-   object; whatever is left is grouped geometrically as before. The
+   object; the storage labels (wardrobe, cabinet, shelf, bookcase, chest of
+   drawers) are grouped first, because a cupboard filmed side-on comes out as
+   slivers of each. Whatever is left is grouped geometrically as before. The
    classifier keeps a detected object's identity but still applies its
    sanity checks, and marks a box `build: false` when it is scan debris
    (implausibly large, floating, or too sparse) so the Blender room skips it.
@@ -163,8 +165,37 @@ the agent's judgement:
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's
    sparse points, so low-texture walls start filled in. `pipeline/splat_export.py`
    then writes `splat.splat` beside `splat.ply`: the viewer's compact format,
-   about 8x smaller. Open it with
-   `splat-viewer/index.html?url=../spaces/<name>/splat.splat`.
+   about 8x smaller. It also writes `splat.view.json`, the starting camera: of
+   the views at, just behind or just ahead of each capture position, level and
+   turned a little either way, the one whose screen shows the most splat with
+   the least blur (no wall pressed against the lens, no cupboard filmed
+   edge-on). The viewer opens there, with a fixed 55° vertical field of view.
+   Open it with `splat-viewer/index.html?url=../spaces/<name>/splat.splat`.
+
+## Editing the splat
+
+`tools/splat_edit.py` edits a trained splat using what stage 3 measured, with
+no stage re-run:
+
+```bash
+python3 tools/splat_edit.py objects spaces/<name>          # the objects, sizes, positions in metres
+python3 tools/splat_edit.py remove spaces/<name> B1        # take the bed out
+python3 tools/splat_edit.py add spaces/<name> sofa --at B1 --against-wall
+python3 tools/splat_edit.py look spaces/<name> B1          # a viewer link looking at it
+```
+
+`remove` deletes the blobs in the object's box (plus a margin for a blanket
+over the edge, and anything above it that is unlike the wall behind), but
+never the floor, another piece of furniture or the wall paint. The floor and
+wall it hid were never filmed, so they are patched with texture sampled from
+open floor nearby and from the wall above. `add` builds a sofa, armchair,
+bed, table, chair, desk, wardrobe or box from simple parts as blobs, at a
+typical size or `--size W D H` in metres, standing on the floor at `--at x y`
+(metres from the room's centre) or where an object stood, optionally backed
+against the nearest wall. Edits chain in `splat-edited.ply` / `.splat`
+(`--fresh` starts again). Added furniture is evenly shaded, a placement
+preview rather than a filmed object; a patch is a plausible guess, not what
+was really behind the object.
 
 `tools/opensplat` loads its Metal shaders from `tools/default.metallib`;
 keep the two files together.
@@ -199,6 +230,9 @@ pipeline/densify.py       MoGe-2 depth fused over COLMAP poses -> cloud-dense.pl
 pipeline/semantics.py     open-vocabulary object detection for keyframes (local)
 pipeline/shapes.py        planes and boxes from the dense cloud
 pipeline/splat_seed.py    OpenSplat project seeded from the dense cloud
+pipeline/splat_export.py  compact .splat for the viewer, and its starting camera
+tools/splat_edit.py       remove objects from a splat and add furniture to it
+tools/object_frames.py    the frames that show each object best, for Claude's review
 pipeline/pointcloud.py    PLY I/O, voxel downsample, outlier removal (numpy)
 tools/                    shape classifier, Blender room, OpenSplat binary + metallib
 scripts/process_video.sh  the full chain, video -> splat
