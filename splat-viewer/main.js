@@ -736,6 +736,10 @@ let defaultViewMatrix = [
     0.03, 6.55, 1,
 ];
 let viewMatrix = defaultViewMatrix;
+// OasisSpaces: a vertical field of view from <name>.view.json. The demo's lens
+// is a fixed focal length in pixels, so a bigger window showed a wider view,
+// reaching past what the capture filmed from there.
+let viewFovY = null;
 async function main() {
     let carousel = true;
     const params = new URLSearchParams(location.search);
@@ -747,6 +751,8 @@ async function main() {
         params.get("url") || "train.splat",
         location.href,
     );
+    const fovParam = parseFloat(params.get("fov"));
+    if (fovParam > 10 && fovParam < 120) viewFovY = fovParam;
     // OasisSpaces: pipeline/splat_export.py writes <name>.view.json beside a
     // splat with a camera from the capture, so the page opens where the splat
     // is sharp instead of at the demo scene's camera.
@@ -762,6 +768,9 @@ async function main() {
                 if (Array.isArray(view.viewMatrix) && view.viewMatrix.length === 16) {
                     viewMatrix = view.viewMatrix;
                     carousel = false;
+                }
+                if (typeof view.fovY === "number" && view.fovY > 10 && view.fovY < 120) {
+                    viewFovY = view.fovY;
                 }
             }
         } catch (err) {}
@@ -862,6 +871,10 @@ async function main() {
     gl.vertexAttribDivisor(a_index, 1);
 
     const resize = () => {
+        if (viewFovY) {
+            const focal = innerHeight / 2 / Math.tan((viewFovY * Math.PI) / 360);
+            camera = { ...camera, fx: focal, fy: focal };
+        }
         gl.uniform2fv(u_focal, new Float32Array([camera.fx, camera.fy]));
 
         projectionMatrix = getProjectionMatrix(

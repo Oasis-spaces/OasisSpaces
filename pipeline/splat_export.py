@@ -9,12 +9,12 @@ the scene appears as it streams in. The walkthrough's 46 MB splat.ply becomes
 mid-transfer with "No buffer space available". The view-dependent colour
 (higher spherical harmonics) is dropped, as the viewer ignores it anyway.
 
-It also writes <name>.view.json: the pose of the capture frame that shows the
-most of the room (see start_view). splat-viewer opens there instead of
-at its demo camera, which sits somewhere no frame was taken and shows a smear.
+It also writes <name>.view.json: a starting camera and field of view chosen
+from the capture positions (see start_view). splat-viewer opens there instead
+of at its demo camera, which sits somewhere no frame was taken and shows a smear.
 
 Usage:
-    python3 pipeline/splat_export.py spaces/<name>/splat.ply [out.splat]
+    python3 pipeline/splat_export.py spaces/<name>/splat.ply [out.splat] [--view-only]
 """
 
 from __future__ import annotations
@@ -68,74 +68,205 @@ def ply_to_splat(src: Path, dst: Path) -> int:
     return len(out)
 
 
-START_STEP_IN = 0.0  # stepping in made the viewer draw nothing for the walkthrough; revisit
+# The viewer shows this vertical field of view whatever the window's size (see
+# splat-viewer/main.js), close to a phone's portrait frame (about 62 degrees).
+VIEW_FOV_Y = 55.0
+VIEW_ASPECT = 16 / 10
+PITCH_DOWN = 10.0        # degrees: a level view, tipped a little towards the floor
+NEAR_METRES = 1.0        # a surface closer than this fills the view out of focus
+CLEAR_METRES = 0.35      # the camera must stand at least this far from any surface
+BACK_OFF_METRES = (-0.5, 0.0, 0.5, 1.0)   # negative: a step forward
+TURNS = (-25.0, 0.0, 25.0)
+MAX_CAMERAS = 60
+GRID = (32, 20)          # screen cells for scoring
 
 
-def start_view(space: Path) -> dict | None:
-    """A viewer camera at the capture frame that shows the most of the room:
-    it faces the middle of the solved points and sees many of them from far
-    away. (Most matched points alone picks close-ups of textured surfaces.)"""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from densify import read_images_bin, read_points3d_bin
-
+def model_dir(space: Path) -> Path | None:
+    """The camera model the splat was trained with."""
     candidates = []
     meta = space / "densify.json"
     if meta.exists():
-        candidates.append(Path(json.loads(meta.read_text())["model_dir"]))
+        named = Path(json.loads(meta.read_text())["model_dir"])
+        candidates += [named, space / "workspace" / "sparse" / named.name]
     candidates += sorted((p.parent for p in (space / "workspace" / "sparse").glob("*/images.bin")),
                          key=lambda d: -(d / "images.bin").stat().st_size)
     candidates.append(space / "splat-project")
-    model = next((d for d in candidates
-                  if (d / "images.bin").exists() and (d / "points3D.bin").exists()), None)
-    if model is None:
-        return None
-    images = read_images_bin(model / "images.bin")
-    points = read_points3d_bin(model / "points3D.bin")
-    if not points:
-        return None
-    xyz = np.array(list(points.values()))
-    centre = np.median(xyz, axis=0)
-    best, best_score = None, -1.0
-    for im in images.values():
-        R, t = im["R"], im["t"]
-        ahead = R @ centre + t
-        if ahead[2] <= 0 or ahead[2] / np.linalg.norm(ahead) < np.cos(np.radians(45)):
-            continue  # the middle of the room is not in front of this camera
-        seen = [points[i] for i in im["point3D_ids"] if i >= 0 and i in points]
-        if len(seen) < 50:
-            continue
-        depth = float(np.median((np.array(seen) @ R.T + t)[:, 2]))
-        score = np.sqrt(len(seen)) * depth
-        if score > best_score:
-            best, best_score = im, score
-    if best is None:
-        best = max(images.values(), key=lambda im: int((im["point3D_ids"] >= 0).sum()))
-    R, t = best["R"], best["t"].copy()
-    # Splats often keep a haze of stray Gaussians right around the recorded
-    # camera positions, so step forward a third of the way to what the frame
-    # looks at (moving the camera forward lowers every point's depth).
-    seen = [points[i] for i in best["point3D_ids"] if i >= 0 and i in points]
-    if seen:
-        t[2] -= START_STEP_IN * float(np.median((np.array(seen) @ R.T + t)[:, 2]))
+    return next((d for d in candidates
+                 if (d / "images.bin").exists() and (d / "points3D.bin").exists()), None)
+
+
+def look_matrix(position: np.ndarray, forward: np.ndarray, up: np.ndarray) -> np.ndarray:
+    """World-to-camera rotation rows (right, down, forward) for a level camera
+    at `position` looking along `forward`; splat-viewer's camera looks along +z
+    with image-y pointing down, like COLMAP's."""
+    f = forward / np.linalg.norm(forward)
+    down = -(up - f * (up @ f))
+    down /= np.linalg.norm(down)
+    right = np.cross(down, f)
+    return np.stack([right, down, f])
+
+
+def view_json(R: np.ndarray, position: np.ndarray, **extra) -> dict:
+    t = -R @ position
     # Column-major world-to-camera matrix, the layout splat-viewer's view uses.
     view = [R[0][0], R[1][0], R[2][0], 0, R[0][1], R[1][1], R[2][1], 0,
             R[0][2], R[1][2], R[2][2], 0, t[0], t[1], t[2], 1]
-    return {"frame": best["name"], "viewMatrix": [round(float(v), 5) for v in view]}
+    return {"viewMatrix": [round(float(v), 5) for v in view], "fovY": VIEW_FOV_Y, **extra}
+
+
+def splat_blobs(path: Path, count: int = 120_000):
+    """Positions, largest radius and opacity of the splat's Gaussians."""
+    v = read_splat_ply(path)
+    alpha = 1 / (1 + np.exp(-v["opacity"].astype(np.float64)))
+    keep = np.flatnonzero(alpha > 0.1)
+    if len(keep) > count:
+        keep = np.random.default_rng(0).choice(keep, count, replace=False)
+    v = v[keep]
+    xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float64)
+    radius = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], axis=1)
+                    .astype(np.float64)).max(axis=1)
+    return xyz, radius, alpha[keep]
+
+
+# A patch of screen is blurry when most of the Gaussians making its surface
+# are drawn wider than this share of the screen's height: a surface the camera
+# only saw edge-on, or one right in front of the lens.
+BLUR_SCREEN_SHARE = 0.09
+SURFACE_BAND_METRES = 0.25
+SMEAR_METRES = 1.5
+
+
+def score_view(blobs, R: np.ndarray, position: np.ndarray, metre: float) -> tuple:
+    """(score, coverage, blurry share, median depth in metres) of the viewer's
+    picture from here: how much of the screen shows the splat, and how little
+    of it is blur."""
+    xyz, radius, alpha = blobs
+    local = (xyz - position) @ R.T
+    z = local[:, 2]
+    tan_y = np.tan(np.radians(VIEW_FOV_Y / 2))
+    tan_x = tan_y * VIEW_ASPECT
+    ok = z > 0.05 * metre
+    sx = local[ok, 0] / z[ok] / tan_x
+    sy = local[ok, 1] / z[ok] / tan_y
+    zs, rs, al = z[ok], radius[ok], alpha[ok]
+    inside = (np.abs(sx) < 1) & (np.abs(sy) < 1)
+    sx, sy, zs, rs, al = sx[inside], sy[inside], zs[inside], rs[inside], al[inside]
+    cols, rows = GRID
+    if len(zs) < 200:
+        return (0.0, 0.0, 1.0, 0.0)
+    cell = (((sy + 1) / 2 * rows).astype(int).clip(0, rows - 1) * cols
+            + ((sx + 1) / 2 * cols).astype(int).clip(0, cols - 1))
+    front = np.full(rows * cols, np.inf)
+    solid = al > 0.3
+    np.minimum.at(front, cell[solid], zs[solid])
+    surface = zs <= front[cell] + SURFACE_BAND_METRES * metre
+    counts = np.bincount(cell[surface], minlength=rows * cols)
+    wide = (2 * 3 * rs / zs / tan_y / 2) > BLUR_SCREEN_SHARE   # drawn width / screen height
+    wide_counts = np.bincount(cell[surface], weights=wide[surface].astype(float),
+                              minlength=rows * cols)
+    covered = counts >= 4
+    blurry = covered & (wide_counts > 0.5 * np.maximum(counts, 1))
+    near = covered & (front < NEAR_METRES * metre)
+    # Big blobs close to the lens smear across the screen from wherever their
+    # centre is, even just outside it: mark every cell they reach.
+    close = (z > 0.05 * metre) & (z < SMEAR_METRES * metre) & (alpha > 0.15)
+    reach = 3 * radius[close] / z[close] / tan_y          # drawn radius, in half-screen-heights
+    big = reach > BLUR_SCREEN_SHARE * 2
+    if big.any():
+        cx = local[close, 0][big] / z[close][big] / tan_y   # centre, half-screen-heights
+        cy = local[close, 1][big] / z[close][big] / tan_y
+        gx = ((np.arange(cols) + 0.5) / cols * 2 - 1) * VIEW_ASPECT
+        gy = (np.arange(rows) + 0.5) / rows * 2 - 1
+        GX, GY = np.meshgrid(gx, gy)
+        hits = np.zeros(rows * cols)
+        for x, y, r in zip(cx, cy, reach[big]):
+            hits += (((GX - x) ** 2 + (GY - y) ** 2) < (0.6 * r) ** 2).ravel()
+        blurry |= hits >= 2
+    coverage = float(covered.mean())
+    bad = float((blurry | near).mean())
+    depth = float(np.median(zs[surface])) / metre
+    score = coverage * (1 - bad) ** 2 * min(1.0, depth / 1.5)
+    return (score, coverage, bad, depth)
+
+
+def start_view(space: Path, splat: Path | None = None) -> dict | None:
+    """A viewer camera where the splat looks its best: at or a step behind a
+    capture position, level, turned a little either way, and scored by
+    score_view on the splat itself. The exact capture pose often sits pressed
+    against a wall, or beside a cupboard filmed edge-on, which then fills part
+    of the screen as a blur."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from densify import read_images_bin
+
+    model = model_dir(space)
+    splat = splat or space / "splat.ply"
+    if model is None or not splat.exists():
+        return None
+    images = list(read_images_bin(model / "images.bin").values())
+    if not images:
+        return None
+    blobs = splat_blobs(splat)
+    shapes_path = space / "shapes.json"
+    if shapes_path.exists():
+        up = np.array(json.loads(shapes_path.read_text())["world"])[2]
+    else:
+        from shapes import estimate_up
+
+        up = estimate_up(model)
+    meta = space / "densify.json"
+    metre = (json.loads(meta.read_text()).get("colmap_units_per_metre") if meta.exists()
+             else None) or float(np.linalg.norm(np.percentile(blobs[0], 95, 0)
+                                                - np.percentile(blobs[0], 5, 0))) / 5
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(blobs[0][blobs[2] > 0.3])
+    step = max(1, len(images) // MAX_CAMERAS)
+    best = None
+    for info in sorted(images, key=lambda im: im["name"])[::step]:
+        centre = -info["R"].T @ info["t"]
+        heading = info["R"][2] - up * (info["R"][2] @ up)
+        if np.linalg.norm(heading) < 1e-6:
+            continue
+        heading /= np.linalg.norm(heading)
+        side = np.cross(up, heading)
+        for turn in TURNS:
+            a = np.radians(turn)
+            level = np.cos(a) * heading + np.sin(a) * side
+            p = np.radians(PITCH_DOWN)
+            forward = np.cos(p) * level - np.sin(p) * up
+            R = look_matrix(centre, forward, up)
+            for back in BACK_OFF_METRES:
+                position = centre - level * back * metre
+                if tree.query(position)[0] < CLEAR_METRES * metre:
+                    continue  # standing inside furniture or a wall
+                score, coverage, bad, depth = score_view(blobs, R, position, metre)
+                if best is None or score > best[0]:
+                    best = (score, R, position, info["name"], turn, back, coverage, bad, depth)
+    if best is None:
+        return None
+    score, R, position, name, turn, back, coverage, bad, depth = best
+    return view_json(R, position, frame=name, turn=turn, backMetres=back,
+                     coverage=round(coverage, 2), blurShare=round(bad, 2),
+                     medianDepthMetres=round(depth, 2))
 
 
 def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    src = Path(sys.argv[1])
-    dst = Path(sys.argv[2]) if len(sys.argv) > 2 else src.with_suffix(".splat")
-    count = ply_to_splat(src, dst)
-    print(f"{count:,} gaussians -> {dst} ({dst.stat().st_size / 1e6:.1f} MB, "
-          f"from {src.stat().st_size / 1e6:.1f} MB)")
-    view = start_view(src.parent)
+    args = [a for a in sys.argv[1:] if a != "--view-only"]
+    src = Path(args[0])
+    dst = Path(args[1]) if len(args) > 1 else src.with_suffix(".splat")
+    if "--view-only" not in sys.argv:
+        count = ply_to_splat(src, dst)
+        print(f"{count:,} gaussians -> {dst} ({dst.stat().st_size / 1e6:.1f} MB, "
+              f"from {src.stat().st_size / 1e6:.1f} MB)")
+    view = start_view(src.parent, src)
     if view:
         view_path = dst.with_name(dst.stem + ".view.json")
         view_path.write_text(json.dumps(view) + "\n")
-        print(f"starting camera: {view['frame']} -> {view_path}")
+        print(f"starting camera: near {view['frame']} (turned {view['turn']:+.0f} deg, "
+              f"{view['backMetres']:.1f} m back; {view['coverage']:.0%} of the screen "
+              f"covered, {view['blurShare']:.0%} blurred or too close) -> {view_path}")
 
 
 if __name__ == "__main__":
