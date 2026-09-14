@@ -42,6 +42,10 @@ FURNITURE = [
     "cabinet", "chest of drawers", "shelf", "bookcase", "lamp", "rug",
     "potted plant", "pillow",
 ]
+# Tall storage, often seen only as pieces: a cupboard filmed side-on comes out
+# as a "wardrobe" strip down one edge and a "bookcase" strip along its base.
+# shapes.py clusters these together into one box.
+STORAGE = ["wardrobe", "cabinet", "chest of drawers", "shelf", "bookcase"]
 # Depth here is meaningless: the model sees through the surface or into a
 # reflection, so these points are dropped from the cloud.
 UNRELIABLE = ["mirror", "window", "television", "computer monitor"]

@@ -209,11 +209,22 @@ def room_walls(planes: list[dict], room: dict) -> list[dict]:
     return walls
 
 
+# A perpendicular wall only counts for a corner if it actually reaches the
+# wall being joined: within this share of the room's side of it. (A short wall
+# by the window once caught the bottom wall's end although it stopped 1.4 m
+# short of it, leaving that wall ending in open floor.)
+CORNER_REACH_FRAC = 0.25
+
+
 def join_corners(walls: list[dict], room: dict) -> None:
-    """Move each wall end to the nearest perpendicular wall, if one is close."""
+    """Move each wall end to the nearest perpendicular wall that is close to
+    that end and reaches this wall."""
     for w in walls:
         side = 2 * (room["half_u"] if w["along"] == "u" else room["half_v"])
-        crossing = [c["offset"] for c in walls if c["along"] != w["along"]]
+        across_side = 2 * (room["half_v"] if w["along"] == "u" else room["half_u"])
+        reach = CORNER_REACH_FRAC * across_side
+        crossing = [c["offset"] for c in walls if c["along"] != w["along"]
+                    and c["lo"] - reach <= w["offset"] <= c["hi"] + reach]
         for end in ("lo", "hi"):
             near = [c for c in crossing if abs(c - w[end]) <= CORNER_JOIN_FRAC * side]
             if near:
@@ -290,6 +301,43 @@ def drop_collapsed(walls: list[dict], room: dict) -> list[dict]:
     return kept
 
 
+# Two parallel walls this close on the same side of the room cannot both bound
+# it. When the inner one is much shorter (a doorway's frame, a curtain plane, a
+# wall seen past a door), the outer one is the room's edge. The pan video's
+# right side had both, 0.38 m apart, and the short inner one ended in open
+# floor.
+PARALLEL_GAP_METRES = 0.60
+PARALLEL_GAP_FRAC = 0.20
+INNER_MAX_LENGTH_SHARE = 0.70
+
+
+def drop_inner_parallel(walls: list[dict], room: dict, units_per_metre=None) -> tuple[list[dict], list[str]]:
+    width = 2 * min(room["half_u"], room["half_v"])
+    max_gap = (PARALLEL_GAP_METRES * units_per_metre if units_per_metre
+               else PARALLEL_GAP_FRAC * width)
+    dropped, notes = set(), []
+    for inner in walls:
+        for outer in walls:
+            if inner is outer or inner["along"] != outer["along"] or id(outer) in dropped:
+                continue
+            same_side = inner["offset"] * outer["offset"] > 0
+            outside = abs(outer["offset"]) > abs(inner["offset"])
+            gap = abs(outer["offset"] - inner["offset"])
+            length_in, length_out = inner["hi"] - inner["lo"], outer["hi"] - outer["lo"]
+            overlap = min(inner["hi"], outer["hi"]) - max(inner["lo"], outer["lo"])
+            if (same_side and outside and 0 < gap <= max_gap
+                    and length_in <= INNER_MAX_LENGTH_SHARE * length_out
+                    and overlap >= 0.5 * length_in):
+                dropped.add(id(inner))
+                inner["plane"]["build"] = False
+                inner["plane"]["reason"] = ("a shorter wall just inside a parallel one: "
+                                            "the outer wall bounds the room")
+                name = f"W{inner['index']}" if "index" in inner else "a wall"
+                notes.append(f"left out {name}: shorter and just inside a parallel wall")
+                break
+    return [w for w in walls if id(w) not in dropped], notes
+
+
 def square_up_room(planes: list[dict], labels: list[str], ctx: RoomContext,
                    cameras: list | None = None) -> int:
     """Regularise walls the way room scanners do: exactly vertical, along the
@@ -348,6 +396,67 @@ def trim_box(box: dict, room: dict, wall: dict, sign: float) -> bool:
         box["max"][k] = min(box["max"][k], limit)
     else:
         box["min"][k] = max(box["min"][k], limit)
+    return True
+
+
+# Tall storage is only ever filmed from the front, so its back is a guess: a
+# wardrobe box this close to a wall it runs along is extended back to that
+# wall, as long as the result stays a believable depth.
+STORAGE_BACK_GAP_METRES = 0.60
+STORAGE_BACK_GAP_FRAC = 0.20     # of the room's width, without a metric scale
+STORAGE_MAX_DEPTH_METRES = 0.80
+STORAGE_MAX_DEPTH_FRAC = 0.27
+
+
+def back_storage_to_walls(walls: list[dict], boxes: list[dict], room: dict, size,
+                          units_per_metre=None) -> list[str]:
+    """Extend each wardrobe box back to the wall behind it (see above)."""
+    width = 2 * min(room["half_u"], room["half_v"])
+    max_gap = (STORAGE_BACK_GAP_METRES * units_per_metre if units_per_metre
+               else STORAGE_BACK_GAP_FRAC * width)
+    max_depth = (STORAGE_MAX_DEPTH_METRES * units_per_metre if units_per_metre
+                 else STORAGE_MAX_DEPTH_FRAC * width)
+    notes = []
+    for b in boxes:
+        if b.get("label") != "wardrobe":
+            continue
+        u_lo, u_hi, v_lo, v_hi = box_in_room(b, room)
+        best = None
+        for w in walls:
+            along_lo, along_hi, across_lo, across_hi = (
+                (u_lo, u_hi, v_lo, v_hi) if w["along"] == "u" else (v_lo, v_hi, u_lo, u_hi))
+            if along_hi <= w["lo"] or along_lo >= w["hi"]:
+                continue  # not in front of this wall
+            if w["offset"] <= across_lo:
+                gap, sign = across_lo - w["offset"], -1.0
+            elif w["offset"] >= across_hi:
+                gap, sign = w["offset"] - across_hi, 1.0
+            else:
+                continue  # the wall runs through the box
+            depth = across_hi - across_lo + gap
+            if 0 < gap <= max_gap and depth <= max_depth and (best is None or gap < best[0]):
+                best = (gap, sign, w)
+        if best is None:
+            continue
+        gap, sign, w = best
+        if extend_box_to_wall(b, room, w, sign):
+            notes.append(f"backed the {b.get('detected') or 'wardrobe'} {size(gap)} "
+                         "onto the wall behind it (its back is never filmed)")
+    return notes
+
+
+def extend_box_to_wall(box: dict, room: dict, wall: dict, sign: float) -> bool:
+    """Move the box's side facing the wall onto the wall. Works when the
+    room's axes line up with the scene's (shapes.py turns the scene)."""
+    across = room["axis_v"] if wall["along"] == "u" else room["axis_u"]
+    k = 0 if abs(across[0]) > 0.999 else 1 if abs(across[1]) > 0.999 else None
+    if k is None:
+        return False
+    limit = room["center"][k] + wall["offset"] * across[k]
+    if across[k] * sign > 0:
+        box["max"][k] = max(box["max"][k], limit)
+    else:
+        box["min"][k] = min(box["min"][k], limit)
     return True
 
 
@@ -523,6 +632,11 @@ def finish_room(data: dict, units_per_metre: float | None = None) -> list[str]:
         notes.append(f"cut {size(cut)} off W{w['index']}: it ran on past the room, "
                      "where no camera stood")
     walls = drop_collapsed(walls, room)
+    walls, left_out = drop_inner_parallel(walls, room, units_per_metre)
+    if left_out:
+        notes += left_out
+        join_corners(walls, room)
+    notes += back_storage_to_walls(walls, furniture, room, size, units_per_metre)
     notes += contain_furniture(walls, furniture, room, size)
     join_corners(walls, room)
     before = len(walls)
@@ -726,7 +840,13 @@ def classify_box(box: dict, ctx: RoomContext) -> tuple[str, str, dict]:
     elong = max(sx, sy) / max(min(sx, sy), 1e-9)
     rel_density = None
     if ctx.ref_density:
-        rel_density = (box["points"] / max(box_surface_area(box), 1e-9)) / ctx.ref_density
+        # A recognised object is filmed from its front, so its points cover one
+        # face: judge it over its largest face. (A cupboard filmed side-on
+        # failed at 10% over all six.) Unrecognised debris keeps the whole box.
+        area = box_surface_area(box)
+        if box.get("source") == "detected":
+            area = max(sx * sy, sx * sz, sy * sz)
+        rel_density = (box["points"] / max(area, 1e-9)) / ctx.ref_density
     metrics = {"fp_frac": fp_frac, "h_frac": h_frac, "gap_frac": gap_frac,
                "elong": elong, "rel_density": rel_density}
 

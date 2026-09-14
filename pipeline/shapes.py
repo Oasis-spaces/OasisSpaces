@@ -28,7 +28,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from densify import read_images_bin
 from pointcloud import load_ply
-from semantics import FURNITURE, HANGING
+from semantics import FURNITURE, HANGING, STORAGE
 
 
 def read_camera_rotations(path):
@@ -476,20 +476,25 @@ def main():
               f"size {np.round(hi - lo, 1).tolist()}")
 
     # Detected furniture: one box per object, clustered so that two chairs
-    # side by side do not merge into one.
+    # side by side do not merge into one. The storage labels are clustered
+    # together (see STORAGE): each is often only a sliver of the same cupboard.
     min_points = max(2000, int(len(P) * 0.002))
     if point_labels is not None:
-        for name in FURNITURE:
-            if name not in names:
-                continue
-            idx = np.where(point_labels == names.index(name))[0]
+        storage = [n for n in STORAGE if n in names]
+        classes = ([storage] if storage else []) + \
+            [[n] for n in FURNITURE if n in names and n not in STORAGE]
+        for class_names in classes:
+            ids = [names.index(n) for n in class_names]
+            idx = np.where(np.isin(point_labels, ids))[0]
             if len(idx) < min_points:
                 continue
             groups = cluster_grid(P[idx], cell=extent * 0.02)
             for group in np.unique(groups):
                 members = idx[groups == group]
-                if len(members) >= min_points:
-                    add_box(members, "detected", name)
+                if len(members) < min_points:
+                    continue
+                counts = np.bincount(point_labels[members], minlength=len(names))
+                add_box(members, "detected", names[int(np.argmax(counts))])
 
     # Whatever the planes and the detector left over, grouped geometrically.
     leftover = np.where(remaining)[0]

@@ -50,6 +50,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from advisor import Advisor  # noqa: E402
 from evaluate_space import evaluate, ply_vertex_count  # noqa: E402
 from plan_image import draw_plan  # noqa: E402
+from object_frames import draw_object_frames  # noqa: E402
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
 from reconstruct import (  # noqa: E402
     camera_path_jump, registered_images, solved_models,
@@ -269,13 +270,23 @@ class Agent:
                                "size": [size(b["max"][k] - b["min"][k]) for k in range(3)],
                                "points": b["points"], "built": b.get("build", True),
                                "check": b.get("reason")})
+        sheet = self.space / "object-frames.png"
+        picked = self.safe(draw_object_frames, self.space, sheet, default={}) or {}
         prompt = (
             "You are reviewing the room structure our 3D pipeline measured from a phone "
             "video. The first image is a floor plan seen from above: darker areas are "
             "dense reconstructed points, the blue outline is the floor, red numbered "
             "lines (W) are wall candidates, green numbered rectangles (B) are furniture "
-            "boxes that will be built, grey ones were rejected by our checks. The other "
-            "images are frames from the video.\n"
+            "boxes that will be built, grey ones were rejected by our checks. "
+            + ("The second image shows, for each box, the two video frames where it is "
+               "seen best, cropped around it, with the box's outline drawn in green, its "
+               "B number and size: judge each box from its own crops, since an object at "
+               "the side of the room may not appear in any other frame. A door sits flush "
+               "in its wall, in a frame, and swings; a cupboard, almirah or wardrobe stands "
+               "in front of a wall with depth, and often handles, drawers, shelves or a "
+               "decorated top. Filmed side-on, a cupboard's front can look like a door, "
+               "so check both crops. " if picked else "")
+            + "The remaining images are frames looking into the room.\n"
             f"Candidates (sizes in {'metres' if units else 'scene units'}): "
             f"{json.dumps(candidates)}\n"
             "Decide what each candidate is. You cannot move or resize anything; the "
@@ -300,8 +311,8 @@ class Agent:
             '"drop_boxes": [{"id": string, "why": string}], '
             '"relabel_boxes": [{"id": string, "label": string, "why": string}], '
             '"notes": one sentence}')
-        verdict = self.advisor.ask_json(prompt, [plan, *self.room_frames(3)],
-                                        max_tokens=2048)
+        images = [plan] + ([sheet] if picked else []) + self.room_frames(3)
+        verdict = self.advisor.ask_json(prompt, images, max_tokens=2048)
         if not verdict:
             print(f"    claude (structure): no usable answer"
                   + (f" ({self.advisor.reason})" if self.advisor.reason else ""))

@@ -399,6 +399,13 @@ def main():
                     f["detections"] = detector.detect(Image.open(workspace / "images" / name))
                     seen = ", ".join(sorted({d["label"] for d in f["detections"]}))
                     print(f"  {name}: {seen or 'nothing detected'}")
+                # Kept so stage 3 can show Claude the frame where each object
+                # was actually seen (agent.py object_frames).
+                meta["detections"] = {
+                    images[f["id"]]["name"]: [
+                        {"label": d["label"], "score": d["score"],
+                         "box": [round(v) for v in d["box"]]} for d in f["detections"]]
+                    for f in frames if f["detections"]}
                 del detector
                 release_model_memory(torch)
             except Exception as exc:  # transformers or weights missing
