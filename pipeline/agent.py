@@ -82,6 +82,29 @@ FILL_MAX_SOLID_CHANGE = 6.0
 FILL_DAMAGE_STEP = 40
 FILL_MAX_DAMAGED_SHARE = 0.005
 FILL_EDGE_PX = 12       # pixels this close to an original gap are allowed to change
+FILL_MIN_BLOBS = 500    # smaller fills are not worth a review (and are not kept)
+FILL_REVIEW_PROMPT = """You review an automatic fill in a 3D room reconstruction (a Gaussian splat) made from a phone video.
+The reconstruction has gaps where the camera never saw a surface clearly: black holes, see-through patches or smears on
+floors, walls and furniture. A fill adds new surface there, continuing the texture around it.
+
+Each image is one filled surface ({surfaces}): on the left a real video frame, then the reconstruction rendered from
+exactly that camera before the fill and after it. Decide for each surface whether to keep its fill.
+
+Some filled areas were never seen clearly by any video frame (seen_by_video false): for those the left image is only the
+nearest video frame, from a different angle, to show what the room's floor and walls look like, and the before/after
+renders come from a nearby viewpoint. Judge those by whether the holes are now covered by believable surface that matches
+the room, without new artefacts.
+
+Keep it only if the after image is better: holes or see-through patches are now covered by surface that looks like its
+surroundings in the video frame, and nothing that looked right before looks worse.
+Reject it if anything got worse, even if some gaps were covered: blotches, streaks or stains that are not in the video frame;
+a patch whose colour, brightness or texture visibly differs from its surroundings; hard edges or a pasted-on look; a door,
+window, doorway, shelf opening, curtain or any object painted over, darkened or partly erased; or if you see no real
+difference (then the fill only adds risk).
+Differences that are the same in before and after are not the fill's doing.
+
+Reply with a single JSON object and nothing else:
+{{"surfaces": [{{"id": "S1", "keep": true or false, "why": "one sentence naming what you saw"}}]}}"""
 # Walls this rough (as a share of the room's diagonal) mean weak geometry.
 NOISY_WALL_RMS_PCT = 1.5
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
@@ -194,6 +217,12 @@ class Agent:
         else:
             print(f"    done in {seconds}s")
         return result.returncode == 0, result.stdout
+
+    def log(self, text: str) -> None:
+        """A line for the space's log only (steps that run in this process)."""
+        self.space.mkdir(parents=True, exist_ok=True)
+        with open(self.log_path, "a") as log:
+            log.write(text + "\n")
 
     def decide(self, stage: str, action: str, why: str, metrics: dict | None = None,
                seconds: float | None = None) -> None:
@@ -696,14 +725,15 @@ class Agent:
 
     def fill_surfaces(self) -> None:
         """Fill floor, wall and flat furniture faces the splat has no blobs for
-        (tools/surface_fill.py) into splat-filled, then keep that only if it
-        helps: rendered views before and after must show fewer see-through
-        gaps and nearly unchanged pixels elsewhere, and Claude must agree."""
+        (tools/surface_fill.py), judged surface by surface: each filled surface
+        is rendered before and after from a video frame that looks at it,
+        beside that real frame; Claude keeps or rejects each one, and a
+        measured damage check can veto. Only kept surfaces go into
+        splat-filled; choose_best then decides between it and the trained splat."""
         import numpy as np
-        from PIL import Image, ImageDraw
-        from splat_render import render
+        from splat_edit import Room, save
         from splat_tools import read_splat
-        from surface_fill import LAMA_PATH
+        from surface_fill import LAMA_PATH, fill_room
 
         record_path = self.space / "splat-filled.fill.json"
         if not LAMA_PATH.exists():
@@ -712,118 +742,145 @@ class Agent:
         if not (self.space / "shapes.json").exists():
             self.decide("splat", "skip", "no fill: stage 3's room model is needed to know the surfaces")
             return
-        ok, _ = self.run([sys.executable, str(ROOT / "tools/splat_edit.py"), "fill-room",
-                          str(self.space), "--raw", "--out", "splat-filled"],
-                         "fill", "floor, walls and flat furniture faces the splat is missing")
-        if not ok or not record_path.exists():
-            self.decide("splat", "skip", "the fill failed; see the log")
-            return
-        record = json.loads(record_path.read_text())
-        before, _ = read_splat(self.space / "splat.ply")
-        after, _ = read_splat(self.space / "splat-filled.ply")
+        print("\n=== fill: floor, walls and flat furniture faces the splat is missing")
+        started = time.time()
+        room = Room(self.space)
+        original, trailing = read_splat(self.space / "splat.ply")
+        pieces: list = []
+        fill_room(room, original, floor=True, walls=True, objects=True, pieces=pieces,
+                  log=lambda text: self.log(text))
+        reviewed = [p for p in pieces if p["blobs"] is not None and len(p["blobs"]) >= FILL_MIN_BLOBS]
+        print(f"    {len(pieces)} surfaces looked at, {len(reviewed)} with a fill worth reviewing "
+              f"({time.time() - started:.0f}s)")
+        sheets, rows = [], []
+        for n, piece in enumerate(reviewed, 1):
+            row = self.review_surface(n, piece, original, room)
+            if row:
+                rows.append(row)
+                sheets.append(row["sheet"])
 
-        views = self.fill_views(record)
-        measured, panels = [], []
-        for n, (label, view) in enumerate(views, 1):
-            img_b, cov_b = render(before, view, 480, 360, 55.0, with_coverage=True)
-            img_a, cov_a = render(after, view, 480, 360, 55.0, with_coverage=True)
-            gaps_before = float((cov_b < 0.5).mean())
-            gaps_after = float((cov_a < 0.5).mean())
-            # Pixels already solid, away from any gap: an object's soft edge next to
-            # a gap was darkened by the void behind it and rightly changes.
-            from scipy.ndimage import distance_transform_edt
+        verdicts = {}
+        if rows and self.advisor.available:
+            answer = self.advisor.ask_json(FILL_REVIEW_PROMPT.format(
+                surfaces=json.dumps([{"id": r["id"], "surface": r["surface"],
+                                      "seen_by_video": not r["unseen"]} for r in rows])),
+                sheets, max_tokens=2000)
+            for item in (answer or {}).get("surfaces") or []:
+                verdicts[str(item.get("id"))] = item
+        kept_pieces = []
+        by_surface = {p["surface"]: p for p in reviewed}
+        for row in rows:
+            piece = by_surface[row["surface"]]
+            claude = verdicts.get(row["id"])
+            numbers_ok = row["gaps_after"] <= row["gaps_before"] and row["damaged"] <= FILL_MAX_DAMAGED_SHARE
+            keep = numbers_ok and (bool(claude.get("keep")) if claude else not self.advisor.available)
+            row.update({"keep": keep, "numbers_ok": numbers_ok,
+                        "claude": (claude or {}).get("why"), "sheet": str(row["sheet"])})
+            if keep:
+                kept_pieces.append(piece)
+        for row in rows:
+            print(f"    {row['id']} {row['surface']}: {'keep' if row['keep'] else 'reject'} - "
+                  f"gaps {row['gaps_before']:.1%} -> {row['gaps_after']:.1%}, damage {row['damaged']:.2%}"
+                  + (f"; claude: {row['claude']}" if row["claude"] else ""))
+        if verdicts:
+            self.judged("fill", {"surfaces": [{k: r[k] for k in ("id", "surface", "keep", "claude")}
+                                              for r in rows]},
+                        f"kept {len(kept_pieces)} of {len(rows)} filled surfaces")
 
-            solid = (cov_b > 0.9) & (distance_transform_edt(cov_b >= 0.5) > FILL_EDGE_PX)
-            diff = np.abs(img_a.astype(int) - img_b.astype(int))
-            changed = float(diff[solid].mean()) if solid.any() else 0.0
-            # Local damage the average hides: solid pixels that changed a lot.
-            damaged = float((diff.max(axis=-1)[solid] > FILL_DAMAGE_STEP).mean()) if solid.any() else 0.0
-            measured.append({"view": label, "gaps_before": round(gaps_before, 3),
-                             "gaps_after": round(gaps_after, 3), "change_on_solid": round(changed, 1),
-                             "damaged_share": round(damaged, 4)})
-            panel = Image.new("RGB", (970, 385), "white")
-            panel.paste(Image.fromarray(img_b), (0, 25))
-            panel.paste(Image.fromarray(img_a), (490, 25))
-            draw = ImageDraw.Draw(panel)
-            draw.text((4, 6), f"{n}. {label}: before", fill="black")
-            draw.text((494, 6), "after", fill="black")
-            path = self.space / f"fill-compare-{n}.png"
-            panel.save(path)
-            panels.append(path)
-        gaps_before = np.mean([v["gaps_before"] for v in measured])
-        gaps_after = np.mean([v["gaps_after"] for v in measured])
-        worst_change = max(v["change_on_solid"] for v in measured)
-        worst_damage = max(v["damaged_share"] for v in measured)
-        numbers_ok = (gaps_after <= gaps_before and worst_change <= FILL_MAX_SOLID_CHANGE
-                      and worst_damage <= FILL_MAX_DAMAGED_SHARE)
-        note = (f"see-through {gaps_before:.1%} -> {gaps_after:.1%} of the views, "
-                f"solid pixels changed by up to {worst_change:.1f}/255 on average, "
-                f"{worst_damage:.2%} of them a lot")
-
-        verdict = None
-        if self.advisor.available:
-            prompt = (
-                "Each image shows one view of a 3D room reconstruction (a Gaussian splat) "
-                "twice: left before, right after an automatic fill. The fill adds floor, "
-                "wall and flat furniture surface where the reconstruction had nothing, "
-                "which shows as black gaps or see-through patches. Judge whether the right "
-                "side is better overall: gaps covered with surface that continues its "
-                "surroundings, and nothing that was right made worse (a door, window or "
-                "doorway painted over, a floating or wrongly coloured patch, a hard edge, "
-                "furniture damaged). Blur that is the same on both sides is not the fill's doing.\n"
-                'Fields: {"keep": boolean, "per_view": array of "better", "same" or "worse", '
-                '"problems": array of short phrases}')
-            verdict = self.advisor.ask_json(prompt, panels)
-        kept = numbers_ok and (verdict is None or bool(verdict.get("keep")))
-        record.update({"kept": kept, "views": measured, "claude": verdict})
+        record = {"surfaces": [{k: v for k, v in r.items()} for r in rows], "kept": bool(kept_pieces)}
+        if kept_pieces:
+            remove = np.zeros(len(original), bool)
+            for piece in kept_pieces:
+                remove |= piece["remove"]
+            result = np.concatenate([original[~remove], *[p["blobs"] for p in kept_pieces]])
+            save(self.space, result, trailing, None, room, name="splat-filled")
+            record["added"] = int(sum(len(p["blobs"]) for p in kept_pieces))
         record_path.write_text(json.dumps(record, indent=1) + "\n")
-        if verdict is not None:
-            self.judged("fill", {**verdict, "measured": measured},
-                        ("keep the fill" if verdict.get("keep") else "discard the fill")
-                        + (f" - {', '.join(verdict.get('problems', [])[:3])}"
-                           if verdict.get("problems") else ""))
-        self.decide("splat", "accept" if kept else "skip",
-                    (f"kept the fill ({record['added']:,} blobs): " if kept else "discarded the fill: ")
-                    + note + ("" if verdict is not None else " (not reviewed by Claude)")
-                    + ("" if numbers_ok else "; the numbers alone rule it out"),
-                    {"fill_kept": kept, "fill_added": record["added"]})
+        self.decide("splat", "accept" if kept_pieces else "skip",
+                    (f"kept the fill on {', '.join(p['surface'] for p in kept_pieces)}"
+                     if kept_pieces else "kept no fill: no surface was clearly better")
+                    + ("" if verdicts else " (not reviewed by Claude)"),
+                    {"fill_surfaces_kept": [p["surface"] for p in kept_pieces]})
 
-    def fill_views(self, record: dict) -> list:
-        """The start view, and a view of each of the two surfaces the fill
-        changed most, from the capture position that saw each best."""
+    def review_surface(self, n: int, piece: dict, original, room) -> dict | None:
+        """Render one filled surface before and after from the video frame that
+        looks most squarely at it, beside that frame; measure the change."""
         import numpy as np
-        from splat_export import look_matrix, model_dir, view_json
+        from PIL import Image, ImageDraw, ImageFont
+        from scipy.ndimage import distance_transform_edt
+        from splat_choose import TILE_H, TILE_W, camera_views
+        from splat_export import model_dir
+        from splat_render import render
 
-        views = []
-        start = self.space / "splat.view.json"
-        if start.exists():
-            views.append(("start view", json.loads(start.read_text())["viewMatrix"]))
-        shapes = json.loads((self.space / "shapes.json").read_text())
-        world = np.array(shapes["world"])
+        world = np.array(room.shapes["world"])
+        normal = world.T @ np.asarray(piece["normal"])          # scene -> splat frame
+        # Look at where the fill went (its solid blobs), not the middle of the whole
+        # surface, which for a floor sits under the bed.
+        blobs = piece["blobs"]
+        solid = blobs["opacity"] > 1.0
+        chosen = blobs[solid] if solid.sum() > 50 else blobs
+        centre = np.median(np.stack([chosen["x"], chosen["y"], chosen["z"]], axis=1), axis=0).astype(float)
         model = model_dir(self.space)
-        images = list(read_images_bin(model / "images.bin").values()) if model else []
-        metre = self.densify_metrics().get("colmap_units_per_metre") or 1.0
-        for surface in sorted(record["surfaces"], key=lambda r: -r["added"])[:2]:
-            if surface["added"] < 500 or not images:
+        cameras = read_cameras_bin(model / "cameras.bin")
+        best, best_score = None, -1.0
+        for info in read_images_bin(model / "images.bin").values():
+            cam = cameras[info["camera_id"]]
+            local = info["R"] @ centre + info["t"]
+            if local[2] <= 0.5 * room.metre:
                 continue
-            centre = world.T @ np.array(surface["centre"])          # scene -> splat frame
-            normal = world.T @ np.array(surface["normal"])
-            best, best_score = None, -1.0
-            for info in images:
-                position = -info["R"].T @ info["t"]
-                ray = centre - position
-                dist = np.linalg.norm(ray)
-                facing = float(-(ray / dist) @ normal)
-                ahead = float((info["R"][2] @ ray) / dist)
-                if dist < 0.8 * metre or dist > 4.5 * metre or facing < 0.2 or ahead < 0.5:
-                    continue
-                score = facing * ahead
-                if score > best_score:
-                    best, best_score = position, score
-            if best is not None:
-                view = view_json(look_matrix(best, centre - best, world[2]), best)["viewMatrix"]
-                views.append((surface["surface"].replace("-", " "), view))
-        return views
+            u = cam["params"][0] * local[0] / local[2] / (cam["width"] / 2)
+            v = cam["params"][1] * local[1] / local[2] / (cam["height"] / 2)
+            if abs(u) > 0.8 or abs(v) > 0.8:
+                continue                                    # not well inside this frame
+            position = -info["R"].T @ info["t"]
+            ray = (centre - position) / np.linalg.norm(centre - position)
+            facing = float(-ray @ normal)
+            if facing < 0.15:
+                continue
+            score = facing * (1 - 0.5 * max(abs(u), abs(v))) / max(local[2] / room.metre, 1.0) ** 0.5
+            if score > best_score:
+                best, best_score = info, score
+        unseen = best is None
+        if unseen:
+            # No frame looks at it (a fill goes where the video saw nothing clearly):
+            # look at it from the nearest point of the camera path, 1-3 m away.
+            from splat_export import look_matrix, view_json
+
+            infos = list(read_images_bin(model / "images.bin").values())
+            dist = [np.linalg.norm(-i["R"].T @ i["t"] - centre) / room.metre for i in infos]
+            options = [(d, i) for d, i in zip(dist, infos) if 1.0 <= d <= 3.0]
+            if not options:
+                print(f"    {piece['surface']}: nowhere on the camera path to see it from; not reviewed")
+                return None
+            _, best = min(options, key=lambda o: o[0])
+            position = -best["R"].T @ best["t"]
+            view = view_json(look_matrix(position, centre - position, world[2]), position)["viewMatrix"]
+            fov = 60.0
+        else:
+            view, fov = camera_views(self.space)[best["name"]]
+        after = np.concatenate([original[~piece["remove"]], piece["blobs"]])
+        img_b, cov_b = render(original, view, TILE_W, TILE_H, fov, with_coverage=True)
+        img_a, cov_a = render(after, view, TILE_W, TILE_H, fov, with_coverage=True)
+        solid = (cov_b > 0.9) & (distance_transform_edt(cov_b >= 0.5) > FILL_EDGE_PX)
+        diff = np.abs(img_a.astype(int) - img_b.astype(int)).max(axis=-1)
+        frame = Image.open(self.space / "workspace" / "images" / best["name"]).convert("RGB") \
+            .resize((TILE_W, TILE_H))
+        sheet = Image.new("RGB", (3 * (TILE_W + 8), TILE_H + 26), "white")
+        draw = ImageDraw.Draw(sheet)
+        font = ImageFont.load_default(size=15)
+        first = "nearest video frame (other angle)" if unseen else "video"
+        for k, (image, label) in enumerate(((frame, first), (Image.fromarray(img_b), "before"),
+                                            (Image.fromarray(img_a), "after"))):
+            sheet.paste(image, (k * (TILE_W + 8), 26))
+            draw.text((k * (TILE_W + 8) + 4, 4), f"S{n} {label}" if k == 0 else label,
+                      fill="black", font=font)
+        path = self.space / f"fill-surface-{n}.png"
+        sheet.save(path)
+        return {"id": f"S{n}", "surface": piece["surface"], "frame": best["name"], "unseen": unseen,
+                "blobs": len(piece["blobs"]), "sheet": path,
+                "gaps_before": round(float((cov_b < 0.5).mean()), 4),
+                "gaps_after": round(float((cov_a < 0.5).mean()), 4),
+                "damaged": round(float((diff[solid] > FILL_DAMAGE_STEP).mean()) if solid.any() else 0.0, 4)}
 
     # ---------------------------------------------------------------- advice
     def capture_advice(self, recon: dict, dense: dict, shapes: dict, row: dict) -> None:

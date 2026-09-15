@@ -481,7 +481,7 @@ def floor_masks(room, arr, dense, log=print, regions=None):
     keep = np.ones(len(arr), bool)
     keep[haze_idx] = False
     log(f"  cleared {len(haze_idx):,} hazy blobs over the open floor")
-    return surface, blocked, arr[keep]
+    return surface, blocked, arr[keep], keep
 
 
 # -------------------------------------------------------------- wall fill
@@ -700,7 +700,8 @@ def region_mask(room, surface: Surface, regions) -> np.ndarray:
 
 
 def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log=print,
-              regions=None, objects: bool = False, report: list | None = None) -> np.ndarray:
+              regions=None, objects: bool = False, report: list | None = None,
+              pieces: list | None = None) -> np.ndarray:
     """The splat with its missing floor and/or wall surfaces filled; with
     `regions` (scene-frame (min, max) boxes), only near those boxes, and only
     on the surfaces they touch."""
@@ -709,8 +710,10 @@ def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log
     m = room.metre
     dense = room.to_scene(load_ply(room.space / "cloud-dense.ply").points.astype(np.float64))
     jobs = []                                         # (surface, blocked, opening mask later)
+    original_count = len(arr)
+    kept_after_haze = np.ones(len(arr), bool)
     if floor:
-        surface, blocked, arr = floor_masks(room, arr, dense, log, regions)
+        surface, blocked, arr, kept_after_haze = floor_masks(room, arr, dense, log, regions)
         jobs.append((surface, blocked, (-0.10, 0.04), 0.08, None))
     scene, colours, alpha, scale = blob_arrays(room, arr)
     # Curtains and towels are often thin in the dense cloud but solid in the splat.
@@ -760,6 +763,20 @@ def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log
         remove |= guess
         if blobs is not None:
             added.append(blobs)
+        if pieces is not None:
+            # This surface's change on its own, against the splat as given:
+            # blobs to add, and which of the original blobs to remove (the
+            # floor also takes the haze cleared over it).
+            removal = np.zeros(original_count, bool)
+            removal[np.flatnonzero(kept_after_haze)[guess]] = True
+            if surface.name == "floor":
+                removal |= ~kept_after_haze
+            centre = surface.origin + surface.u * surface.cols * surface.cell / 2 \
+                + surface.v * surface.rows * surface.cell / 2
+            pieces.append({"surface": surface.name, "blobs": blobs, "remove": removal,
+                           "centre": centre, "normal": surface.normal,
+                           "size": (surface.cols * surface.cell, surface.rows * surface.cell),
+                           "stats": stats})
         if report is not None:
             centre = surface.origin + surface.u * surface.cols * surface.cell / 2 \
                 + surface.v * surface.rows * surface.cell / 2
