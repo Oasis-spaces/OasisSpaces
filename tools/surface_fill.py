@@ -285,7 +285,7 @@ def splat_surface(surface: Surface, scene, colours, alpha, scale, cell, band):
 
 
 def fill_surface(room, surface: Surface, scene, colours, alpha, scale, photo, seen_weight,
-                 blocked, opening, slab, splat_band, log=print):
+                 blocked, opening, slab, splat_band, log=print, region=None):
     """The shared steps for one surface, given what blocks it and where it
     opens: returns (blobs to add, mask of existing blobs to remove, stats).
     Broad colour comes from the splat's own surface, fine detail from the
@@ -297,7 +297,10 @@ def fill_surface(room, surface: Surface, scene, colours, alpha, scale, photo, se
     m = room.metre
     space = room.space
     rows, cols = surface.rows, surface.cols
-    confident = (seen_weight > 0.02) & ~blocked & ~opening
+    # For a removed object (a region), texture and colour come from around it,
+    # not from its own spot: that holds its shadow and what is left of it.
+    outside = ~region if region is not None else np.ones((rows, cols), bool)
+    confident = (seen_weight > 0.02) & ~blocked & ~opening & outside
     save = lambda image, name: Image.fromarray(np.clip(image, 0, 255).astype(np.uint8)[::-1]).save(
         space / f"{surface.name}-{name}.png")
     save(np.where(confident[..., None], photo, (255, 0, 200)), "photo")
@@ -316,7 +319,7 @@ def fill_surface(room, surface: Surface, scene, colours, alpha, scale, photo, se
 
     # Broad colour from the splat's surface (smoothly spread), fine detail from the photo.
     sigma_base = 0.15 * m / surface.cell
-    known_base = (splat_ok_fine & ~blocked & ~opening).astype(float)
+    known_base = (splat_ok_fine & ~blocked & ~opening & outside).astype(float)
     spread = gaussian_filter(known_base, sigma_base)
     base = np.stack([gaussian_filter(splat_fine[..., ch] * known_base, sigma_base)
                      / np.maximum(spread, 1e-6) for ch in range(3)], axis=-1)
@@ -334,7 +337,7 @@ def fill_surface(room, surface: Surface, scene, colours, alpha, scale, photo, se
         fallback = photo_low * np.clip(gain, 0.5, 1.8)
         near = np.clip(spread / 0.2, 0, 1)[..., None]
         base = near * base + (1 - near) * np.where(confident[..., None], fallback, base)
-    known = (splat_ok_fine | confident) & ~blocked & ~opening
+    known = (splat_ok_fine | confident) & ~blocked & ~opening & outside
     stats = {"splat": float(splat_ok.mean()), "clean_photo": float(confident.mean())}
     if known.mean() < 0.05:
         log(f"  {surface.name}: too little of it was filmed cleanly ({known.mean():.0%}); left as it is")
@@ -349,13 +352,23 @@ def fill_surface(room, surface: Surface, scene, colours, alpha, scale, photo, se
     # A hole is where the splat has nothing at all near the surface: not on the
     # plane, and not set back or standing out from it. A door or window a few
     # centimetres behind a wall's plane is not wall to paint over.
-    _, slab_w = splat_surface(surface, scene, colours, alpha, scale, grid,
-                              (slab[0] * m, slab[1] * m))
-    slab_w = slab_w[:gh, :gw]
+    slab_img, slab_w = splat_surface(surface, scene, colours, alpha, scale, grid,
+                                     (slab[0] * m, slab[1] * m))
+    slab_img, slab_w = slab_img[:gh, :gw], slab_w[:gh, :gw]
     # Things in front (furniture, clutter) are kept out of the texture above, but
     # not out of the fill: blobs on the surface sit behind them, hidden where
     # they render and showing surface where the splat has nothing at all.
     holes = (slab_w < 0.3) & ~opening_small
+    remnant = np.zeros_like(holes)
+    if region is not None:
+        region_small = fit(region)
+        # Where an object was removed: fill wherever the surface is not solidly
+        # covered, and replace what is left of the object near the surface (a
+        # headboard's back, its shadow, set back or on the plane) wherever it
+        # is far from the filled colour.
+        remnant = (region_small & (slab_w >= 0.3) & ~opening_small
+                   & (np.linalg.norm(slab_img - small, axis=-1) > REMNANT_COLOUR_GAP))
+        holes = ((slab_w < REGION_SOLID_WEIGHT) & region_small & ~opening_small) | remnant
     stats["holes"] = float(holes.mean())
     save(zoom(np.where(holes[..., None], small, np.where(splat_ok[..., None], splat_img, 60)),
               (k, k, 1), order=0), "filled")
@@ -367,7 +380,13 @@ def fill_surface(room, surface: Surface, scene, colours, alpha, scale, photo, se
     in_grid = (r >= 0) & (r < gh) & (c >= 0) & (c < gw)
     guess = np.zeros(len(scene), bool)
     guess[in_grid] = holes[r[in_grid], c[in_grid]]
-    guess &= (depth > slab[0] * m) & (depth < slab[1] * m) & (alpha < 0.35)
+    faint = alpha < 0.35
+    if remnant.any():
+        # In a removed object's leftovers, every blob on the surface goes.
+        in_remnant = np.zeros(len(scene), bool)
+        in_remnant[in_grid] = remnant[r[in_grid], c[in_grid]]
+        faint |= in_remnant
+    guess &= (depth > slab[0] * m) & (depth < slab[1] * m) & faint
 
     distance_in = distance_transform_edt(~holes) * BLOB_SPACING_M      # metres from the nearest hole
     # Fade out only over the splat's own surface, never over anything else nearby.
@@ -410,8 +429,9 @@ def raster(surface: Surface, scene: np.ndarray, rows: int, cols: int, cell: floa
 
 
 # ------------------------------------------------------------- floor fill
-def floor_masks(room, arr, dense, log=print):
-    """(surface, blocked, arr with haze cleared) for the floor."""
+def floor_masks(room, arr, dense, log=print, regions=None):
+    """(surface, blocked, arr with haze cleared) for the floor; with `regions`,
+    haze is only cleared near those boxes."""
     from scipy.ndimage import binary_closing, binary_dilation
     from scipy.spatial import cKDTree
 
@@ -445,6 +465,12 @@ def floor_masks(room, arr, dense, log=print):
     open_floor = np.zeros(len(band_idx), bool)
     open_floor[ok] = ~binary_dilation(blocked, iterations=4)[r[ok], c[ok]]
     band_idx = band_idx[open_floor]
+    if regions:
+        near = np.zeros(len(band_idx), bool)
+        for lo, hi in regions:
+            near |= np.all((scene[band_idx, :2] >= np.array(lo[:2]) - REGION_MARGIN_M * m)
+                           & (scene[band_idx, :2] <= np.array(hi[:2]) + REGION_MARGIN_M * m), axis=1)
+        band_idx = band_idx[near]
     above = dense[(level > 0.04 * m) & (level < (HAZE_TOP_M + 0.1) * m)]
     support = (cKDTree(above).query(scene[band_idx])[0] if len(above)
                else np.full(len(band_idx), np.inf))
@@ -551,15 +577,39 @@ def wall_masks(room, surface: Surface, dense, walls: list):
 
 
 # ------------------------------------------------------------------ run
-def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log=print) -> np.ndarray:
-    """The splat with its missing floor and/or wall surfaces filled."""
+REGION_MARGIN_M = 0.30        # a limited fill reaches this far past its boxes
+REMNANT_COLOUR_GAP = 45       # surface this unlike the fill, where an object was, is left of it
+REGION_SOLID_WEIGHT = 1.0     # and surface weaker than this there gets filled
+REGION_ABOVE_M = 0.40         # and this far above them on a wall
+
+
+def region_mask(room, surface: Surface, regions) -> np.ndarray:
+    """The part of a surface near any of the scene boxes in `regions`."""
+    m = room.metre
+    pts = surface.points()
+    mask = np.zeros(len(pts), bool)
+    for lo, hi in regions:
+        lo, hi = np.array(lo, float), np.array(hi, float)
+        near = np.all((pts[:, :2] >= lo[:2] - REGION_MARGIN_M * m)
+                      & (pts[:, :2] <= hi[:2] + REGION_MARGIN_M * m), axis=1)
+        if surface.name != "floor":
+            near &= pts[:, 2] <= hi[2] + REGION_ABOVE_M * m
+        mask |= near
+    return mask.reshape(surface.rows, surface.cols)
+
+
+def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log=print,
+              regions=None) -> np.ndarray:
+    """The splat with its missing floor and/or wall surfaces filled; with
+    `regions` (scene-frame (min, max) boxes), only near those boxes, and only
+    on the surfaces they touch."""
     from pointcloud import load_ply
 
     m = room.metre
     dense = room.to_scene(load_ply(room.space / "cloud-dense.ply").points.astype(np.float64))
     jobs = []                                         # (surface, blocked, opening mask later)
     if floor:
-        surface, blocked, arr = floor_masks(room, arr, dense, log)
+        surface, blocked, arr = floor_masks(room, arr, dense, log, regions)
         jobs.append((surface, blocked, (-0.10, 0.04), 0.08))
     scene, colours, alpha, scale = blob_arrays(room, arr)
     if walls:
@@ -569,6 +619,14 @@ def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log
             log(f"  {surface.name}: {standing.mean():.0%} with something in front, "
                 f"{hidden.mean():.0%} behind furniture")
             jobs.append((surface, standing | hidden, (-0.35, 0.06), 0.06))
+    masks = None
+    if regions:
+        masks = [region_mask(room, job[0], regions) for job in jobs]
+        keep = [k for k, mask in enumerate(masks) if mask.any()]
+        jobs, masks = [jobs[k] for k in keep], [masks[k] for k in keep]
+        log("  limited to " + (", ".join(job[0].name for job in jobs) or "nothing"))
+        if not jobs:
+            return arr
     solid = (alpha > 0.3)
     occluders = np.stack([arr["x"], arr["y"], arr["z"]], axis=1)[solid].astype(np.float64)
     photos = photograph(room.space, room, [j[0] for j in jobs], log, occluders=occluders,
@@ -576,11 +634,12 @@ def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log
     remove = np.zeros(len(arr), bool)
     added = []
     behind_points = np.vstack([dense, scene[alpha > 0.3]])
-    for (surface, blocked, slab, splat_band), (photo, seen, through) in zip(jobs, photos):
+    for k, ((surface, blocked, slab, splat_band), (photo, seen, through)) in enumerate(zip(jobs, photos)):
         opening = (wall_openings(room, surface, behind_points, through)
                    if surface.name != "floor" else np.zeros_like(blocked))
         blobs, guess, stats = fill_surface(room, surface, scene, colours, alpha, scale, photo, seen,
-                                           blocked, opening, slab, splat_band, log)
+                                           blocked, opening, slab, splat_band, log,
+                                           region=masks[k] if masks else None)
         log(f"  {surface.name}: the splat covers {stats['splat']:.0%}, "
             f"{stats['clean_photo']:.0%} filmed cleanly, "
             + (f"{opening.mean():.0%} open (seen through), " if surface.name != "floor" else "")

@@ -9,7 +9,7 @@ re-running any stage.
 
     objects  list the room's objects and size, with positions in metres
     remove   delete an object's Gaussians; the floor and wall it hid, which no
-             frame ever saw, are patched with texture sampled from around it
+             frame ever saw, are filled like fill-room does, only around it
     add      build a piece of furniture from simple parts, as Gaussians, and
              place it on the floor at a position in metres (or where a removed
              object stood, or backed against the nearest wall)
@@ -264,7 +264,7 @@ def remove(room: Room, arr: np.ndarray, idents: list[str], patch: bool):
         o_hi = np.array(other["max"]) - KEEP_OTHER_M * m
         protected |= np.all((scene >= o_lo) & (scene <= o_hi), axis=1)
     drop = np.zeros(len(arr), bool)
-    patches, centres = [], []
+    centres, regions = [], []
     for ident in idents:
         _, box = room.box(ident)
         full_lo = np.array(box["min"]) - REMOVE_MARGIN_M * m
@@ -276,18 +276,68 @@ def remove(room: Room, arr: np.ndarray, idents: list[str], patch: bool):
         # Against a wall, and just above the box, take only what does not look
         # like the wall: the back of a headboard, a lamp taller than the box.
         inside |= unlike_wall(room, scene, colours, full_lo, full_hi, protected | inside)
+        # A headboard or lamp often stands taller than the measured box: take
+        # what grows up out of the object, connected to what was just removed.
+        inside |= attached_above(room, scene, inside, full_lo, full_hi, protected | drop)
         drop |= inside
         centres.append((lo + hi) / 2)
+        top = full_hi.copy()
+        if inside.any():
+            top[2] = max(top[2], float(scene[inside, 2].max()))
+        regions.append((full_lo, top))
         print(f"{ident} {box.get('label')}: removing {int(inside.sum()):,} gaussians")
-        if patch:
-            patches.append(patch_floor(room, scene, colours, lo, hi, drop | protected))
-            patches += patch_walls(room, scene, colours, lo, hi, inside)
     kept = arr[~drop]
-    added = [p for p in patches if p is not None and len(p)]
-    if added:
-        print(f"patched the hidden floor and wall with {sum(len(p) for p in added):,} gaussians")
-        kept = np.concatenate([kept, *added])
+    if patch:
+        from surface_fill import LAMA_PATH, fill_room
+
+        if LAMA_PATH.exists():
+            # The floor and wall the object hid were never filmed: fill them the
+            # way fill-room does, blended into what is around, but only there.
+            print("filling the floor and wall it hid")
+            kept = fill_room(room, kept, regions=regions,
+                             log=lambda text: print(text))
+        else:
+            print(f"left the hidden floor and wall empty: LaMa weights not found at {LAMA_PATH}")
     return kept, np.mean(centres, axis=0)
+
+
+ATTACHED_ABOVE_M = 1.0     # how far above a removed box connected parts are followed
+ATTACH_GAP_M = 0.06        # blobs this close count as connected
+ATTACH_WALL_CLEAR_M = 0.25 # and only this far from any wall
+
+
+def attached_above(room: Room, scene, removed, lo, hi, taken) -> np.ndarray:
+    """Groups of blobs over the box's footprint and up to ATTACHED_ABOVE_M
+    above it that touch the top of what was removed and stay mostly over the
+    footprint (a headboard), not a shelf reaching across the wall."""
+    from scipy.spatial import cKDTree
+    from shapes import cluster_grid
+
+    m = room.metre
+    over = np.all((scene[:, :2] >= lo[:2]) & (scene[:, :2] <= hi[:2]), axis=1)
+    # Shelves, pictures and paint hug the walls; a headboard stands out in the room.
+    clear = np.all((scene[:, :2] > room.centre - room.half + ATTACH_WALL_CLEAR_M * m)
+                   & (scene[:, :2] < room.centre + room.half - ATTACH_WALL_CLEAR_M * m), axis=1)
+    for along, offset, _ in room.walls():
+        clear &= np.abs(scene[:, 1 - along] - offset) > ATTACH_WALL_CLEAR_M * m
+    cand = np.flatnonzero(over & clear & (scene[:, 2] > hi[2] - 0.02 * m)
+                          & (scene[:, 2] <= hi[2] + ATTACHED_ABOVE_M * m) & ~taken & ~removed)
+    top = scene[removed & (scene[:, 2] > hi[2] - 0.20 * m)]
+    out = np.zeros(len(scene), bool)
+    if len(cand) == 0 or len(top) == 0:
+        return out
+    groups = cluster_grid(scene[cand], cell=ATTACH_GAP_M * m)
+    near_top = cKDTree(top).query(scene[cand])[0] < ATTACH_GAP_M * m
+    for g in np.unique(groups[near_top]):
+        members = cand[groups == g]
+        # A group that also spreads well past the footprint is something else (a shelf).
+        extent = np.all((scene[members, :2] >= lo[:2] - 0.02 * m) & (scene[members, :2] <= hi[:2] + 0.02 * m), axis=1)
+        if extent.mean() >= 0.8:
+            out[members] = True
+    if out.any():
+        print(f"  also took {int(out.sum()):,} blobs growing up out of it "
+              f"(up to {(scene[out, 2].max() - hi[2]) / m:.2f} m above its box)")
+    return out
 
 
 def unlike_wall(room: Room, scene, colours, lo, hi, taken) -> np.ndarray:
@@ -304,71 +354,6 @@ def unlike_wall(room: Room, scene, colours, lo, hi, taken) -> np.ndarray:
     idx = np.flatnonzero(region)
     out = np.zeros(len(scene), bool)
     out[idx] = np.linalg.norm(colours[idx] - wall, axis=1) > ABOVE_COLOUR_GAP
-    return out
-
-
-def patch_floor(room: Room, scene, colours, lo, hi, taken):
-    """Cover the floor under a removed object with texture from the open floor
-    nearby (right beside a bed is often shadow or clothes)."""
-    m = room.metre
-    near_floor = np.abs(scene[:, 2] - room.floor_z) < 0.05 * m
-    open_floor = near_floor & ~taken
-    for other in room.shapes["boxes"]:
-        if other.get("build", True):
-            o_lo, o_hi = np.array(other["min"][:2]), np.array(other["max"][:2])
-            open_floor &= ~np.all((scene[:, :2] >= o_lo - 0.1 * m)
-                                  & (scene[:, :2] <= o_hi + 0.1 * m), axis=1)
-    dx = np.maximum(np.maximum(lo[0] - scene[:, 0], scene[:, 0] - hi[0]), 0)
-    dy = np.maximum(np.maximum(lo[1] - scene[:, 1], scene[:, 1] - hi[1]), 0)
-    source = np.flatnonzero(open_floor & (np.hypot(dx, dy) > 0.1 * m)
-                            & (np.hypot(dx, dy) < FLOOR_SOURCE_M * m))
-    if len(source) < 50:
-        print("  floor patch skipped: too little open floor near the object")
-        return None
-    source = typical(source, colours, keep=0.5)
-    height = float(np.median(scene[source, 2]))
-    s = PATCH_SPACING_M * m
-    xs, ys = np.meshgrid(grid(lo[0], hi[0], s), grid(lo[1], hi[1], s))
-    centres = np.column_stack([xs.ravel(), ys.ravel(), np.full(xs.size, height)])
-    pick = np.random.default_rng(1).choice(source, len(centres))
-    return discs(centres, np.array([0.0, 0.0, 1.0]), colours[pick], s, room)
-
-
-def patch_walls(room: Room, scene, colours, lo, hi, removed):
-    """Cover the stretch of wall an object stood against, up to its top, with
-    texture from the same wall beside it."""
-    m = room.metre
-    out = []
-    for along, offset, (w_lo, w_hi) in room.walls():
-        across = 1 - along
-        gap = min(abs(offset - lo[across]), abs(offset - hi[across]))
-        if gap > WALL_TOUCH_M * m + REMOVE_MARGIN_M * m:
-            continue
-        a_lo, a_hi = max(lo[along], w_lo), min(hi[along], w_hi)
-        if a_hi - a_lo < 0.1 * m:
-            continue
-        on_wall = np.abs(scene[:, across] - offset) < 0.06 * m
-        # The wall just above the hidden stretch is most likely the same paint.
-        over = (scene[:, along] > a_lo) & (scene[:, along] < a_hi) & \
-               (scene[:, 2] > hi[2] + 0.02 * m) & (scene[:, 2] < hi[2] + 0.45 * m)
-        source = np.flatnonzero(on_wall & over & ~removed)
-        if len(source) < 50:
-            beside = ((scene[:, along] < a_lo) & (scene[:, along] > a_lo - 0.6 * m)) | \
-                     ((scene[:, along] > a_hi) & (scene[:, along] < a_hi + 0.6 * m))
-            low = (scene[:, 2] > room.floor_z + 0.1 * m) & (scene[:, 2] < hi[2] + 0.1 * m)
-            source = np.flatnonzero(on_wall & beside & low & ~removed)
-        if len(source) < 50:
-            continue
-        source = typical(source, colours)
-        depth = float(np.median(scene[source, across]))
-        s = PATCH_SPACING_M * m
-        ts, zs = np.meshgrid(grid(a_lo, a_hi, s), grid(room.floor_z + 0.02 * m, hi[2], s))
-        centres = np.zeros((ts.size, 3))
-        centres[:, along], centres[:, across], centres[:, 2] = ts.ravel(), depth, zs.ravel()
-        normal = np.zeros(3)
-        normal[across] = 1.0 if offset < room.centre[across] else -1.0
-        pick = np.random.default_rng(2).choice(source, len(centres))
-        out.append(discs(centres, normal, colours[pick], s, room))
     return out
 
 
@@ -451,7 +436,8 @@ def camera_looking_at(room: Room, target: np.ndarray, box_index: int | None = No
                         if v["name"] == picks[box_index][0]["frame"])
             position = -info["R"].T @ info["t"]
             look = room.to_splat(target[None])[0] - position
-            return view_json(look_matrix(position, look, room.world[2]), position)
+            return view_json(look_matrix(position, look, room.world[2]), position,
+                             up=[round(float(v), 5) for v in room.world[2]], metre=room.metre)
     best = None
     for angle in np.radians(np.arange(0, 360, 15)):
         direction = np.array([math.cos(angle), math.sin(angle), 0.0])
@@ -467,7 +453,8 @@ def camera_looking_at(room: Room, target: np.ndarray, box_index: int | None = No
     position = room.to_splat(best[1][None])[0]
     look = room.to_splat(target[None])[0] - position
     up = room.world[2]
-    return view_json(look_matrix(position, look, up), position)
+    return view_json(look_matrix(position, look, up), position,
+                     up=[round(float(v), 5) for v in up], metre=room.metre)
 
 
 # ----------------------------------------------------------------- commands
@@ -545,7 +532,7 @@ def main() -> None:
     p.add_argument("space")
     p.add_argument("objects", nargs="+", help="B<number> from the objects list")
     p.add_argument("--no-patch", action="store_true",
-                   help="leave the hidden floor and wall empty")
+                   help="leave the hidden floor and wall empty (no fill)")
     p.add_argument("--fresh", action="store_true", help="start from splat.ply")
     p = sub.add_parser("add", help="put furniture into the splat")
     p.add_argument("space")

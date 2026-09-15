@@ -185,10 +185,13 @@ python3 tools/splat_edit.py look spaces/<name> B1          # a viewer link looki
 ```
 
 `remove` deletes the blobs in the object's box (plus a margin for a blanket
-over the edge, and anything above it that is unlike the wall behind), but
-never the floor, another piece of furniture or the wall paint. The floor and
-wall it hid were never filmed, so they are patched with texture sampled from
-open floor nearby and from the wall above. `add` builds a sofa, armchair,
+over the edge, anything above it that is unlike the wall behind, and parts
+growing up out of it away from the walls, like a headboard taller than the
+box), but never the floor, another piece of furniture or the wall paint. The
+floor and wall it hid were never filmed, so they get the same blended fill as
+`fill-room`, limited to around the object: texture and colour come from
+beyond its footprint (not its shadow), and what is left of it on the surface
+is replaced. `add` builds a sofa, armchair,
 bed, table, chair, desk, wardrobe or box from simple parts as blobs, at a
 typical size or `--size W D H` in metres, standing on the floor at `--at x y`
 (metres from the room's centre) or where an object stood, optionally backed
