@@ -19,9 +19,10 @@ re-running any stage.
              doorway (tools/surface_fill.py)
     look     print a viewer link that opens looking at an object
 
-Each edit reads splat-edited.ply if there is one (else splat.ply) and writes
+Each edit reads splat-edited.ply if there is one (else stage 4's result:
+splat-filled.ply when its fill was kept, or splat.ply) and writes
 splat-edited.ply, its .splat for the viewer and a starting camera, so edits
-chain; --fresh starts again from splat.ply.
+chain; --fresh starts again from stage 4's result, --raw from splat.ply.
 
 Positions are metres from the room's centre: x along the room's length as
 the floor plan draws it (left to right), y across it (bottom to top).
@@ -225,28 +226,40 @@ def grid(lo: float, hi: float, spacing: float) -> np.ndarray:
 
 
 # ------------------------------------------------------------------ editing
-def load(space: Path, fresh: bool):
+def stage4_result(space: Path) -> Path:
+    """The splat stage 4 settled on: splat-filled.ply when its fill was kept
+    (see pipeline/agent.py), else the trained splat.ply."""
+    filled = space / "splat-filled.ply"
+    record = space / "splat-filled.fill.json"
+    if filled.exists() and record.exists() and json.loads(record.read_text()).get("kept"):
+        return filled
+    return space / "splat.ply"
+
+
+def load(space: Path, fresh: bool, raw: bool = False):
     src = space / "splat-edited.ply"
-    if fresh or not src.exists():
+    if raw:
         src = space / "splat.ply"
+    elif fresh or not src.exists():
+        src = stage4_result(space)
     arr, trailing = read_splat(src)
     print(f"editing {src.name}: {len(arr):,} gaussians")
     return arr, trailing
 
 
 def save(space: Path, arr: np.ndarray, trailing: bytes, look_at: np.ndarray | None,
-         room: Room, box_index: int | None = None) -> None:
-    out = space / "splat-edited.ply"
+         room: Room, box_index: int | None = None, name: str = "splat-edited") -> None:
+    out = space / f"{name}.ply"
     write_splat(out, arr, trailing)
     ply_to_splat(out, out.with_suffix(".splat"))
     view = (camera_looking_at(room, look_at, box_index) if look_at is not None
             else start_view(space, out))
     if view:
-        out.with_name("splat-edited.view.json").write_text(json.dumps(view) + "\n")
+        out.with_name(f"{name}.view.json").write_text(json.dumps(view) + "\n")
     print(f"wrote {out} ({len(arr):,} gaussians), {out.with_suffix('.splat').name} "
           "and a starting camera")
     print("view: http://localhost:8734/splat-viewer/index.html?url=../spaces/"
-          f"{space.name}/splat-edited.splat")
+          f"{space.name}/{name}.splat")
 
 
 def remove(room: Room, arr: np.ndarray, idents: list[str], patch: bool):
@@ -473,7 +486,7 @@ def cmd_objects(room: Room, _args) -> None:
 
 
 def cmd_remove(room: Room, args) -> None:
-    arr, trailing = load(room.space, args.fresh)
+    arr, trailing = load(room.space, args.fresh, getattr(args, "raw", False))
     kept, centre = remove(room, arr, args.objects, patch=not args.no_patch)
     save(room.space, kept, trailing, centre, room, room.box(args.objects[0])[0])
 
@@ -506,12 +519,15 @@ def cmd_add(room: Room, args) -> None:
 def cmd_fill(room: Room, args) -> None:
     from surface_fill import fill_room
 
-    arr, trailing = load(room.space, args.fresh)
+    arr, trailing = load(room.space, args.fresh, args.raw)
     floor = args.command in ("fill-floor", "fill-room")
     walls = args.command in ("fill-walls", "fill-room")
     objects = args.command in ("fill-objects", "fill-room")
-    save(room.space, fill_room(room, arr, floor=floor, walls=walls, objects=objects),
-         trailing, None, room)
+    report: list = []
+    filled = fill_room(room, arr, floor=floor, walls=walls, objects=objects, report=report)
+    save(room.space, filled, trailing, None, room, name=args.out)
+    (room.space / f"{args.out}.fill.json").write_text(json.dumps(
+        {"surfaces": report, "added": int(len(filled) - len(arr))}, indent=1) + "\n")
 
 
 def cmd_look(room: Room, args) -> None:
@@ -535,7 +551,7 @@ def main() -> None:
     p.add_argument("objects", nargs="+", help="B<number> from the objects list")
     p.add_argument("--no-patch", action="store_true",
                    help="leave the hidden floor and wall empty (no fill)")
-    p.add_argument("--fresh", action="store_true", help="start from splat.ply")
+    p.add_argument("--fresh", action="store_true", help="start from the stage 4 result")
     p = sub.add_parser("add", help="put furniture into the splat")
     p.add_argument("space")
     p.add_argument("kind", choices=sorted(PIECES))
@@ -548,13 +564,15 @@ def main() -> None:
     p.add_argument("--against-wall", action="store_true",
                    help="turn and slide it back against the nearest wall")
     p.add_argument("--colour", nargs=3, type=int, metavar=("R", "G", "B"))
-    p.add_argument("--fresh", action="store_true", help="start from splat.ply")
+    p.add_argument("--fresh", action="store_true", help="start from the stage 4 result")
     for name, what in (("fill-floor", "the floor"), ("fill-walls", "the walls"),
                        ("fill-objects", "flat furniture faces"),
                        ("fill-room", "the floor, walls and flat furniture faces")):
         p = sub.add_parser(name, help=f"fill {what} where the splat has none (see surface_fill.py)")
         p.add_argument("space")
-        p.add_argument("--fresh", action="store_true", help="start from splat.ply")
+        p.add_argument("--fresh", action="store_true", help="start from the stage 4 result")
+        p.add_argument("--raw", action="store_true", help="start from the trained splat.ply")
+        p.add_argument("--out", default="splat-edited", help="output name (default splat-edited)")
     p = sub.add_parser("look", help="print a viewer link looking at an object")
     p.add_argument("space")
     p.add_argument("object")

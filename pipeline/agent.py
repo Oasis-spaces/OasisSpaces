@@ -74,6 +74,13 @@ GOOD_SCALE_SPREAD = 0.15
 MAX_SCALE_SPREAD = 0.30
 MIN_DENSE_POINTS = 500_000
 MIN_SPLAT_GAUSSIANS = 20_000
+# A kept fill may change pixels that were already solid in its review renders
+# by at most this much on average (0-255): it should only cover gaps.
+FILL_MAX_SOLID_CHANGE = 6.0
+# ...and may change at most this share of them by more than FILL_DAMAGE_STEP:
+# blotches on a curtain barely move the average but are damage all the same.
+FILL_DAMAGE_STEP = 40
+FILL_MAX_DAMAGED_SHARE = 0.005
 # Walls this rough (as a share of the room's diagonal) mean weak geometry.
 NOISY_WALL_RMS_PCT = 1.5
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
@@ -664,7 +671,135 @@ class Agent:
             # The viewer loads the compact copy; the .ply stays the full result.
             self.run([sys.executable, str(ROOT / "pipeline/splat_export.py"),
                       str(self.space / "splat.ply")], "splat export", "compact copy for the viewer")
+            self.safe(self.fill_surfaces)
         return ok
+
+    def fill_surfaces(self) -> None:
+        """Fill floor, wall and flat furniture faces the splat has no blobs for
+        (tools/surface_fill.py) into splat-filled, then keep that only if it
+        helps: rendered views before and after must show fewer see-through
+        gaps and nearly unchanged pixels elsewhere, and Claude must agree."""
+        import numpy as np
+        from PIL import Image, ImageDraw
+        from splat_render import render
+        from splat_tools import read_splat
+        from surface_fill import LAMA_PATH
+
+        record_path = self.space / "splat-filled.fill.json"
+        if not LAMA_PATH.exists():
+            self.decide("splat", "skip", f"no fill: LaMa weights not found at {LAMA_PATH}")
+            return
+        if not (self.space / "shapes.json").exists():
+            self.decide("splat", "skip", "no fill: stage 3's room model is needed to know the surfaces")
+            return
+        ok, _ = self.run([sys.executable, str(ROOT / "tools/splat_edit.py"), "fill-room",
+                          str(self.space), "--raw", "--out", "splat-filled"],
+                         "fill", "floor, walls and flat furniture faces the splat is missing")
+        if not ok or not record_path.exists():
+            self.decide("splat", "skip", "the fill failed; see the log")
+            return
+        record = json.loads(record_path.read_text())
+        before, _ = read_splat(self.space / "splat.ply")
+        after, _ = read_splat(self.space / "splat-filled.ply")
+
+        views = self.fill_views(record)
+        measured, panels = [], []
+        for n, (label, view) in enumerate(views, 1):
+            img_b, cov_b = render(before, view, 480, 360, 55.0, with_coverage=True)
+            img_a, cov_a = render(after, view, 480, 360, 55.0, with_coverage=True)
+            gaps_before = float((cov_b < 0.5).mean())
+            gaps_after = float((cov_a < 0.5).mean())
+            solid = cov_b > 0.9
+            diff = np.abs(img_a.astype(int) - img_b.astype(int))
+            changed = float(diff[solid].mean()) if solid.any() else 0.0
+            # Local damage the average hides: solid pixels that changed a lot.
+            damaged = float((diff.max(axis=-1)[solid] > FILL_DAMAGE_STEP).mean()) if solid.any() else 0.0
+            measured.append({"view": label, "gaps_before": round(gaps_before, 3),
+                             "gaps_after": round(gaps_after, 3), "change_on_solid": round(changed, 1),
+                             "damaged_share": round(damaged, 4)})
+            panel = Image.new("RGB", (970, 385), "white")
+            panel.paste(Image.fromarray(img_b), (0, 25))
+            panel.paste(Image.fromarray(img_a), (490, 25))
+            draw = ImageDraw.Draw(panel)
+            draw.text((4, 6), f"{n}. {label}: before", fill="black")
+            draw.text((494, 6), "after", fill="black")
+            path = self.space / f"fill-compare-{n}.png"
+            panel.save(path)
+            panels.append(path)
+        gaps_before = np.mean([v["gaps_before"] for v in measured])
+        gaps_after = np.mean([v["gaps_after"] for v in measured])
+        worst_change = max(v["change_on_solid"] for v in measured)
+        worst_damage = max(v["damaged_share"] for v in measured)
+        numbers_ok = (gaps_after <= gaps_before and worst_change <= FILL_MAX_SOLID_CHANGE
+                      and worst_damage <= FILL_MAX_DAMAGED_SHARE)
+        note = (f"see-through {gaps_before:.1%} -> {gaps_after:.1%} of the views, "
+                f"solid pixels changed by up to {worst_change:.1f}/255 on average, "
+                f"{worst_damage:.2%} of them a lot")
+
+        verdict = None
+        if self.advisor.available:
+            prompt = (
+                "Each image shows one view of a 3D room reconstruction (a Gaussian splat) "
+                "twice: left before, right after an automatic fill. The fill adds floor, "
+                "wall and flat furniture surface where the reconstruction had nothing, "
+                "which shows as black gaps or see-through patches. Judge whether the right "
+                "side is better overall: gaps covered with surface that continues its "
+                "surroundings, and nothing that was right made worse (a door, window or "
+                "doorway painted over, a floating or wrongly coloured patch, a hard edge, "
+                "furniture damaged). Blur that is the same on both sides is not the fill's doing.\n"
+                'Fields: {"keep": boolean, "per_view": array of "better", "same" or "worse", '
+                '"problems": array of short phrases}')
+            verdict = self.advisor.ask_json(prompt, panels)
+        kept = numbers_ok and (verdict is None or bool(verdict.get("keep")))
+        record.update({"kept": kept, "views": measured, "claude": verdict})
+        record_path.write_text(json.dumps(record, indent=1) + "\n")
+        if verdict is not None:
+            self.judged("fill", {**verdict, "measured": measured},
+                        ("keep the fill" if verdict.get("keep") else "discard the fill")
+                        + (f" - {', '.join(verdict.get('problems', [])[:3])}"
+                           if verdict.get("problems") else ""))
+        self.decide("splat", "accept" if kept else "skip",
+                    (f"kept the fill ({record['added']:,} blobs): " if kept else "discarded the fill: ")
+                    + note + ("" if verdict is not None else " (not reviewed by Claude)")
+                    + ("" if numbers_ok else "; the numbers alone rule it out"),
+                    {"fill_kept": kept, "fill_added": record["added"]})
+
+    def fill_views(self, record: dict) -> list:
+        """The start view, and a view of each of the two surfaces the fill
+        changed most, from the capture position that saw each best."""
+        import numpy as np
+        from splat_export import look_matrix, model_dir, view_json
+
+        views = []
+        start = self.space / "splat.view.json"
+        if start.exists():
+            views.append(("start view", json.loads(start.read_text())["viewMatrix"]))
+        shapes = json.loads((self.space / "shapes.json").read_text())
+        world = np.array(shapes["world"])
+        model = model_dir(self.space)
+        images = list(read_images_bin(model / "images.bin").values()) if model else []
+        metre = self.densify_metrics().get("colmap_units_per_metre") or 1.0
+        for surface in sorted(record["surfaces"], key=lambda r: -r["added"])[:2]:
+            if surface["added"] < 500 or not images:
+                continue
+            centre = world.T @ np.array(surface["centre"])          # scene -> splat frame
+            normal = world.T @ np.array(surface["normal"])
+            best, best_score = None, -1.0
+            for info in images:
+                position = -info["R"].T @ info["t"]
+                ray = centre - position
+                dist = np.linalg.norm(ray)
+                facing = float(-(ray / dist) @ normal)
+                ahead = float((info["R"][2] @ ray) / dist)
+                if dist < 0.8 * metre or dist > 4.5 * metre or facing < 0.2 or ahead < 0.5:
+                    continue
+                score = facing * ahead
+                if score > best_score:
+                    best, best_score = position, score
+            if best is not None:
+                view = view_json(look_matrix(best, centre - best, world[2]), best)["viewMatrix"]
+                views.append((surface["surface"].replace("-", " "), view))
+        return views
 
     # ---------------------------------------------------------------- advice
     def capture_advice(self, recon: dict, dense: dict, shapes: dict, row: dict) -> None:
@@ -767,7 +902,10 @@ class Agent:
                 return "stop", "no splat was written"
             if count < MIN_SPLAT_GAUSSIANS:
                 return "warn", f"only {count:,} gaussians"
-            return "pass", f"{count:,} gaussians"
+            fill = self.space / "splat-filled.fill.json"
+            kept = fill.exists() and json.loads(fill.read_text()).get("kept")
+            return "pass", (f"{count:,} gaussians"
+                            + ("; gaps filled (view splat-filled.splat)" if kept else ""))
         raise ValueError(stage)
 
     def missing_prerequisite(self, stage: str) -> str | None:

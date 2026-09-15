@@ -171,6 +171,14 @@ the agent's judgement:
    the least blur (no wall pressed against the lens, no cupboard filmed
    edge-on). The viewer opens there, with a fixed 55° vertical field of view.
    Open it with `splat-viewer/index.html?url=../spaces/<name>/splat.splat`.
+   Then `tools/splat_edit.py fill-room` fills floor, walls and flat furniture
+   faces the splat has nothing for into `splat-filled.splat` (see Editing the
+   splat). The agent renders three views before and after with
+   `tools/splat_render.py`: the start view and the two surfaces that changed
+   most, from capture positions. It keeps the fill only if see-through gaps
+   shrink, pixels that were already solid barely change (under 6/255 on
+   average, and no more than 0.5% of them by over 40), and Claude agrees.
+   `splat_edit` edits then start from the kept result.
 
 ## Editing the splat
 
@@ -272,7 +280,9 @@ pipeline/semantics.py     open-vocabulary object detection for keyframes (local)
 pipeline/shapes.py        planes and boxes from the dense cloud
 pipeline/splat_seed.py    OpenSplat project seeded from the dense cloud
 pipeline/splat_export.py  compact .splat for the viewer, and its starting camera
-tools/splat_edit.py       remove objects from a splat and add furniture to it
+tools/splat_edit.py       remove objects from a splat, add furniture, fill missing surfaces
+tools/surface_fill.py     the floor, wall and furniture-face fill (frames, LaMa, blobs)
+tools/splat_render.py     CPU splat renderer for review images to it
 tools/object_frames.py    the frames that show each object best, for Claude's review
 pipeline/pointcloud.py    PLY I/O, voxel downsample, outlier removal (numpy)
 tools/                    shape classifier, Blender room, OpenSplat binary + metallib

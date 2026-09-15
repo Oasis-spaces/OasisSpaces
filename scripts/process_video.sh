@@ -33,5 +33,10 @@ python3 pipeline/splat_seed.py "$SPACE"
 tools/opensplat "$SPACE/splat-project" -n 10000 -d 4 \
     -o "$PWD/$SPACE/splat.ply" | tail -3
 python3 pipeline/splat_export.py "$SPACE/splat.ply"
+# Fill floor, wall and flat furniture the splat is missing (needs the LaMa
+# weights; pipeline/agent.py also renders before/after and has Claude review it).
+if [ -f "$HOME/.cache/oasisspaces/big-lama.pt" ]; then
+    python3 tools/splat_edit.py fill-room "$SPACE" --raw --out splat-filled | tail -3
+fi
 
 echo "CHAIN DONE: $SPACE (cloud.ply, cloud-dense.ply, room.blend, splat.ply, splat.splat)"
