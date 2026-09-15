@@ -216,6 +216,31 @@ was really behind the object.
 `tools/opensplat` loads its Metal shaders from `tools/default.metallib`;
 keep the two files together.
 
+## Splat Viewer (Mac app)
+
+`apps/SplatViewer` is a native macOS app (SwiftUI + Metal, macOS 15+, Apple
+silicon) for looking through splats. It draws with
+[MetalSplatter](https://github.com/scier/MetalSplatter) (MIT), which also renders
+a `.ply`'s view-dependent colour.
+
+- **Library (landing page):** drop `.ply`, `.splat` or `.spz` files or folders,
+  or choose them (⌘O). Point-cloud PLYs are refused with a note. Added splats
+  stay listed with a thumbnail from their starting view.
+- **Tabs:** one per open splat. Close one with × or ⌘W, reach the library with
+  ⌘1, and cycle with ⌃⇥.
+- **Navigation:**
+  - arrows move; ⌘ + arrows turn and look up or down;
+  - ⌥ + ↑↓ moves up and down; ⇧ goes faster;
+  - drag to look, scroll to walk; R resets.
+- **Starting view:** a splat opens at the pipeline's starting camera
+  (`<name>.view.json`, with the room's up direction and metre scale) when there
+  is one.
+
+```bash
+apps/SplatViewer/build.sh            # needs Xcode and XcodeGen (brew install xcodegen)
+apps/SplatViewer/build.sh --install  # also copies it to ~/Applications
+```
+
 ## Editing the cloud
 
 Serve the project root and open the editor:

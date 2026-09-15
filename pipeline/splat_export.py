@@ -247,7 +247,10 @@ def start_view(space: Path, splat: Path | None = None) -> dict | None:
     score, R, position, name, turn, back, coverage, bad, depth = best
     return view_json(R, position, frame=name, turn=turn, backMetres=back,
                      coverage=round(coverage, 2), blurShare=round(bad, 2),
-                     medianDepthMetres=round(depth, 2))
+                     medianDepthMetres=round(depth, 2),
+                     # The room's up direction and scale, so a viewer can walk level at
+                     # walking speed (apps/SplatViewer).
+                     up=[round(float(v), 5) for v in up], metre=round(float(metre), 5))
 
 
 def main() -> None:
