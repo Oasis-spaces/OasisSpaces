@@ -89,6 +89,13 @@ NOT_FETCHED = ("workspace/database.db", "splat-project/")
 FETCH_DURING_MINUTES = 10
 
 
+EXEC_ATTEMPTS = 4
+
+
+class SessionEnded(RuntimeError):
+    """The Colab session is gone (and the VM's disk with it)."""
+
+
 def log(text: str) -> None:
     print(time.strftime("%H:%M:%S"), text, flush=True)
 
@@ -113,19 +120,30 @@ class Colab:
             sys.exit(f"could not create the session:\n{made.stdout[-2000:]}\n{made.stderr[-2000:]}")
 
     def python(self, code: str, timeout: float = 300) -> str:
-        """Run Python in the session's kernel; returns what it printed."""
+        """Run Python in the session's kernel; returns what it printed. A call
+        lost to the network (a dropped connection, a busy VM) is tried again;
+        a session that has ended stops the run with that said."""
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
             f.write(code)
             path = f.name
         try:
-            result = self.cli("exec", "-s", self.session, "-f", path, "--timeout", str(timeout),
-                              timeout=timeout + 120)
+            for attempt in range(EXEC_ATTEMPTS):
+                try:
+                    result = self.cli("exec", "-s", self.session, "-f", path, "--timeout", str(timeout),
+                                      timeout=timeout + 120)
+                except subprocess.TimeoutExpired:
+                    result = None
+                if result is not None and result.returncode == 0:
+                    return "\n".join(line for line in result.stdout.splitlines()
+                                     if not line.startswith("[colab]"))
+                detail = (result.stderr[-1200:] + result.stdout[-600:]) if result else "no reply"
+                if "not found" in detail and "Session" in detail or not self.alive():
+                    raise SessionEnded(f"the Colab session {self.session} has ended")
+                log(f"  colab exec did not answer (attempt {attempt + 1}/{EXEC_ATTEMPTS}); retrying")
+                time.sleep(30 * (attempt + 1))
+            raise RuntimeError(f"colab exec failed: {detail}")
         finally:
             Path(path).unlink()
-        if result.returncode != 0:
-            raise RuntimeError(f"colab exec failed: {result.stderr[-1500:]}{result.stdout[-1500:]}")
-        return "\n".join(line for line in result.stdout.splitlines()
-                         if not line.startswith("[colab]"))
 
     def shell(self, command: str, timeout: float = 300) -> str:
         """Run a shell command on the VM (always from /content: exec resets the
@@ -534,6 +552,7 @@ def main() -> None:
                              stdout=open(relay_log, "a"), stderr=subprocess.STDOUT)
     log(f"Claude relay running here (log: {relay_log.relative_to(ROOT)})")
     extra = shlex.split(args.agent_args)
+    done_steps: list[str] = []
     try:
         for step in args.stages:
             log(f"{step} on the VM")
@@ -543,6 +562,11 @@ def main() -> None:
             if gate.get("status") == "stop":
                 rest = " ".join(args.stages[args.stages.index(step):])
                 sys.exit(f"{step} stopped; fix it, then run again with --stages {rest}")
+            done_steps.append(step)
+    except SessionEnded as exc:
+        rest = " ".join(s for s in args.stages if s not in done_steps)
+        sys.exit(f"{exc}. Everything fetched so far is in spaces/{args.name}; carry on with:\n"
+                 f"  python3 tools/colab_pipeline.py {args.video} --name {args.name} --stages {rest}")
     finally:
         relay.terminate()
 
