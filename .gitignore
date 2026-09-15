@@ -13,3 +13,6 @@ spaces/
 # source on each machine rather than publishing the binary
 tools/opensplat
 tools/default.metallib
+
+# Copies of finished splats (large binaries, kept out of git)
+splats/

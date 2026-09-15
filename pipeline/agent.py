@@ -81,6 +81,7 @@ FILL_MAX_SOLID_CHANGE = 6.0
 # blotches on a curtain barely move the average but are damage all the same.
 FILL_DAMAGE_STEP = 40
 FILL_MAX_DAMAGED_SHARE = 0.005
+FILL_EDGE_PX = 12       # pixels this close to an original gap are allowed to change
 # Walls this rough (as a share of the room's diagonal) mean weak geometry.
 NOISY_WALL_RMS_PCT = 1.5
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
@@ -709,7 +710,11 @@ class Agent:
             img_a, cov_a = render(after, view, 480, 360, 55.0, with_coverage=True)
             gaps_before = float((cov_b < 0.5).mean())
             gaps_after = float((cov_a < 0.5).mean())
-            solid = cov_b > 0.9
+            # Pixels already solid, away from any gap: an object's soft edge next to
+            # a gap was darkened by the void behind it and rightly changes.
+            from scipy.ndimage import distance_transform_edt
+
+            solid = (cov_b > 0.9) & (distance_transform_edt(cov_b >= 0.5) > FILL_EDGE_PX)
             diff = np.abs(img_a.astype(int) - img_b.astype(int))
             changed = float(diff[solid].mean()) if solid.any() else 0.0
             # Local damage the average hides: solid pixels that changed a lot.
