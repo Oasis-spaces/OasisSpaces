@@ -509,7 +509,9 @@ def cmd_fill(room: Room, args) -> None:
     arr, trailing = load(room.space, args.fresh)
     floor = args.command in ("fill-floor", "fill-room")
     walls = args.command in ("fill-walls", "fill-room")
-    save(room.space, fill_room(room, arr, floor=floor, walls=walls), trailing, None, room)
+    objects = args.command in ("fill-objects", "fill-room")
+    save(room.space, fill_room(room, arr, floor=floor, walls=walls, objects=objects),
+         trailing, None, room)
 
 
 def cmd_look(room: Room, args) -> None:
@@ -548,7 +550,8 @@ def main() -> None:
     p.add_argument("--colour", nargs=3, type=int, metavar=("R", "G", "B"))
     p.add_argument("--fresh", action="store_true", help="start from splat.ply")
     for name, what in (("fill-floor", "the floor"), ("fill-walls", "the walls"),
-                       ("fill-room", "the floor and walls")):
+                       ("fill-objects", "flat furniture faces"),
+                       ("fill-room", "the floor, walls and flat furniture faces")):
         p = sub.add_parser(name, help=f"fill {what} where the splat has none (see surface_fill.py)")
         p.add_argument("space")
         p.add_argument("--fresh", action="store_true", help="start from splat.ply")
@@ -559,7 +562,8 @@ def main() -> None:
     args = parser.parse_args()
     room = Room(Path(args.space))
     {"objects": cmd_objects, "remove": cmd_remove, "add": cmd_add,
-     "fill-floor": cmd_fill, "fill-walls": cmd_fill, "fill-room": cmd_fill,
+     "fill-floor": cmd_fill, "fill-walls": cmd_fill, "fill-objects": cmd_fill,
+     "fill-room": cmd_fill,
      "look": cmd_look}[args.command](room, args)
 
 

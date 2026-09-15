@@ -576,6 +576,94 @@ def wall_masks(room, surface: Surface, dense, walls: list):
     return standing, hidden
 
 
+# ------------------------------------------------------------ object fill
+FACE_HIDDEN_M = 0.12          # a face this close to a wall or another object is hidden
+FACE_MAX_SPREAD_M = 0.06      # a face is only filled when the splat shows it flat (door panels, frames, handles)...
+FACE_MIN_COVER = 0.30         # ...over at least this share of it
+
+
+def object_surfaces(room, scene, alpha, log=print) -> list:
+    """A Surface for each flat, visible face of the built furniture: its
+    sides facing into the room and its top, at the depth where the splat's
+    own surface is. Faces against a wall or another object, and faces the
+    splat does not show as a flat surface (a blanket over a bed's side), are
+    left out: stage 3's boxes are only approximate."""
+    m = room.metre
+    cell = PHOTO_CELL_M * m
+    boxes = [(i, b) for i, b in enumerate(room.shapes["boxes"]) if b.get("build", True)]
+    walls = room.walls()
+    out = []
+    for i, box in boxes:
+        lo, hi = np.array(box["min"], float), np.array(box["max"], float)
+        faces = []
+        for axis in (0, 1):
+            for sign in (-1.0, 1.0):
+                other = 1 - axis
+                at = hi[axis] if sign > 0 else lo[axis]
+                u = np.zeros(3)
+                u[other] = sign if axis == 0 else -sign        # keeps the image unmirrored
+                origin = np.zeros(3)
+                origin[axis] = at
+                origin[other] = lo[other] if u[other] > 0 else hi[other]
+                origin[2] = lo[2]
+                normal = np.zeros(3)
+                normal[axis] = sign
+                faces.append((f"B{i}-{'xy'[axis]}{'+' if sign > 0 else '-'}", origin, u,
+                              np.array([0, 0, 1.0]), normal, hi[other] - lo[other], hi[2] - lo[2]))
+        faces.append((f"B{i}-top", np.array([lo[0], lo[1], hi[2]]), np.array([1.0, 0, 0]),
+                      np.array([0, 1.0, 0]), np.array([0, 0, 1.0]), hi[0] - lo[0], hi[1] - lo[1]))
+        for name, origin, u, v, normal, width, height in faces:
+            centre = origin + u * width / 2 + v * height / 2
+            hidden = False
+            if normal[2] == 0:
+                axis = 0 if normal[0] != 0 else 1
+                for along, offset, (w_lo, w_hi) in walls:
+                    if along != axis and abs(offset - centre[axis]) < FACE_HIDDEN_M * m \
+                            and w_lo <= centre[1 - axis] <= w_hi:
+                        hidden = True
+            probe = centre + normal * FACE_HIDDEN_M * m
+            for j, other in boxes:
+                if j != i and np.all((probe >= np.array(other["min"]) - 0.02 * m)
+                                     & (probe <= np.array(other["max"]) + 0.02 * m)):
+                    hidden = True
+            if hidden:
+                continue
+            rel = scene - origin
+            a_, b_, d_ = rel @ u, rel @ v, rel @ normal
+            near = ((a_ > 0.1 * m) & (a_ < width - 0.1 * m) & (b_ > 0.1 * m) & (b_ < height - 0.1 * m)
+                    & (np.abs(d_) < 0.25 * m) & (alpha > 0.3))
+            if near.sum() < 300:
+                log(f"  {name}: too little of it in the splat; left as it is")
+                continue
+            shift = float(np.median(d_[near]))
+            spread = float(np.median(np.abs(d_[near] - shift)))
+            on = near & (np.abs(d_ - shift) < 0.05 * m)
+            grid = 0.05 * m
+            cover = len(set(zip((a_[on] / grid).astype(int), (b_[on] / grid).astype(int)))) / max(
+                1, int(width / grid) * int(height / grid))
+            if spread > FACE_MAX_SPREAD_M * m or cover < FACE_MIN_COVER:
+                log(f"  {name}: not a flat surface in the splat (spread {spread / m * 100:.0f} cm, "
+                    f"covers {cover:.0%}); left as it is")
+                continue
+            out.append(Surface(f"object-{name}", origin + normal * shift, u, v, normal,
+                               int(round(width / cell)), int(round(height / cell)), cell))
+            log(f"  {name} ({box.get('label')}): {width / m:.2f} x {height / m:.2f} m face, "
+                f"flat within {spread / m * 100:.1f} cm")
+    return out
+
+
+def object_masks(room, surface: Surface, dense):
+    """What stands in front of an object's face (not the object itself)."""
+    from scipy.ndimage import binary_closing, binary_dilation
+
+    m = room.metre
+    rel = dense - surface.origin
+    depth = rel @ surface.normal
+    front = (depth > 0.06 * m) & (depth < 0.6 * m)
+    standing = raster(surface, dense[front], surface.rows, surface.cols, surface.cell) >= 2
+    return binary_closing(binary_dilation(standing, iterations=6), iterations=3)
+
+
 # ------------------------------------------------------------------ run
 REGION_MARGIN_M = 0.30        # a limited fill reaches this far past its boxes
 REMNANT_COLOUR_GAP = 45       # surface this unlike the fill, where an object was, is left of it
@@ -599,7 +687,7 @@ def region_mask(room, surface: Surface, regions) -> np.ndarray:
 
 
 def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log=print,
-              regions=None) -> np.ndarray:
+              regions=None, objects: bool = False) -> np.ndarray:
     """The splat with its missing floor and/or wall surfaces filled; with
     `regions` (scene-frame (min, max) boxes), only near those boxes, and only
     on the surfaces they touch."""
@@ -619,6 +707,9 @@ def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log
             log(f"  {surface.name}: {standing.mean():.0%} with something in front, "
                 f"{hidden.mean():.0%} behind furniture")
             jobs.append((surface, standing | hidden, (-0.35, 0.06), 0.06))
+    if objects:
+        for surface in object_surfaces(room, scene, alpha, log):
+            jobs.append((surface, object_masks(room, surface, dense), (-0.20, 0.05), 0.05))
     masks = None
     if regions:
         masks = [region_mask(room, job[0], regions) for job in jobs]
@@ -630,19 +721,19 @@ def fill_room(room, arr: np.ndarray, floor: bool = True, walls: bool = True, log
     solid = (alpha > 0.3)
     occluders = np.stack([arr["x"], arr["y"], arr["z"]], axis=1)[solid].astype(np.float64)
     photos = photograph(room.space, room, [j[0] for j in jobs], log, occluders=occluders,
-                        frame_step=1 if walls else FRAME_STEP)
+                        frame_step=1 if (walls or objects) else FRAME_STEP)
     remove = np.zeros(len(arr), bool)
     added = []
     behind_points = np.vstack([dense, scene[alpha > 0.3]])
     for k, ((surface, blocked, slab, splat_band), (photo, seen, through)) in enumerate(zip(jobs, photos)):
         opening = (wall_openings(room, surface, behind_points, through)
-                   if surface.name != "floor" else np.zeros_like(blocked))
+                   if surface.name.startswith("wall") else np.zeros_like(blocked))
         blobs, guess, stats = fill_surface(room, surface, scene, colours, alpha, scale, photo, seen,
                                            blocked, opening, slab, splat_band, log,
                                            region=masks[k] if masks else None)
         log(f"  {surface.name}: the splat covers {stats['splat']:.0%}, "
             f"{stats['clean_photo']:.0%} filmed cleanly, "
-            + (f"{opening.mean():.0%} open (seen through), " if surface.name != "floor" else "")
+            + (f"{opening.mean():.0%} open (seen through), " if surface.name.startswith("wall") else "")
             + (f"filling {stats['holes']:.0%} with {stats.get('added', 0):,} blobs" if "holes" in stats
                else "not filled"))
         remove |= guess
