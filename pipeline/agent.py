@@ -58,6 +58,11 @@ from reconstruct import (  # noqa: E402
 )
 
 STAGES = ["reconstruct", "densify", "shapes", "splat"]
+# Claude's judgements are filed under what was judged; this is the stage each
+# belongs to, so re-running a later stage keeps the earlier stages' judgements.
+JUDGEMENT_STAGE = {"objects": "densify", "structure": "shapes", "blender": "shapes",
+                   "start view": "splat", "fill": "splat", "choose": "splat",
+                   "splat training": "splat"}
 
 # Tools that live in different places per machine: set BLENDER / OPENSPLAT to
 # override (the Colab notebook installs both under /opt and /content).
@@ -212,12 +217,14 @@ def problem_text(problem) -> str:
 class Agent:
     def __init__(self, source: Path, name: str, fps: float, do_splat: bool,
                  allow_retry: bool = True, use_claude: bool = True,
-                 long_splat: bool | None = None):
+                 long_splat: bool | None = None, trained_elsewhere: bool = False):
         self.source = source
         self.name = name
         self.fps = fps
         self.do_splat = do_splat
-        self.long_splat = shutil.which("nvidia-smi") is not None if long_splat is None else long_splat
+        self.cuda = shutil.which("nvidia-smi") is not None
+        self.long_splat = self.cuda if long_splat is None else long_splat
+        self.trained_elsewhere = trained_elsewhere
         self.allow_retry = allow_retry
         self.space = ROOT / "spaces" / name
         self.log_path = self.space / "agent.log"
@@ -939,19 +946,27 @@ class Agent:
         return True
 
     def step_splat(self) -> bool:
-        ok, _ = self.run([sys.executable, str(ROOT / "pipeline/splat_seed.py"),
-                          str(self.space)], "splat seed", "dense cloud as starting points")
-        if not ok:
-            self.decide("splat", "skip", "could not build the splat project")
-            return False
+        if not self.trained_elsewhere:
+            ok, _ = self.run([sys.executable, str(ROOT / "pipeline/splat_seed.py"),
+                              str(self.space)], "splat seed", "dense cloud as starting points")
+            if not ok:
+                self.decide("splat", "skip", "could not build the splat project")
+                return False
         trained = []
         for run_name, (steps, downscale) in SPLAT_RUNS.items():
+            out = self.space / f"splat-{run_name}.ply"
+            if self.trained_elsewhere:
+                # Trained on another machine (a Colab GPU) and copied in.
+                if out.exists():
+                    print(f"\n=== splat: using {out.name}, trained elsewhere")
+                    trained.append({"label": f"{run_name} ({steps} steps, 1/{downscale} resolution)",
+                                    "space": self.space, "ply": out})
+                continue
             if run_name != "quick" and not self.long_splat:
                 continue
-            out = self.space / f"splat-{run_name}.ply"
             args = [OPENSPLAT, str(self.space / "splat-project"), "-n", str(steps),
                     "-d", str(downscale), "-o", str(out)]
-            if self.image_cache_gb(downscale) > MAX_GPU_IMAGE_CACHE_GB:
+            if not self.cuda and self.image_cache_gb(downscale) > MAX_GPU_IMAGE_CACHE_GB:
                 args.append("--no-gpu-cache")
             ran, _ = self.run(args, "splat", f"{run_name}: {steps} steps at 1/{downscale} resolution")
             if ran and out.exists():
@@ -1138,6 +1153,7 @@ class Agent:
             result = np.concatenate([original[~remove], *[p["blobs"] for p in kept_pieces]])
             save(self.space, result, trailing, None, room, name="splat-filled")
             record["added"] = int(sum(len(p["blobs"]) for p in kept_pieces))
+            record["removed"] = int(remove.sum())   # haze and remnants the kept fills replace
         record_path.write_text(json.dumps(record, indent=1) + "\n")
         self.decide("splat", "accept" if kept_pieces else "skip",
                     (f"kept the fill on {', '.join(p['surface'] for p in kept_pieces)}"
@@ -1361,7 +1377,7 @@ class Agent:
         previous = json.loads(path.read_text())
         self.stages = [e for e in previous.get("decisions", []) if e["stage"] in earlier]
         self.judgements = [j for j in previous.get("judgements", [])
-                           if j["stage"] in earlier]
+                           if JUDGEMENT_STAGE.get(j["stage"], j["stage"]) in earlier]
         self.gates = {k: v for k, v in previous.get("gates", {}).items() if k in earlier}
 
     def go(self, stages: list[str], accept_warnings: bool = False) -> int:
@@ -1470,6 +1486,9 @@ def main() -> int:
                         help="run each stage once, never retry with other settings")
     parser.add_argument("--no-claude", action="store_true",
                         help="decide from the measurements alone, without asking Claude")
+    parser.add_argument("--trained-elsewhere", action="store_true",
+                        help="stage 4 uses splat-quick.ply / splat-long.ply already in the space "
+                             "(trained on a Colab GPU) instead of training")
     parser.add_argument("--long-splat", choices=["auto", "on", "off"], default="auto",
                         help="also train a long splat and let Claude keep the better one "
                              "(auto: only with a CUDA GPU; about 2.5 hours on an 8 GB Mac)")
@@ -1480,7 +1499,8 @@ def main() -> int:
         sys.exit(f"Source not found: {source}")
     agent = Agent(source, args.name, args.fps, not args.no_splat,
                   allow_retry=not args.no_retry, use_claude=not args.no_claude,
-                  long_splat={"auto": None, "on": True, "off": False}[args.long_splat])
+                  long_splat={"auto": None, "on": True, "off": False}[args.long_splat],
+                  trained_elsewhere=args.trained_elsewhere)
     if args.stage:
         stages = [args.stage]
     else:
