@@ -43,6 +43,7 @@ import argparse
 import hashlib
 import json
 import shlex
+import signal
 import subprocess
 import sys
 import tarfile
@@ -182,9 +183,19 @@ class Colab:
             log(f"  {name} is already running on the VM")
             return False
         wrapped = f"({command}) > {REMOTE_WORK}/{name}.log 2>&1; echo $? > {REMOTE_WORK}/{name}.exit"
-        self.shell(f"mkdir -p {REMOTE_WORK} && rm -f {REMOTE_WORK}/{name}.exit && "
-                   f"nohup bash -c {shlex.quote(wrapped)} > /dev/null 2>&1 & "
-                   f"echo $! > {REMOTE_WORK}/{name}.pid", timeout=120)
+        # Started from the kernel fully detached (own session, no pipes back),
+        # so the exec call returns at once. A shell "a && b && nohup c &" would
+        # background the whole chain with the exec's output pipes still open,
+        # and the kernel would wait for the job to end before answering anything.
+        self.python(f"import os, subprocess\n"
+                    f"os.makedirs('{REMOTE_WORK}', exist_ok=True)\n"
+                    f"exit_file = '{REMOTE_WORK}/{name}.exit'\n"
+                    f"os.path.exists(exit_file) and os.remove(exit_file)\n"
+                    f"p = subprocess.Popen(['bash', '-c', {wrapped!r}], stdin=subprocess.DEVNULL, "
+                    f"stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, "
+                    f"cwd='/content')\n"
+                    f"open('{REMOTE_WORK}/{name}.pid', 'w').write(str(p.pid))\n"
+                    f"print('started', p.pid)\n", timeout=120)
         return True
 
     def finished(self, name: str) -> int | None:
@@ -504,6 +515,8 @@ def run_stage(vm: Colab, video_remote: str, name: str, step: str, extra: list[st
 
 
 def main() -> None:
+    # A stopped driver still runs its finally blocks (the relay is stopped with it).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit("stopped"))
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("video")
@@ -536,6 +549,9 @@ def main() -> None:
                               timeout=120).strip() == "yes"
         if not remote_has:
             upload_space(vm, args.name)
+        else:
+            # Carrying on in the same session: bring what the VM has here first.
+            log(f"  fetched {fetch_space(vm, args.name)} file(s) already on the VM")
     if not installed:
         log("waiting for the installs: " + ", ".join(needed))
         wait_installs(vm, needed)
