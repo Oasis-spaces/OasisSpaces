@@ -243,6 +243,29 @@ a `.ply`'s view-dependent colour.
 - **Starting view:** a splat opens at the pipeline's starting camera
   (`<name>.view.json`, with the room's up direction and metre scale) when there
   is one.
+- **Walking through things:** back into a wall or a piece of furniture and it
+  is left out of the picture. The room still shows from where you stand, as if
+  it were not there. A coarse grid of where the splat is solid tracks the last
+  open spot you stood in, and the near clipping plane is pushed out to it.
+- **Editing (Edit room, ⌘E):** needs the room's `shapes.json` and
+  `densify.json` beside the splat.
+  - The splat is split into the objects and walls stage 3 found, so they can be
+    changed on their own.
+  - Click an object to select it. Drag it along the floor, or use its handles:
+    a corner resizes (⇧ keeps proportions), the top handle sets height, and the
+    front handle turns it. `[` and `]` turn it 15°; ⌫ removes it.
+  - The outline shows width, depth and height. The inspector takes exact
+    centimetres and degrees.
+  - Click a wall to repaint it from swatches or any colour, or paint every
+    wall. Only Gaussians carrying the wall's own paint change; curtains,
+    shelves and pictures keep their colours, and light and shade are kept.
+  - **Add** opens a furniture library in a sidebar. Drag a piece into the room
+    or click it to place it in front of you; pieces can be recoloured.
+  - Moving or removing an object covers the floor under it and the wall behind
+    it. Thin Gaussians continue the surrounding surface into the gap.
+  - Undo and redo with ⌘Z and ⌘⇧Z. Edits are saved beside the splat as
+    `<name>.edits.json` and come back when it is reopened; the splat file itself
+    is not changed.
 
 ```bash
 apps/SplatViewer/build.sh            # needs Xcode and XcodeGen (brew install xcodegen)

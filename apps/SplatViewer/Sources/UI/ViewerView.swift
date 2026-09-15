@@ -22,11 +22,15 @@ struct ViewerView: View {
                 EmptyView()
             }
 
+            if model.editor.isEditing, model.phase == .ready {
+                EditorOverlay(model: model)
+            }
+
             VStack(spacing: 0) {
                 topBar
                 Spacer()
                 HStack(alignment: .bottom) {
-                    if model.showHelp {
+                    if model.showHelp && !model.editor.isEditing {
                         ControlsPanel(style: .overlay)
                             .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
@@ -45,6 +49,11 @@ struct ViewerView: View {
             }
         }
         .environment(\.colorScheme, .dark)
+        .dropDestination(for: FurnitureDrag.self) { pieces, location in
+            guard let piece = pieces.first, let controller = model.controller, model.editor.hasRoom else { return false }
+            controller.dropFurniture(piece.kind, at: location)
+            return true
+        }
         .task(id: isActive) {
             // Show the controls when a splat first opens, then get out of the way.
             guard isActive, !model.helpAutoHidden else { return }
@@ -70,6 +79,9 @@ struct ViewerView: View {
             .padding(.vertical, 7)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             Spacer()
+            if model.phase == .ready {
+                editButton
+            }
             HStack(spacing: 2) {
                 OverlayButton(systemImage: "arrow.counterclockwise", help: "Back to the starting view (R)") {
                     model.controller?.resetView()
@@ -84,6 +96,29 @@ struct ViewerView: View {
             .padding(3)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
+    }
+
+    private var editButton: some View {
+        let editor = model.editor
+        return Button {
+            editor.isEditing.toggle()
+            model.controller?.touch()
+        } label: {
+            Label(editor.isEditing ? "Editing" : "Edit room", systemImage: "square.and.pencil")
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background(editor.isEditing ? AnyShapeStyle(Color.oasis) : AnyShapeStyle(.ultraThinMaterial),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .foregroundStyle(editor.isEditing ? .white : .primary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!editor.hasRoom)
+        .opacity(editor.hasRoom ? 1 : 0.5)
+        .help(editor.hasRoom
+              ? "Move, resize, remove and add furniture, and repaint walls (⌘E)"
+              : "Editing needs the room's shapes.json and densify.json beside the splat")
     }
 
     private var subtitle: String {

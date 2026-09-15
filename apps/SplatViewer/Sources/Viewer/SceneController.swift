@@ -17,6 +17,7 @@ final class ViewerModel {
     var startViewFrame: String?
     var showHelp = true
     var helpAutoHidden = false
+    let editor = EditorModel()
     @ObservationIgnored weak var controller: SceneController?
 }
 
@@ -56,10 +57,21 @@ final class SplatMTKView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        controller?.mouseDown(at: point(of: event), clicks: event.clickCount)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        controller?.drag(dx: event.deltaX, dy: event.deltaY)
+        controller?.mouseDragged(to: point(of: event), dx: event.deltaX, dy: event.deltaY)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        controller?.mouseUp()
+    }
+
+    /// The event's position in view points with the origin at the top left, like SwiftUI.
+    private func point(of event: NSEvent) -> CGPoint {
+        let local = convert(event.locationInWindow, from: nil)
+        return CGPoint(x: local.x, y: bounds.height - local.y)
     }
 
     override func rightMouseDragged(with event: NSEvent) {
@@ -85,10 +97,10 @@ final class SceneController: NSObject, MTKViewDelegate {
     let item: SplatItem
     let model: ViewerModel
     private weak var library: Library?
-    private weak var view: SplatMTKView?
+    weak var view: SplatMTKView?
     private var commandQueue: MTLCommandQueue?
-    private var scene: SplatScene?
-    private var camera = FlyCamera()
+    private(set) var scene: SplatScene?
+    var camera = FlyCamera()
     private var keys = KeyState()
     private var keyMonitor: Any?
     private var resignObserver: NSObjectProtocol?
@@ -100,6 +112,13 @@ final class SceneController: NSObject, MTKViewDelegate {
     private var framesRendered = 0
     private var thumbnailRequested = false
     private var eventFlags: NSEvent.ModifierFlags = []
+    /// The last place the camera stood in the open, with nothing solid between it and here.
+    private var openAnchor: SIMD3<Float>?
+    private var clipDistance: Float = 0
+    private var appliedEdits = SceneEdits()
+    private var applyingEdits = false
+    var editDrag: EditDrag?
+    var editDragStarted = false
 
     var debugPose: FlyCamera.Pose { camera.pose }
     var debugHeldKeys: Set<MoveKey> { keys.held }
@@ -195,6 +214,8 @@ final class SceneController: NSObject, MTKViewDelegate {
         model.splatCount = scene.count
         model.startViewFrame = scene.start?.frame
         model.phase = .ready
+        model.editor.attach(room: scene.room, splat: item.url)
+        openAnchor = camera.pose.position
         library?.recordLoaded(item.id, splatCount: scene.count)
         touch()
     }
@@ -225,6 +246,7 @@ final class SceneController: NSObject, MTKViewDelegate {
             return false
         case .keyDown, .keyUp:
             let isDown = event.type == .keyDown
+            if isDown, handleEditKey(event, flags: flags) { return true }
             if let key = MoveKey(keyCode: event.keyCode) {
                 // ⌘W, ⌘Q and the like are the app's, not movement.
                 if key.isLetter && !flags.isDisjoint(with: [.command, .control, .option]) { return false }
@@ -271,10 +293,12 @@ final class SceneController: NSObject, MTKViewDelegate {
 
     func resetView() {
         camera.reset()
+        openAnchor = camera.pose.position
+        clipDistance = 0
         touch()
     }
 
-    private func touch() {
+    func touch() {
         lastInteraction = CACurrentMediaTime()
         if let view, view.preferredFramesPerSecond != 60 { view.preferredFramesPerSecond = 60 }
     }
@@ -305,8 +329,13 @@ final class SceneController: NSObject, MTKViewDelegate {
         let fps = now - lastInteraction < 1.5 ? 60 : 15
         if view.preferredFramesPerSecond != fps { view.preferredFramesPerSecond = fps }
 
+        updateSeeThrough(dt: dt, grid: scene.grid)
+        syncEdits(scene)
+        updateGizmo()
+
         let size = view.drawableSize
-        let rendered = (try? scene.render(camera: camera, width: Int(size.width), height: Int(size.height),
+        let rendered = (try? scene.render(camera: camera, near: clipDistance > 0 ? clipDistance : nil,
+                                          width: Int(size.width), height: Int(size.height),
                                           colorTexture: drawable.texture,
                                           depthTexture: view.depthStencilTexture,
                                           commandBuffer: commandBuffer)) ?? false
@@ -322,6 +351,45 @@ final class SceneController: NSObject, MTKViewDelegate {
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+    /// Looking past what the camera has walked into. While the camera moves through the
+    /// open, its position is the anchor. Once it steps into a wall or a piece of furniture
+    /// (or out the other side), the anchor stays where it last stood in the open, and
+    /// everything nearer than the anchor is left out, so the room still shows as if that
+    /// wall or object were not there. Turn away and nothing is hidden.
+    private func updateSeeThrough(dt: Float, grid: OccupancyGrid?) {
+        guard let grid else { return }
+        let position = camera.pose.position
+        if let anchor = openAnchor {
+            if grid.isOpen(position) && grid.isClear(from: anchor, to: position) { openAnchor = position }
+        } else {
+            openAnchor = position
+        }
+        let margin = grid.cell * 0.8
+        let ahead = simd_dot((openAnchor ?? position) - position, camera.lookDirection(camera.pose))
+        let target = ahead > margin ? ahead - margin * 0.5 : 0
+        clipDistance += (target - clipDistance) * (1 - exp(-dt * 14))
+        if clipDistance < camera.near { clipDistance = 0 }
+    }
+
+    /// Hands the latest edits to the scene, one rebuild at a time.
+    private func syncEdits(_ scene: SplatScene) {
+        guard scene.room != nil, !applyingEdits, model.editor.edits != appliedEdits else { return }
+        applyingEdits = true
+        let edits = model.editor.edits
+        Task { [weak self] in
+            await scene.apply(edits)
+            guard let self else { return }
+            self.appliedEdits = edits
+            self.applyingEdits = false
+            self.touch()
+        }
+    }
+
+    /// Test and debug hooks.
+    var debugClipDistance: Float { clipDistance }
+    var debugAppliedEdits: SceneEdits { appliedEdits }
+    var debugCommandQueue: MTLCommandQueue? { commandQueue }
 
     /// A picture from the starting camera for the library's card.
     private func saveThumbnail(_ scene: SplatScene) {

@@ -286,6 +286,7 @@ struct ControlsPanel: View {
             (["Drag"], "Look around"),
             (["Scroll"], "Walk forward and sideways"),
             (["R"], "Back to the starting view"),
+            (["⌘", "E"], "Edit the room"),
         ]
         if style == .card {
             rows += [(["⌘", "O"], "Open splats"), (["⌘", "W"], "Close the splat"),

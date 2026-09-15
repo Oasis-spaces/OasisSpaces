@@ -60,6 +60,10 @@ targets:
             UTTypeConformsTo: [public.data]
             UTTypeTagSpecification:
               public.filename-extension: [ply]
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.oasisspaces.furniture
+            UTTypeDescription: Furniture from the Splat Viewer library
+            UTTypeConformsTo: [public.data]
     settings:
       base:
         PRODUCT_NAME: Splat Viewer

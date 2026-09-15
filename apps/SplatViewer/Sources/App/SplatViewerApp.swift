@@ -31,6 +31,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let splat = environment["SPLATVIEWER_KEYTEST_SPLAT"], let log = environment["SPLATVIEWER_KEYTEST_LOG"] {
             SelfTest.runKeyTest(splat: URL(fileURLWithPath: splat), log: URL(fileURLWithPath: log))
         }
+        if let splat = environment["SPLATVIEWER_EDITTEST_SPLAT"], let output = environment["SPLATVIEWER_EDITTEST_OUT"] {
+            EditTest.run(splat: URL(fileURLWithPath: splat), output: URL(fileURLWithPath: output))
+        }
         if let log = environment["SPLATVIEWER_REPORT"] {
             SelfTest.reportWindows(to: URL(fileURLWithPath: log))
         }

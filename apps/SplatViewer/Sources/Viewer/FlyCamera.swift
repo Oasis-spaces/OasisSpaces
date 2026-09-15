@@ -257,8 +257,10 @@ struct FlyCamera {
             SIMD4(-simd_dot(r, p), -simd_dot(u, p), simd_dot(f, p), 1)))
     }
 
-    /// Right-handed perspective with Metal's 0...1 depth.
-    func projection(aspect: Float) -> simd_float4x4 {
+    /// Right-handed perspective with Metal's 0...1 depth. A larger `near` hides everything
+    /// closer than it: how the viewer looks past a wall it has backed into.
+    func projection(aspect: Float, near nearOverride: Float? = nil) -> simd_float4x4 {
+        let near = max(nearOverride ?? self.near, self.near)
         let ys = 1 / tan(fovY / 2)
         let xs = ys / aspect
         let zs = far / (near - far)
@@ -267,6 +269,28 @@ struct FlyCamera {
             SIMD4(0, ys, 0, 0),
             SIMD4(0, 0, zs, -1),
             SIMD4(0, 0, zs * near, 0)))
+    }
+
+    /// The ray through a point of the view (points, origin top-left), in the splat's frame.
+    func ray(through point: CGPoint, in size: CGSize) -> (origin: SIMD3<Float>, direction: SIMD3<Float>) {
+        let ndc = SIMD2(Float(2 * point.x / max(size.width, 1) - 1), Float(1 - 2 * point.y / max(size.height, 1)))
+        let tanY = tan(fovY / 2)
+        let aspect = Float(size.width / max(size.height, 1))
+        let camera = SIMD3(ndc.x * tanY * aspect, ndc.y * tanY, -1)
+        let inverse = viewMatrix().inverse
+        let direction = simd_normalize(SIMD3((inverse * SIMD4(camera, 0)).x, (inverse * SIMD4(camera, 0)).y,
+                                             (inverse * SIMD4(camera, 0)).z))
+        return (pose.position, direction)
+    }
+
+    /// Where a splat-frame point lands in the view (points, origin top-left); nil when
+    /// it is behind the camera.
+    func project(_ point: SIMD3<Float>, in size: CGSize) -> CGPoint? {
+        let aspect = Float(size.width / max(size.height, 1))
+        let clip = projection(aspect: aspect) * viewMatrix() * SIMD4(point, 1)
+        guard clip.w > near * 0.5 else { return nil }
+        return CGPoint(x: CGFloat((clip.x / clip.w + 1) / 2) * size.width,
+                       y: CGFloat((1 - clip.y / clip.w) / 2) * size.height)
     }
 
     private static func clampPitch(_ pitch: Float) -> Float {

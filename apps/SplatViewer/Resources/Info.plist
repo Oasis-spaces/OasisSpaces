@@ -43,6 +43,19 @@
 	<string>15.0</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Oasis-spaces</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Furniture from the Splat Viewer library</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.oasisspaces.furniture</string>
+		</dict>
+	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
