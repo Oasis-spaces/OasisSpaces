@@ -673,7 +673,26 @@ class Agent:
             self.run([sys.executable, str(ROOT / "pipeline/splat_export.py"),
                       str(self.space / "splat.ply")], "splat export", "compact copy for the viewer")
             self.safe(self.fill_surfaces)
+            self.safe(self.choose_best)
         return ok
+
+    def choose_best(self) -> None:
+        """Compare every finished splat of this video (this run's trained and
+        filled splats, and earlier runs), let Claude pick, and publish the best
+        to splats/<video>/best.splat (tools/splat_choose.py)."""
+        from splat_choose import choose
+
+        record = choose(self.source, log=lambda text: print("   " + text), advisor=self.advisor)
+        if not record:
+            return
+        if record.get("claude"):
+            self.judged("choose", {"ranking": record["claude"].get("ranking"),
+                                   "reasons": record["claude"].get("reasons"),
+                                   "candidates": record["candidates"]},
+                        f"best splat of {self.source.name}: {record['best']}")
+        self.decide("splat", "accept", f"published {record['best']} as the best splat of "
+                    f"{self.source.name} (decided by {record['decided_by']})",
+                    {"best_splat": record["best"]})
 
     def fill_surfaces(self) -> None:
         """Fill floor, wall and flat furniture faces the splat has no blobs for
