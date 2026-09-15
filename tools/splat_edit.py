@@ -13,8 +13,10 @@ re-running any stage.
     add      build a piece of furniture from simple parts, as Gaussians, and
              place it on the floor at a position in metres (or where a removed
              object stood, or backed against the nearest wall)
-    fill-floor  fill the floor no frame ever saw with the room's own flooring,
-             blended into the filmed floor (tools/surface_fill.py)
+    fill-floor / fill-walls / fill-room
+             fill floor and wall the splat has no blobs for with the room's own
+             flooring and paint, blended into what was filmed, never across a
+             doorway (tools/surface_fill.py)
     look     print a viewer link that opens looking at an object
 
 Each edit reads splat-edited.ply if there is one (else splat.ply) and writes
@@ -514,11 +516,13 @@ def cmd_add(room: Room, args) -> None:
     save(room.space, np.concatenate([arr, piece]), trailing, centre, room, box_index)
 
 
-def cmd_fill_floor(room: Room, args) -> None:
-    from surface_fill import fill_floor
+def cmd_fill(room: Room, args) -> None:
+    from surface_fill import fill_room
 
     arr, trailing = load(room.space, args.fresh)
-    save(room.space, fill_floor(room, arr), trailing, None, room)
+    floor = args.command in ("fill-floor", "fill-room")
+    walls = args.command in ("fill-walls", "fill-room")
+    save(room.space, fill_room(room, arr, floor=floor, walls=walls), trailing, None, room)
 
 
 def cmd_look(room: Room, args) -> None:
@@ -556,9 +560,11 @@ def main() -> None:
                    help="turn and slide it back against the nearest wall")
     p.add_argument("--colour", nargs=3, type=int, metavar=("R", "G", "B"))
     p.add_argument("--fresh", action="store_true", help="start from splat.ply")
-    p = sub.add_parser("fill-floor", help="fill the floor that was never filmed (see surface_fill.py)")
-    p.add_argument("space")
-    p.add_argument("--fresh", action="store_true", help="start from splat.ply")
+    for name, what in (("fill-floor", "the floor"), ("fill-walls", "the walls"),
+                       ("fill-room", "the floor and walls")):
+        p = sub.add_parser(name, help=f"fill {what} where the splat has none (see surface_fill.py)")
+        p.add_argument("space")
+        p.add_argument("--fresh", action="store_true", help="start from splat.ply")
     p = sub.add_parser("look", help="print a viewer link looking at an object")
     p.add_argument("space")
     p.add_argument("object")
@@ -566,7 +572,8 @@ def main() -> None:
     args = parser.parse_args()
     room = Room(Path(args.space))
     {"objects": cmd_objects, "remove": cmd_remove, "add": cmd_add,
-     "fill-floor": cmd_fill_floor, "look": cmd_look}[args.command](room, args)
+     "fill-floor": cmd_fill, "fill-walls": cmd_fill, "fill-room": cmd_fill,
+     "look": cmd_look}[args.command](room, args)
 
 
 if __name__ == "__main__":

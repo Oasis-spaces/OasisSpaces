@@ -192,7 +192,18 @@ open floor nearby and from the wall above. `add` builds a sofa, armchair,
 bed, table, chair, desk, wardrobe or box from simple parts as blobs, at a
 typical size or `--size W D H` in metres, standing on the floor at `--at x y`
 (metres from the room's centre) or where an object stood, optionally backed
-against the nearest wall. Edits chain in `splat-edited.ply` / `.splat`
+against the nearest wall. `fill-floor`, `fill-walls` and `fill-room` fill floor and wall the splat
+has no blobs for (a phone at eye height never sees the floor near you, or the
+wall behind a curtain) with the room's own flooring and paint
+(`tools/surface_fill.py`). Every frame is projected onto each surface stage 3
+measured, keeping only views nothing blocks. An AI inpainting model (LaMa,
+local) continues it into the gaps, taking broad colour from the splat's own
+surface and fine detail from the photo. The fill is flat blobs that fade into
+the splat's surface. A spot counts as a gap only if the splat has nothing at
+all near the plane, so a recessed door or window is never painted over.
+Anything reconstructed behind a wall marks an opening (a doorway, a window)
+that is never filled. It needs `~/.cache/oasisspaces/big-lama.pt` (IOPaint's
+big-lama checkpoint, 206 MB). Edits chain in `splat-edited.ply` / `.splat`
 (`--fresh` starts again). Added furniture is evenly shaded, a placement
 preview rather than a filmed object; a patch is a plausible guess, not what
 was really behind the object.
