@@ -35,6 +35,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
+from semantics import Vocabulary, room_vocabulary  # noqa: E402
+
 # --------------------------------------------------------------------------
 # Thresholds. Angles are absolute (orientation is unit-free); everything else
 # is a fraction of room height (H) or floor area (A).
@@ -363,9 +366,9 @@ def square_up_room(planes: list[dict], labels: list[str], ctx: RoomContext,
 # every side of the room has a wall.
 # --------------------------------------------------------------------------
 FLOOR_STANDING = {"bed", "seat", "table", "wardrobe", "block"}
-# Detected things that may sit on other furniture: extended to the floor only
-# when they already start near it (a floor lamp, not a bedside lamp).
-MAY_SIT_ON_FURNITURE = {"pillow", "lamp", "potted plant"}
+# Detected things that may sit on other furniture (the "on_furniture" role in
+# pipeline/semantics.py) are extended to the floor only when they already
+# start near it: a floor lamp, not a bedside lamp.
 # A wall this close to a side of the room (share of the room's width) is on
 # that side: it closes the side, and it moves out to contain furniture.
 WALL_ON_SIDE_FRAC = 0.10
@@ -591,7 +594,8 @@ def orient_furniture(boxes: list[dict], room: dict, size, units_per_metre=None) 
     return notes
 
 
-def finish_room(data: dict, units_per_metre: float | None = None) -> list[str]:
+def finish_room(data: dict, units_per_metre: float | None = None,
+                vocabulary: Vocabulary | None = None) -> list[str]:
     """Rest furniture on the floor, keep it inside the walls, and close the
     room with inferred walls. Works on built walls and boxes only, and starts
     from the measured walls each time, so it can be re-run after a review."""
@@ -611,7 +615,8 @@ def finish_room(data: dict, units_per_metre: float | None = None) -> list[str]:
         if gap < 0:
             b["min"][2] = floor_z  # sunk into the floor: cut at the floor
         elif (gap > 0 and b.get("label") in FLOOR_STANDING
-              and not (b.get("detected") in MAY_SIT_ON_FURNITURE
+              and not ((vocabulary or Vocabulary.default()).role(b.get("detected"))
+                       == "on_furniture"
                        and gap > NEAR_FLOOR_MAX_GAP_FRAC * height)):
             b["min"][2] = floor_z
             notes.append(f"stood B{i} {b.get('label')} on the floor "
@@ -817,19 +822,6 @@ def _has_surface_above(box: dict, ctx: RoomContext) -> bool:
     return False
 
 
-# Things that only ever lie on the floor: a detection of one up on the bed
-# is a mislabel (a blanket seen as a rug).
-FLOOR_ONLY = {"rug"}
-
-# Detected object names (pipeline/semantics.py) -> furniture library builders.
-DETECTED_TO_LIBRARY = {
-    "bed": "bed", "sofa": "seat", "armchair": "seat", "chair": "seat",
-    "stool": "seat", "table": "table", "desk": "table", "wardrobe": "wardrobe",
-    "cabinet": "wardrobe", "chest of drawers": "wardrobe", "shelf": "wardrobe",
-    "bookcase": "wardrobe", "lamp": "block", "rug": "block",
-    "potted plant": "block", "pillow": "block",
-}
-
 
 def classify_box(box: dict, ctx: RoomContext) -> tuple[str, str, dict]:
     sx, sy, sz = box_size(box)
@@ -974,8 +966,9 @@ def main(argv: list[str] | None = None) -> int:
     meta_path = Path(args.space) / "densify.json"
     units_per_metre = (json.loads(meta_path.read_text()).get("colmap_units_per_metre")
                        if meta_path.is_file() else None)
+    vocabulary = room_vocabulary(Path(args.space))
     if args.finish_only:
-        for note in finish_room(data, units_per_metre):
+        for note in finish_room(data, units_per_metre, vocabulary):
             print(note)
         with open(shapes_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=1)
@@ -1017,12 +1010,15 @@ def main(argv: list[str] | None = None) -> int:
             gap = (box["min"][2] - ctx.floor_z) / ctx.room_height
             if label == "clutter":
                 why = f"detected {detected}, but {why}"
-            elif detected in FLOOR_ONLY and gap > NEAR_FLOOR_MAX_GAP_FRAC:
+            elif (vocabulary.role(detected) == "floor_covering"
+                  and gap > NEAR_FLOOR_MAX_GAP_FRAC):
+                # Lies flat on the floor: one up on the bed is a mislabel (a
+                # blanket seen as a rug).
                 label = "clutter"
                 why = (f"detected {detected}, but it sits {gap:.0%} of room height "
                        f"above the floor, so it is something else")
             else:
-                label = DETECTED_TO_LIBRARY.get(detected, "block")
+                label = vocabulary.build_as(detected)
                 why = f"detected as {detected}"
         box_results.append((label, why, metrics))
 
@@ -1034,7 +1030,7 @@ def main(argv: list[str] | None = None) -> int:
         box["build"] = label != "clutter"
     data["room_level"] = {"floor_z": ctx.floor_z, "height": ctx.room_height}
     if not args.no_finish:
-        for note in finish_room(data, units_per_metre):
+        for note in finish_room(data, units_per_metre, vocabulary):
             print(note)
 
     with open(shapes_path, "w", encoding="utf-8") as f:

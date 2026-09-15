@@ -12,8 +12,13 @@ test captures need.
 shapes.py then builds furniture boxes from the labelled points, instead of
 inferring furniture from whatever the plane fitter left over.
 
+What it searches for is a per-room Vocabulary: before this stage the agent
+has Claude look at frames of the video and name what is actually in the room
+(objects.json), each name with a role that tells later stages what to do with
+it. Without that, a general default list is used.
+
 The detector is GroundingDINO-tiny through transformers. It answers in free
-text ("a wardrobe cabinet"), so phrases are mapped back onto VOCABULARY. A
+text ("a wardrobe cabinet"), so phrases are mapped back onto the names. A
 detection is a rectangle, and a rectangle around a bed also holds floor, wall
 and curtain, so SAM 2.1 (hiera-tiny) then cuts each rectangle down to the
 object's own outline, and only pixels inside the outline are labelled.
@@ -25,6 +30,7 @@ folder, so a space's frame folder is never touched):
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -36,25 +42,203 @@ SEGMENTER_ID = "facebook/sam2.1-hiera-tiny"
 # found nothing there, so the whole rectangle is used instead.
 MIN_OUTLINE_SHARE = 0.02
 
-# Worth building as furniture in the Blender room.
-FURNITURE = [
-    "bed", "sofa", "armchair", "chair", "stool", "table", "desk", "wardrobe",
-    "cabinet", "chest of drawers", "shelf", "bookcase", "lamp", "rug",
-    "potted plant", "pillow",
+# What a named object means to the rest of the pipeline.
+ROLES = {
+    "furniture": "stands on the floor; its points become a box built as build_as",
+    "storage": "wardrobes, cupboards, almirahs, shelves, chests of drawers: built as a "
+               "wardrobe. All storage names are clustered together, because a cupboard "
+               "filmed side-on comes out as a strip under one name down its edge and "
+               "another along its base",
+    "on_furniture": "small things that may sit on other furniture (pillow, lamp, plant): "
+                    "a box, stood on the floor only when it already starts near it",
+    "floor_covering": "lies flat on the floor (rug, mat): one seen up on a bed is a "
+                      "mislabel, a blanket seen as a rug",
+    "loose": "belongings that are not part of a model of the room (clothes, bags, "
+             "laptops, towels): neither a box nor part of a wall or floor",
+    "unreliable": "depth is meaningless there (mirror, window, glass, screen): the model "
+                  "sees through the surface or into a reflection, so the points are dropped",
+    "hanging": "hangs in front of walls and windows (curtain): as a plane it would become "
+               "a duplicate wall and as leftover points a junk box, so it is neither",
+    "fixture": "part of the room itself (door, pinboard, switchboard, wall art): named "
+               "for context only; its points stay with the wall",
+}
+# Builders in the Blender furniture library (tools/blender_room.py).
+BUILD_TYPES = ("bed", "seat", "table", "wardrobe", "block")
+BOXED_ROLES = ("furniture", "storage", "on_furniture", "floor_covering")
+# GroundingDINO reads at most 256 text tokens, and a long list dilutes it.
+MAX_OBJECTS = 30
+
+# The list used when nobody has looked at the room first (Claude unavailable,
+# or clouds made before per-room lists existed; those were labelled with
+# exactly these names).
+DEFAULT_OBJECTS = [
+    {"name": "bed", "role": "furniture", "build_as": "bed"},
+    {"name": "sofa", "role": "furniture", "build_as": "seat"},
+    {"name": "armchair", "role": "furniture", "build_as": "seat"},
+    {"name": "chair", "role": "furniture", "build_as": "seat"},
+    {"name": "stool", "role": "furniture", "build_as": "seat"},
+    {"name": "table", "role": "furniture", "build_as": "table"},
+    {"name": "desk", "role": "furniture", "build_as": "table"},
+    {"name": "wardrobe", "role": "storage", "build_as": "wardrobe"},
+    {"name": "cabinet", "role": "storage", "build_as": "wardrobe"},
+    {"name": "chest of drawers", "role": "storage", "build_as": "wardrobe"},
+    {"name": "shelf", "role": "storage", "build_as": "wardrobe"},
+    {"name": "bookcase", "role": "storage", "build_as": "wardrobe"},
+    {"name": "lamp", "role": "on_furniture", "build_as": "block"},
+    {"name": "rug", "role": "floor_covering", "build_as": "block"},
+    {"name": "potted plant", "role": "on_furniture", "build_as": "block"},
+    {"name": "pillow", "role": "on_furniture", "build_as": "block"},
+    {"name": "mirror", "role": "unreliable", "build_as": None},
+    {"name": "window", "role": "unreliable", "build_as": None},
+    {"name": "television", "role": "unreliable", "build_as": None},
+    {"name": "computer monitor", "role": "unreliable", "build_as": None},
+    {"name": "door", "role": "fixture", "build_as": None},
+    {"name": "curtain", "role": "hanging", "build_as": None},
 ]
-# Tall storage, often seen only as pieces: a cupboard filmed side-on comes out
-# as a "wardrobe" strip down one edge and a "bookcase" strip along its base.
-# shapes.py clusters these together into one box.
-STORAGE = ["wardrobe", "cabinet", "chest of drawers", "shelf", "bookcase"]
-# Depth here is meaningless: the model sees through the surface or into a
-# reflection, so these points are dropped from the cloud.
-UNRELIABLE = ["mirror", "window", "television", "computer monitor"]
-# Named for context; not built as furniture.
-STRUCTURE = ["door", "curtain"]
-# Hangs in front of walls and windows: as a plane it becomes a duplicate wall,
-# and as leftover points a junk box, so shapes.py leaves it out of both.
-HANGING = ["curtain"]
-VOCABULARY = FURNITURE + UNRELIABLE + STRUCTURE
+
+
+def clean_name(text) -> str:
+    """A detector phrase that is safe everywhere it goes: lower case, no
+    periods (they separate the detector's phrases) and no commas (they
+    separate label names in the cloud's PLY header)."""
+    words = str(text).lower().replace(",", " ").replace(".", " ").replace(";", " ").split()
+    while words and words[0] in ("a", "an", "the"):
+        words = words[1:]
+    return " ".join(words)[:40]
+
+
+class Vocabulary:
+    """The names the detector searches one room for, and what each one is."""
+
+    def __init__(self, objects: list[dict], source: str = "default"):
+        cleaned, seen = [], set()
+        for o in objects:
+            name, role = clean_name(o.get("name", "")), o.get("role")
+            if not name or name in seen or role not in ROLES:
+                continue
+            build = o.get("build_as")
+            if role == "storage" or (role == "furniture" and build == "wardrobe"):
+                role, build = "storage", "wardrobe"
+            elif role in BOXED_ROLES:
+                build = build if build in BUILD_TYPES and build != "wardrobe" else "block"
+                if role != "furniture":
+                    build = "block"
+            else:
+                build = None
+            seen.add(name)
+            cleaned.append({"name": name, "role": role, "build_as": build})
+        self.objects = cleaned[:MAX_OBJECTS]
+        self.source = source
+        self._by_name = {o["name"]: o for o in self.objects}
+
+    @classmethod
+    def default(cls) -> "Vocabulary":
+        return cls(DEFAULT_OBJECTS, "default")
+
+    @classmethod
+    def from_json(cls, data) -> "Vocabulary":
+        if isinstance(data, dict) and data.get("objects"):
+            return cls(data["objects"], data.get("source", "file"))
+        return cls.default()
+
+    def to_json(self) -> dict:
+        return {"source": self.source, "objects": self.objects}
+
+    @property
+    def names(self) -> list[str]:
+        return [o["name"] for o in self.objects]
+
+    def with_role(self, *roles: str) -> list[str]:
+        return [o["name"] for o in self.objects if o["role"] in roles]
+
+    @property
+    def furniture(self) -> list[str]:
+        """Names whose points become boxes."""
+        return self.with_role(*BOXED_ROLES)
+
+    @property
+    def storage(self) -> list[str]:
+        return self.with_role("storage")
+
+    @property
+    def unreliable(self) -> list[str]:
+        return self.with_role("unreliable")
+
+    @property
+    def hanging(self) -> list[str]:
+        return self.with_role("hanging")
+
+    @property
+    def left_out(self) -> list[str]:
+        """Names whose points are neither fitted as planes nor boxed."""
+        return self.with_role("hanging", "loose")
+
+    def role(self, name: str | None) -> str | None:
+        o = self._by_name.get(name)
+        return o["role"] if o else None
+
+    def build_as(self, name: str | None) -> str:
+        """The library builder for a detected name; a name from an older list
+        that is itself a builder (a "wardrobe" front) keeps it."""
+        o = self._by_name.get(name)
+        if o and o["build_as"]:
+            return o["build_as"]
+        return name if name in BUILD_TYPES else "block"
+
+    def same_kind(self, a: str | None, b: str | None) -> bool:
+        """Two names for the same object: equal, or both storage (a cupboard
+        is seen as a wardrobe from one side and a shelf from another)."""
+        return a == b or (self.build_as(a) == "wardrobe" == self.build_as(b))
+
+    def canonical(self, phrase: str) -> str | None:
+        """Map the detector's free text back onto a name. The detector answers
+        with the prompt words it matched, sometimes only part of a phrase
+        ("drawers" for "chest of drawers"), so when no whole name appears in the
+        text, a name sharing a distinctive word with it is used, if only one does."""
+        text = clean_name(phrase)
+        for term in sorted(self.names, key=len, reverse=True):
+            if term in text:
+                return term
+        words = set(text.split())
+        sharing = [term for term in self.names
+                   if any(len(w) >= 4 and w in words for w in term.split())]
+        return sharing[0] if len(sharing) == 1 else None
+
+    @property
+    def prompt(self) -> str:
+        return ". ".join(f"{'an' if term[0] in 'aeiou' else 'a'} {term}"
+                         for term in self.names) + "."
+
+
+def room_vocabulary(space: Path) -> Vocabulary:
+    """The list a space's cloud was labelled with: recorded in densify.json by
+    densify.py; the default list for clouds made before that."""
+    try:
+        meta = json.loads((Path(space) / "densify.json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+    return Vocabulary.from_json(meta.get("objects"))
+
+
+def planned_vocabulary(space: Path) -> Vocabulary:
+    """The list densify.py should search for: the room's own objects.json (the
+    agent writes it from Claude's look at the video) plus the default
+    unreliable surfaces, or the default list when there is no objects.json.
+
+    Mirrors, windows and screens are always searched for: their depth is wrong
+    whatever the room holds, and missing one leaves a wall of fake points."""
+    path = Path(space) / "objects.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return Vocabulary.default()
+    vocabulary = Vocabulary.from_json(data)
+    if vocabulary.source == "default":
+        return vocabulary
+    extra = [o for o in DEFAULT_OBJECTS if o["role"] == "unreliable"
+             and not any(o["name"] in n or n in o["name"] for n in vocabulary.names)]
+    return Vocabulary(vocabulary.objects[:MAX_OBJECTS - len(extra)] + extra,
+                      vocabulary.source)
 
 
 def default_device() -> str:
@@ -66,20 +250,12 @@ def default_device() -> str:
     return "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def canonical(phrase: str) -> str | None:
-    """Map the detector's free text back onto VOCABULARY."""
-    text = phrase.lower()
-    for term in sorted(VOCABULARY, key=len, reverse=True):
-        if term in text:
-            return term
-    return None
-
-
 class Detector:
     """GroundingDINO-tiny, loaded once and run per keyframe."""
 
     def __init__(self, device: str | None = None, work_size: int = 1024,
-                 box_threshold: float = 0.3, text_threshold: float = 0.25):
+                 box_threshold: float = 0.3, text_threshold: float = 0.25,
+                 vocabulary: Vocabulary | None = None):
         import torch
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
@@ -88,7 +264,8 @@ class Detector:
         self.processor = AutoProcessor.from_pretrained(MODEL_ID)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
             MODEL_ID).to(self.device).eval()
-        self.prompt = ". ".join(f"a {term}" for term in VOCABULARY) + "."
+        self.vocabulary = vocabulary or Vocabulary.default()
+        self.prompt = self.vocabulary.prompt
         self.work_size = work_size
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
@@ -113,7 +290,7 @@ class Detector:
         phrases = result.get("text_labels", result.get("labels"))
         found = []
         for phrase, score, box in zip(phrases, result["scores"], result["boxes"]):
-            label = canonical(str(phrase))
+            label = self.vocabulary.canonical(str(phrase))
             if label is None:
                 continue
             x0, y0, x1, y1 = (float(v) / scale for v in box)

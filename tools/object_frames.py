@@ -26,20 +26,16 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
-from semantics import STORAGE  # noqa: E402
+from semantics import room_vocabulary  # noqa: E402
 
 TILE_W, TILE_H = 300, 400
-MAX_TILES = 8
+MAX_TILES = 12
 
 
 def box_corners(box: dict) -> np.ndarray:
     lo, hi = np.array(box["min"]), np.array(box["max"])
     return np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
                      for z in (lo[2], hi[2])])
-
-
-def same_kind(a: str | None, b: str | None) -> bool:
-    return a == b or (a in STORAGE and b in STORAGE)
 
 
 def best_frames(space: Path, boxes: dict[int, dict], per_box: int = 2) -> dict[int, list[dict]]:
@@ -53,6 +49,7 @@ def best_frames(space: Path, boxes: dict[int, dict], per_box: int = 2) -> dict[i
     world = np.array(shapes["world"])
     cameras = read_cameras_bin(model / "cameras.bin")
     detections = meta.get("detections", {})
+    vocabulary = room_vocabulary(space)
     chosen = {}
     infos = sorted(read_images_bin(model / "images.bin").values(), key=lambda v: v["name"])
     order = {info["name"]: n for n, info in enumerate(infos)}
@@ -80,7 +77,7 @@ def best_frames(space: Path, boxes: dict[int, dict], per_box: int = 2) -> dict[i
             score = (0.5 + 0.5 * inside) * min(visible, 0.5) / 0.5
             detected = False
             for det in detections.get(info["name"], []):
-                if not same_kind(det["label"], box.get("detected")):
+                if not vocabulary.same_kind(det["label"], box.get("detected")):
                     continue
                 dx0, dy0, dx1, dy1 = det["box"]
                 overlap = (max(0.0, min(x1, dx1) - max(x0, dx0))
@@ -109,14 +106,17 @@ def draw_object_frames(space: Path, out: Path, include=None) -> dict[int, dict]:
     Returns best_frames' result for the tiles drawn."""
     space = Path(space)
     shapes = json.loads((space / "shapes.json").read_text())
-    # Recognised objects, and anything else that will be built; not scan debris
-    # the checks rejected or things in the next room.
+    # Boxes that will be built: the checks' rejections stay rejected, so crops
+    # of them would only take room on the sheet.
     boxes = {i: b for i, b in enumerate(shapes["boxes"])
              if (include is None or i in include)
              and "outside the room" not in (b.get("reason") or "")
-             and (b.get("source") == "detected" or b.get("build", True))}
-    # The biggest objects first, when there are more than fit on the sheet.
-    boxes = dict(sorted(boxes.items(), key=lambda kv: -kv[1]["points"])[:MAX_TILES // 2])
+             and b.get("build", True)}
+    # The largest objects first, when there are more than fit on the sheet: a
+    # cupboard seen at the edge of the video has few points but matters more
+    # than a pillow.
+    volume = lambda b: float(np.prod([b["max"][k] - b["min"][k] for k in range(3)]))
+    boxes = dict(sorted(boxes.items(), key=lambda kv: -volume(kv[1]))[:MAX_TILES // 2])
     chosen = best_frames(space, boxes)
     if not chosen:
         return {}

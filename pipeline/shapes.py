@@ -28,7 +28,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from densify import read_images_bin
 from pointcloud import load_ply
-from semantics import FURNITURE, HANGING, STORAGE
+from semantics import room_vocabulary
 
 
 def read_camera_rotations(path):
@@ -265,19 +265,22 @@ def main():
     remaining = np.ones(len(P), bool)
     point_labels = cloud.labels
     names = cloud.label_names or []
-    furniture_ids = [names.index(n) for n in FURNITURE if n in names]
+    vocabulary = room_vocabulary(space)
+    furniture_ids = [names.index(n) for n in vocabulary.furniture if n in names]
     if point_labels is not None and furniture_ids:
         detected_points = np.isin(point_labels, furniture_ids)
         # Detected furniture is neither wall nor floor: keep it out of the
         # plane fitting, and build boxes from it below.
         remaining[detected_points] = False
         print(f"detected furniture on {int(detected_points.sum()):,} points")
-    hanging_ids = [names.index(n) for n in HANGING if n in names]
+    left_out = [n for n in vocabulary.left_out if n in names]
+    hanging_ids = [names.index(n) for n in left_out]
     if point_labels is not None and hanging_ids:
         hanging = np.isin(point_labels, hanging_ids)
-        # Curtains: neither a wall to fit nor furniture to box.
+        # Curtains and loose belongings: neither a wall to fit nor furniture to box.
         remaining[hanging] = False
-        print(f"leaving out {int(hanging.sum()):,} curtain points")
+        print(f"leaving out {int(hanging.sum()):,} points on hanging and loose things "
+              f"({', '.join(left_out)})")
 
     if N is not None:
         # Trust the cloud's normals only if they agree with the geometry. Each
@@ -464,8 +467,17 @@ def main():
 
     def add_box(members, source, detected=None):
         lo, hi = np.percentile(P[members], [2, 98], axis=0)
-        if np.any(hi - lo < extent * 0.01):
+        thin = hi - lo < extent * 0.01
+        if thin.sum() > 1 or (thin.any() and source != "detected"):
             return
+        if thin.any():
+            # A named object filmed edge-on or only from the front comes out as
+            # a sheet of points (the cupboard by the door in the pan video).
+            # Debris that flat is dropped, but this is a real object: keep its
+            # front at the thinnest box allowed, and let classify_shapes.py
+            # back storage onto its wall.
+            mid = (lo + hi) / 2
+            lo[thin], hi[thin] = mid[thin] - extent * 0.005, mid[thin] + extent * 0.005
         box = {"min": lo.tolist(), "max": hi.tolist(),
                "points": int(len(members)), "source": source,
                "color": cols[members].mean(axis=0).astype(int).tolist()}
@@ -477,12 +489,13 @@ def main():
 
     # Detected furniture: one box per object, clustered so that two chairs
     # side by side do not merge into one. The storage labels are clustered
-    # together (see STORAGE): each is often only a sliver of the same cupboard.
+    # together (see ROLES in semantics.py): each is often only a sliver of the
+    # same cupboard.
     min_points = max(2000, int(len(P) * 0.002))
     if point_labels is not None:
-        storage = [n for n in STORAGE if n in names]
+        storage = [n for n in vocabulary.storage if n in names]
         classes = ([storage] if storage else []) + \
-            [[n] for n in FURNITURE if n in names and n not in STORAGE]
+            [[n] for n in vocabulary.furniture if n in names and n not in storage]
         for class_names in classes:
             ids = [names.index(n) for n in class_names]
             idx = np.where(np.isin(point_labels, ids))[0]

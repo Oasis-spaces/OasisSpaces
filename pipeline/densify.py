@@ -37,7 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
-from semantics import (SEGMENTER_ID, UNRELIABLE, VOCABULARY, Detector, Segmenter,
+from semantics import (SEGMENTER_ID, Detector, Segmenter, planned_vocabulary,
                        default_device, pixel_labels)
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
@@ -389,11 +389,16 @@ def main():
         release_model_memory(torch)
         if use_detector:
             try:
-                detector = Detector(device=device)
-                label_names = ["unlabelled"] + list(VOCABULARY)
+                vocabulary = planned_vocabulary(space)
+                detector = Detector(device=device, vocabulary=vocabulary)
+                label_names = ["unlabelled"] + vocabulary.names
                 label_index = {name: i for i, name in enumerate(label_names)}
-                unreliable_ids = np.array([label_index[name] for name in UNRELIABLE])
-                print(f"Object detection: GroundingDINO-tiny on {detector.device}")
+                unreliable_ids = np.array([label_index[name] for name in vocabulary.unreliable],
+                                          dtype=int)
+                meta["objects"] = vocabulary.to_json()
+                print(f"Object detection: GroundingDINO-tiny on {detector.device}, "
+                      f"{len(vocabulary.names)} names ({vocabulary.source} list): "
+                      + ", ".join(vocabulary.names))
                 for f in frames:
                     name = images[f["id"]]["name"]
                     f["detections"] = detector.detect(Image.open(workspace / "images" / name))
