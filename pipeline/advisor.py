@@ -37,9 +37,12 @@ from pathlib import Path
 
 MODEL = "claude-opus-5"
 RELAY_ENV = "OASIS_CLAUDE_RELAY"
-# A relayed question waits for downloads on the other machine plus Claude's
-# own answer, so it gets far longer than a local call.
-RELAY_WAIT_SECONDS = 900
+# A relayed question waits for the other machine to fetch it (each Colab CLI
+# call takes 20 s to 2 min) plus Claude's own answer.
+RELAY_WAIT_SECONDS = 1800
+# Relayed images travel as one bundle per question, each image no larger than
+# this on its long side (about what Claude reads an image at anyway).
+RELAY_IMAGE_LONG_SIDE = 1600
 
 
 class Advisor:
@@ -106,6 +109,9 @@ class Advisor:
         name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.json"
         request = {"prompt": prompt, "model": self.model,
                    "images": [str(p.resolve()) for p in images]}
+        if images:
+            # One download for the whole question instead of one per image.
+            request["bundle"] = str(self._bundle(root / "bundles" / f"{Path(name).stem}.tar", images))
         pending = root / "requests" / f".{name}.tmp"
         pending.write_text(json.dumps(request))
         pending.rename(root / "requests" / name)  # appears whole, never half-written
@@ -126,6 +132,31 @@ class Advisor:
         self._disable(f"no answer from the Claude relay within {RELAY_WAIT_SECONDS}s "
                       "(is tools/claude_relay.py running?)")
         return None
+
+    @staticmethod
+    def _bundle(path: Path, images: list[Path]) -> Path:
+        """A tar of the question's images, in order (0-<name>, 1-<name>, ...),
+        shrunk to RELAY_IMAGE_LONG_SIDE."""
+        import io
+        import tarfile
+
+        from PIL import Image
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(path, "w") as tar:
+            for i, image in enumerate(images):
+                img = Image.open(image)
+                data = image.read_bytes()
+                suffix = image.suffix.lower()
+                if max(img.size) > RELAY_IMAGE_LONG_SIDE:
+                    img.thumbnail((RELAY_IMAGE_LONG_SIDE, RELAY_IMAGE_LONG_SIDE))
+                    buffer = io.BytesIO()
+                    img.convert("RGB").save(buffer, "JPEG", quality=90)
+                    data, suffix = buffer.getvalue(), ".jpg"
+                info = tarfile.TarInfo(f"{i}-{image.stem}{suffix}")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return path
 
     def _ask_api(self, prompt: str, images: list[Path], max_tokens: int) -> str | None:
         import base64

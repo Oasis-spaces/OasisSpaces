@@ -62,6 +62,7 @@ REMOTE_ENV = {
 # Kept on the VM only: COLMAP's database is rebuilt by reconstruct.py, and the
 # splat project is links plus a seed file rebuilt by splat_seed.py.
 NOT_FETCHED = ("workspace/database.db", "splat-project/")
+FETCH_DURING_MINUTES = 10
 
 
 def log(text: str) -> None:
@@ -118,12 +119,31 @@ class Colab:
             raise RuntimeError(f"failed on the VM: {command}\n{out[-3000:]}")
         return "\n".join(lines[:-1])
 
-    def background(self, command: str, name: str) -> None:
+    def running(self, name: str) -> bool:
+        """A job started by background() whose process is still alive."""
+        # By its pid file, or by its command line for jobs started without one;
+        # the [/] keeps pgrep from matching the shell running this very check.
+        pattern = f"[/]{REMOTE_WORK.lstrip('/')}/{name}.log"
+        out = self.shell(f"if ! test -f {REMOTE_WORK}/{name}.exit && "
+                         f"{{ kill -0 $(cat {REMOTE_WORK}/{name}.pid 2>/dev/null) 2>/dev/null || "
+                         f"pgrep -f {shlex.quote(pattern)} > /dev/null; }}; then echo alive; fi",
+                         timeout=120)
+        return out.strip() == "alive"
+
+    def background(self, command: str, name: str) -> bool:
         """Start a shell command on the VM that outlives the exec call; its
-        output goes to REMOTE_WORK/<name>.log and its exit code to <name>.exit."""
+        output goes to REMOTE_WORK/<name>.log and its exit code to <name>.exit.
+        A job of that name still running is left alone (a re-run of this
+        script must not start a second install into the same folder).
+        Returns whether it started."""
+        if self.running(name):
+            log(f"  {name} is already running on the VM")
+            return False
         wrapped = f"({command}) > {REMOTE_WORK}/{name}.log 2>&1; echo $? > {REMOTE_WORK}/{name}.exit"
         self.shell(f"mkdir -p {REMOTE_WORK} && rm -f {REMOTE_WORK}/{name}.exit && "
-                   f"nohup bash -c {shlex.quote(wrapped)} > /dev/null 2>&1 &", timeout=120)
+                   f"nohup bash -c {shlex.quote(wrapped)} > /dev/null 2>&1 & "
+                   f"echo $! > {REMOTE_WORK}/{name}.pid", timeout=120)
+        return True
 
     def finished(self, name: str) -> int | None:
         out = self.shell(f"cat {REMOTE_WORK}/{name}.exit 2>/dev/null || true", timeout=120).strip()
@@ -245,12 +265,14 @@ def upload_code(vm: Colab) -> str:
 def start_installs(vm: Colab) -> None:
     scripts = install_scripts()
     for name, script in scripts.items():
+        if vm.finished(name) == 0:
+            continue  # installed by an earlier run in this session
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / f"{name}.sh"
             path.write_text(script)
             vm.put(path, f"{REMOTE_WORK}/{name}.sh")
         vm.background(f"bash {REMOTE_WORK}/{name}.sh", name)
-    log("  installs started on the VM: " + ", ".join(scripts))
+    log("  installs running on the VM: " + ", ".join(n for n in scripts if vm.finished(n) != 0))
 
 
 def wait_installs(vm: Colab) -> None:
@@ -285,7 +307,7 @@ def upload_space(vm: Colab, name: str) -> None:
     log(f"  uploaded spaces/{name}")
 
 
-def fetch_space(vm: Colab, name: str) -> list[str]:
+def fetch_space(vm: Colab, name: str) -> int:
     """Bring the space's new and changed files here (all of them, the dense
     cloud included), so nothing is lost if the session dies."""
     manifest_remote = f"{REMOTE_WORK}/fetched-{name}.json"
@@ -311,9 +333,14 @@ with tarfile.open('{REMOTE_WORK}/fetch-{name}.tar', 'w') as tar:
 json.dump(now, open(manifest_path + '.next', 'w'))
 print(json.dumps(changed))
 """
-    changed = json.loads(vm.python(code, timeout=900).strip().splitlines()[-1])
-    if not changed:
-        return []
+    # Only the count comes back through exec; the names travel inside the tar.
+    code = code.replace("print(json.dumps(changed))", "print('CHANGED', len(changed))")
+    counted = [l for l in vm.python(code, timeout=900).splitlines() if l.startswith("CHANGED ")]
+    if not counted:
+        raise RuntimeError(f"could not list the new files of spaces/{name} on the VM")
+    count = int(counted[-1].split()[1])
+    if not count:
+        return 0
     local_space = ROOT / "spaces" / name
     local_space.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
@@ -322,7 +349,7 @@ print(json.dumps(changed))
         with tarfile.open(archive) as tar:
             tar.extractall(local_space, filter="data")
     vm.shell(f"mv {manifest_remote}.next {manifest_remote}", timeout=120)
-    return changed
+    return count
 
 
 def remote_env() -> str:
@@ -333,15 +360,36 @@ def remote_env() -> str:
     return " && ".join(exports)
 
 
+def gate_of(vm: Colab, name: str, stage: str, since: int) -> dict:
+    """The stage's gate from the VM's agent-report.json (only the gate crosses:
+    the whole report can be larger than exec output carries). A report older
+    than `since` is an earlier attempt's, not this run's."""
+    code = (f"import json, os\np = '{REMOTE_ROOT}/spaces/{name}/agent-report.json'\n"
+            f"fresh = os.path.exists(p) and os.path.getmtime(p) >= {since}\n"
+            f"gate = json.load(open(p)).get('gates', {{}}).get('{stage}') if fresh else None\n"
+            f"print('GATE', json.dumps(gate))\n")
+    lines = [l for l in vm.python(code, timeout=120).splitlines() if l.startswith("GATE ")]
+    return (json.loads(lines[-1][5:]) if lines else None) or {"status": "stop", "why": "no gate recorded"}
+
+
 def run_stage(vm: Colab, video_remote: str, name: str, stage: str, extra: list[str]) -> dict:
-    """pipeline/agent.py --stage on the VM, its output shown here as it runs."""
+    """pipeline/agent.py --stage on the VM, its output shown here as it runs.
+    During stage 4 the space is fetched every FETCH_DURING_MINUTES, so a
+    trained splat is already here if the session dies during the next one."""
     job = f"{name}-{stage}"
     command = (f"{remote_env()} && mkdir -p {RELAY} && cd {REMOTE_ROOT} && "
                f"python pipeline/agent.py {shlex.quote(video_remote)} --name {shlex.quote(name)} "
                f"--stage {stage} {' '.join(shlex.quote(a) for a in extra)}")
+    since = int(vm.shell("date +%s", timeout=120).split()[0])
     vm.background(command, job)
-    offset = 0
+    offset, last_fetch = 0, time.time()
     while True:
+        if stage == "splat" and time.time() - last_fetch > FETCH_DURING_MINUTES * 60:
+            try:
+                log(f"  fetched {fetch_space(vm, name)} file(s) so far")
+            except RuntimeError as exc:
+                log(f"  fetch during the stage failed ({exc}); trying again later")
+            last_fetch = time.time()
         text, offset = vm.log_since(job, offset)
         for line in text.splitlines():
             if line.strip() and "Loading weights" not in line and "it/s]" not in line:
@@ -354,9 +402,10 @@ def run_stage(vm: Colab, video_remote: str, name: str, stage: str, extra: list[s
                     print("    vm |", line[:300], flush=True)
             break
         time.sleep(20)
-    report = json.loads(vm.shell(f"cat {REMOTE_ROOT}/spaces/{name}/agent-report.json 2>/dev/null || echo '{{}}'",
-                                 timeout=120) or "{}")
-    return (report.get("gates") or {}).get(stage, {"status": "stop", "why": f"agent exited {code}"})
+    gate = gate_of(vm, name, stage, since)
+    if code != 0 and gate.get("why") == "no gate recorded":
+        gate["why"] = f"the agent exited with {code}; see its log above"
+    return gate
 
 
 def main() -> None:
@@ -379,9 +428,9 @@ def main() -> None:
     if fresh:
         vm.create(args.gpu)
     log("code: " + upload_code(vm))
-    installed = vm.finished("install-opensplat") == 0 and all(vm.finished(c) == 0 for c in INSTALL_CELLS)
+    installed = all(vm.finished(c) == 0 for c in INSTALL_CELLS)
     if not installed:
-        start_installs(vm)
+        start_installs(vm)   # skips any install still running from an earlier run
     video_remote = f"{REMOTE_VIDEOS}/{video.name}"
     log(f"video: {video.name}")
     vm.put(video, video_remote)
@@ -406,8 +455,7 @@ def main() -> None:
             log(f"stage {stage} on the VM")
             gate = run_stage(vm, video_remote, args.name, stage, extra)
             log(f"{stage}: {gate.get('status', '?').upper()} - {gate.get('why', '')}")
-            changed = fetch_space(vm, args.name)
-            log(f"  fetched {len(changed)} new or changed file(s) into spaces/{args.name}")
+            log(f"  fetched {fetch_space(vm, args.name)} new or changed file(s) into spaces/{args.name}")
             if gate.get("status") == "stop":
                 sys.exit(f"{stage} stopped; fix it, then run again with --stages {stage} ...")
     finally:

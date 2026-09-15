@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -55,12 +56,27 @@ def answer(session: str, remote: str, name: str, work: Path) -> str:
         return f"{name}: could not download the question, will retry"
     request = json.loads(local.read_text())
     images = []
-    for i, path in enumerate(request.get("images", [])):
-        target = work / f"{local.stem}-{i}-{Path(path).name}"
-        if colab("download", "-s", session, path, str(target)).returncode == 0:
-            images.append(target)
-    advisor = Advisor(model=request.get("model", "claude-opus-5"))
-    text = advisor.ask(request["prompt"], images) if advisor.available else None
+    if request.get("bundle"):
+        # All of the question's images in one tar (pipeline/advisor.py _bundle).
+        bundle = work / f"{local.stem}.tar"
+        if colab("download", "-s", session, request["bundle"], str(bundle)).returncode != 0:
+            return f"{name}: could not download its images, will retry"
+        folder = work / local.stem
+        with tarfile.open(bundle) as tar:
+            tar.extractall(folder, filter="data")
+        images = sorted(folder.iterdir(), key=lambda p: int(p.name.split("-", 1)[0]))
+    else:
+        for i, path in enumerate(request.get("images", [])):
+            target = work / f"{local.stem}-{i}-{Path(path).name}"
+            if colab("download", "-s", session, path, str(target)).returncode == 0:
+                images.append(target)
+    text, advisor = None, None
+    for _ in range(2):  # one retry: a rate limit or empty reply would switch Claude off on the VM
+        advisor = Advisor(model=request.get("model", "claude-opus-5"))
+        text = advisor.ask(request["prompt"], images) if advisor.available else None
+        if text:
+            break
+        time.sleep(20)
     reply = {"result": text} if text else {"error": advisor.reason or "Claude gave no answer"}
     (work / f"reply-{name}").write_text(json.dumps(reply))
     sent = colab("upload", "-s", session, str(work / f"reply-{name}"),

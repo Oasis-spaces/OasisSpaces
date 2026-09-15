@@ -217,7 +217,8 @@ def problem_text(problem) -> str:
 class Agent:
     def __init__(self, source: Path, name: str, fps: float, do_splat: bool,
                  allow_retry: bool = True, use_claude: bool = True,
-                 long_splat: bool | None = None, trained_elsewhere: bool = False):
+                 long_splat: bool | None = None, trained_elsewhere: bool = False,
+                 retrain: bool = False):
         self.source = source
         self.name = name
         self.fps = fps
@@ -225,6 +226,7 @@ class Agent:
         self.cuda = shutil.which("nvidia-smi") is not None
         self.long_splat = self.cuda if long_splat is None else long_splat
         self.trained_elsewhere = trained_elsewhere
+        self.retrain = retrain
         self.allow_retry = allow_retry
         self.space = ROOT / "spaces" / name
         self.log_path = self.space / "agent.log"
@@ -964,6 +966,16 @@ class Agent:
                 continue
             if run_name != "quick" and not self.long_splat:
                 continue
+            dense = self.space / "cloud-dense.ply"
+            if (not self.retrain and out.exists() and dense.exists()
+                    and out.stat().st_mtime > dense.stat().st_mtime):
+                # Trained from the current dense cloud by an earlier attempt that
+                # did not finish the stage (a Colab session that died): keep it.
+                print(f"\n=== splat: reusing {out.name}, trained after the current dense cloud "
+                      f"(--retrain trains it again)")
+                trained.append({"label": f"{run_name} ({steps} steps, 1/{downscale} resolution)",
+                                "space": self.space, "ply": out})
+                continue
             args = [OPENSPLAT, str(self.space / "splat-project"), "-n", str(steps),
                     "-d", str(downscale), "-o", str(out)]
             if not self.cuda and self.image_cache_gb(downscale) > MAX_GPU_IMAGE_CACHE_GB:
@@ -1489,6 +1501,9 @@ def main() -> int:
     parser.add_argument("--trained-elsewhere", action="store_true",
                         help="stage 4 uses splat-quick.ply / splat-long.ply already in the space "
                              "(trained on a Colab GPU) instead of training")
+    parser.add_argument("--retrain", action="store_true",
+                        help="train the splats again even if ones trained from the current "
+                             "dense cloud are already in the space")
     parser.add_argument("--long-splat", choices=["auto", "on", "off"], default="auto",
                         help="also train a long splat and let Claude keep the better one "
                              "(auto: only with a CUDA GPU; about 2.5 hours on an 8 GB Mac)")
@@ -1500,7 +1515,7 @@ def main() -> int:
     agent = Agent(source, args.name, args.fps, not args.no_splat,
                   allow_retry=not args.no_retry, use_claude=not args.no_claude,
                   long_splat={"auto": None, "on": True, "off": False}[args.long_splat],
-                  trained_elsewhere=args.trained_elsewhere)
+                  trained_elsewhere=args.trained_elsewhere, retrain=args.retrain)
     if args.stage:
         stages = [args.stage]
     else:

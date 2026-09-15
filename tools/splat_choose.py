@@ -210,8 +210,8 @@ def new_view_shots(video: Path, candidates: list[dict], poses: dict, log=print) 
     if not options:
         log("  no new views: the trained frames are too far apart or cover every grid frame")
         return []
-    picks = [options[round(i)] for i in np.linspace(len(options) * 0.1, len(options) * 0.9 - 1,
-                                                    min(NEW_VIEWS, len(options)))]
+    spread = np.linspace(len(options) * 0.1, len(options) * 0.9 - 1, min(NEW_VIEWS, len(options)))
+    picks = [options[i] for i in sorted({int(round(v)) for v in spread})]
     return [{"key": f"video {k / GRID_FPS:.2f}s", "photo": grid[k], "new": True, "cams": cams}
             for k, cams in picks]
 
