@@ -97,6 +97,12 @@ FILL_MIN_BLOBS = 500    # smaller fills are not worth a review (and are not kept
 # The long run takes minutes on a CUDA GPU (Colab) but about 2.5 hours on an
 # 8 GB Mac, so by default it only runs where there is CUDA.
 SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2)}   # steps, image downscale
+# Stage 4 in steps that can each run on their own (a Colab session can die at
+# any time): every step keeps its results in the space, and the next one
+# picks them up. The long training also saves every LONG_CHECKPOINT_STEPS and
+# resumes from the newest save.
+SPLAT_STEPS = ["train-quick", "train-long", "choose-training", "fill", "choose-best"]
+LONG_CHECKPOINT_STEPS = 10000
 # OpenSplat keeps every training image on the GPU as 32-bit floats; past this
 # it reads them from memory each step instead, so an 8 GB Mac is not swamped.
 MAX_GPU_IMAGE_CACHE_GB = 1.5
@@ -218,7 +224,7 @@ class Agent:
     def __init__(self, source: Path, name: str, fps: float, do_splat: bool,
                  allow_retry: bool = True, use_claude: bool = True,
                  long_splat: bool | None = None, trained_elsewhere: bool = False,
-                 retrain: bool = False):
+                 retrain: bool = False, splat_steps: list[str] | None = None):
         self.source = source
         self.name = name
         self.fps = fps
@@ -227,6 +233,8 @@ class Agent:
         self.long_splat = self.cuda if long_splat is None else long_splat
         self.trained_elsewhere = trained_elsewhere
         self.retrain = retrain
+        self.splat_steps = splat_steps or list(SPLAT_STEPS)
+        self.current_step: str | None = None   # the stage-4 step recording decisions
         self.allow_retry = allow_retry
         self.space = ROOT / "spaces" / name
         self.log_path = self.space / "agent.log"
@@ -299,7 +307,10 @@ class Agent:
             return default
 
     def judged(self, stage: str, verdict: dict, shown: str) -> None:
-        self.judgements.append({"stage": stage, **verdict})
+        entry = {"stage": stage, **verdict}
+        if JUDGEMENT_STAGE.get(stage, stage) == "splat" and self.current_step:
+            entry["step"] = self.current_step
+        self.judgements.append(entry)
         print(f"    claude ({stage}): {shown}")
 
     # ---------------------------------------------------------------- stages
@@ -330,6 +341,8 @@ class Agent:
     def decide(self, stage: str, action: str, why: str, metrics: dict | None = None,
                seconds: float | None = None) -> None:
         entry = {"stage": stage, "action": action, "why": why}
+        if stage == "splat" and self.current_step:
+            entry["step"] = self.current_step
         if metrics:
             entry["metrics"] = metrics
         if seconds is not None:
@@ -948,62 +961,130 @@ class Agent:
         return True
 
     def step_splat(self) -> bool:
-        if not self.trained_elsewhere:
-            ok, _ = self.run([sys.executable, str(ROOT / "pipeline/splat_seed.py"),
-                              str(self.space)], "splat seed", "dense cloud as starting points")
-            if not ok:
-                self.decide("splat", "skip", "could not build the splat project")
+        """Stage 4, one step after another (SPLAT_STEPS): only the steps in
+        self.splat_steps run, each picking up what the earlier ones left."""
+        steps = {"train-quick": self.train_quick, "train-long": self.train_long,
+                 "choose-training": self.pick_training, "fill": self.fill_step,
+                 "choose-best": self.best_step}
+        for name in SPLAT_STEPS:
+            if name not in self.splat_steps:
+                continue
+            self.current_step = name
+            print(f"\n--- stage 4 step: {name}")
+            if not steps[name]():
+                self.current_step = None
                 return False
-        trained = []
-        for run_name, (steps, downscale) in SPLAT_RUNS.items():
-            out = self.space / f"splat-{run_name}.ply"
-            if self.trained_elsewhere:
-                # Trained on another machine (a Colab GPU) and copied in.
-                if out.exists():
-                    print(f"\n=== splat: using {out.name}, trained elsewhere")
-                    trained.append({"label": f"{run_name} ({steps} steps, 1/{downscale} resolution)",
-                                    "space": self.space, "ply": out})
-                continue
-            if run_name != "quick" and not self.long_splat:
-                continue
-            dense = self.space / "cloud-dense.ply"
-            if (not self.retrain and out.exists() and dense.exists()
-                    and out.stat().st_mtime > dense.stat().st_mtime):
-                # Trained from the current dense cloud by an earlier attempt that
-                # did not finish the stage (a Colab session that died): keep it.
-                print(f"\n=== splat: reusing {out.name}, trained after the current dense cloud "
-                      f"(--retrain trains it again)")
-                trained.append({"label": f"{run_name} ({steps} steps, 1/{downscale} resolution)",
-                                "space": self.space, "ply": out})
-                continue
-            args = [OPENSPLAT, str(self.space / "splat-project"), "-n", str(steps),
-                    "-d", str(downscale), "-o", str(out)]
-            if not self.cuda and self.image_cache_gb(downscale) > MAX_GPU_IMAGE_CACHE_GB:
-                args.append("--no-gpu-cache")
-            ran, _ = self.run(args, "splat", f"{run_name}: {steps} steps at 1/{downscale} resolution")
-            if ran and out.exists():
-                trained.append({"label": f"{run_name} ({steps} steps, 1/{downscale} resolution)",
-                                "space": self.space, "ply": out})
-        ok = bool(trained)
-        if ok:
-            best = trained[0]
-            if len(trained) > 1:
-                best = self.safe(self.choose_training, trained, default=trained[0])
-            shutil.copyfile(best["ply"], self.space / "splat.ply")
-        self.decide("splat", "accept" if ok else "skip",
-                    f"trained {len(trained)} splat(s); splat.ply is the {best['label']} one"
-                    if ok else "OpenSplat failed; see the log")
-        if ok:
-            # The viewer loads the compact copy; the .ply stays the full result.
-            self.run([sys.executable, str(ROOT / "pipeline/splat_export.py"),
-                      str(self.space / "splat.ply")], "splat export", "compact copy for the viewer")
-            self.safe(self.choose_start_view, self.space / "splat.ply")
-            self.safe(self.fill_surfaces)
-            fill = self.space / "splat-filled.fill.json"
-            if fill.exists() and json.loads(fill.read_text()).get("kept"):
-                self.safe(self.choose_start_view, self.space / "splat-filled.ply")
-            self.safe(self.choose_best)
+        self.current_step = None
+        return True
+
+    def trained_splat(self, run_name: str) -> dict | None:
+        """The run's splat when it exists and was trained from the current
+        dense cloud (a dense cloud made later makes it stale)."""
+        steps, downscale = SPLAT_RUNS[run_name]
+        out = self.space / f"splat-{run_name}.ply"
+        dense = self.space / "cloud-dense.ply"
+        if not out.exists() or (dense.exists() and out.stat().st_mtime < dense.stat().st_mtime):
+            return None
+        return {"label": f"{run_name} ({steps} steps, 1/{downscale} resolution)",
+                "space": self.space, "ply": out}
+
+    def seed(self) -> bool:
+        """The OpenSplat project (cameras, frames, dense seed points); rebuilt
+        each time, it takes seconds and a new Colab session has none."""
+        ok, _ = self.run([sys.executable, str(ROOT / "pipeline/splat_seed.py"),
+                          str(self.space)], "splat seed", "dense cloud as starting points")
+        if not ok:
+            self.decide("splat", "stop", "could not build the splat project")
         return ok
+
+    def train(self, run_name: str, resume: Path | None = None, save_every: int = -1) -> bool:
+        steps, downscale = SPLAT_RUNS[run_name]
+        out = self.space / f"splat-{run_name}.ply"
+        args = [OPENSPLAT, str(self.space / "splat-project"), "-n", str(steps),
+                "-d", str(downscale), "-o", str(out)]
+        if save_every > 0:
+            args += ["-s", str(save_every)]
+        if resume:
+            args += ["--resume", str(resume)]
+        if not self.cuda and self.image_cache_gb(downscale) > MAX_GPU_IMAGE_CACHE_GB:
+            args.append("--no-gpu-cache")
+        ran, _ = self.run(args, "splat", f"{run_name}: {steps} steps at 1/{downscale} resolution"
+                          + (f", resuming from {resume.name}" if resume else ""))
+        return ran and out.exists()
+
+    def train_quick(self) -> bool:
+        if self.trained_elsewhere or (not self.retrain and self.trained_splat("quick")):
+            if self.trained_splat("quick"):
+                self.decide("splat", "reuse", "splat-quick.ply is already trained from this dense cloud")
+                return True
+            self.decide("splat", "stop", "no splat-quick.ply trained from this dense cloud")
+            return False
+        if not self.seed():
+            return False
+        ok = self.train("quick")
+        self.decide("splat", "accept" if ok else "stop",
+                    "trained the quick splat" if ok else "OpenSplat failed; see the log")
+        return ok
+
+    def train_long(self) -> bool:
+        """The long training, resumable: OpenSplat saves splat-long_<step>.ply
+        every LONG_CHECKPOINT_STEPS, and a new attempt resumes from the newest
+        save trained from this dense cloud."""
+        if self.trained_elsewhere or not self.long_splat:
+            self.decide("splat", "skip", "no long training here"
+                        + ("" if self.trained_elsewhere else
+                           " (no CUDA GPU; --long-splat on to train it anyway)"))
+            return True
+        if not self.retrain and self.trained_splat("long"):
+            self.decide("splat", "reuse", "splat-long.ply is already trained from this dense cloud")
+            return True
+        dense = self.space / "cloud-dense.ply"
+        saves = sorted((p for p in self.space.glob("splat-long_*.ply")
+                        if p.stem.rsplit("_", 1)[1].isdigit()
+                        and (not dense.exists() or p.stat().st_mtime > dense.stat().st_mtime)),
+                       key=lambda p: int(p.stem.rsplit("_", 1)[1]))
+        resume = saves[-1] if saves and not self.retrain else None
+        if not self.seed():
+            return False
+        ok = self.train("long", resume=resume, save_every=LONG_CHECKPOINT_STEPS)
+        self.decide("splat", "accept" if ok else "warn",
+                    "trained the long splat" if ok else
+                    "the long training failed; the quick splat stays (see the log)")
+        return True  # a failed long run leaves the quick splat to carry on with
+
+    def pick_training(self) -> bool:
+        """Claude chooses between the trained splats; the choice becomes
+        splat.ply, exported for the viewer with Claude's opening view."""
+        trained = [t for t in (self.trained_splat("quick"), self.trained_splat("long")) if t]
+        if not trained:
+            self.decide("splat", "stop", "no splat trained from this dense cloud: run train-quick first")
+            return False
+        best = trained[0]
+        if len(trained) > 1:
+            best = self.safe(self.choose_training, trained, default=trained[0])
+        shutil.copyfile(best["ply"], self.space / "splat.ply")
+        self.decide("splat", "accept", f"splat.ply is the {best['label']} splat"
+                    + ("" if len(trained) > 1 else " (the only one trained)"))
+        # The viewer loads the compact copy; the .ply stays the full result.
+        self.run([sys.executable, str(ROOT / "pipeline/splat_export.py"),
+                  str(self.space / "splat.ply")], "splat export", "compact copy for the viewer")
+        self.safe(self.choose_start_view, self.space / "splat.ply")
+        return True
+
+    def fill_step(self) -> bool:
+        if not (self.space / "splat.ply").exists():
+            self.decide("splat", "stop", "no splat.ply yet: run choose-training first")
+            return False
+        self.safe(self.fill_surfaces)
+        fill = self.space / "splat-filled.fill.json"
+        if fill.exists() and json.loads(fill.read_text()).get("kept"):
+            self.safe(self.choose_start_view, self.space / "splat-filled.ply")
+        return True
+
+    def best_step(self) -> bool:
+        if (self.space / "splat.ply").exists():
+            self.safe(self.choose_best)
+        return True
 
     def image_cache_gb(self, downscale: int) -> float:
         """What OpenSplat's GPU copy of the training images would take."""
@@ -1350,7 +1431,12 @@ class Agent:
                             f"({', '.join(s['objects'])})")
         if stage == "splat":
             count = ply_vertex_count(self.space / "splat.ply")
+            done = ", ".join(self.splat_steps)
             if not count:
+                trained = [r for r in SPLAT_RUNS if self.trained_splat(r)]
+                if trained and "choose-training" not in self.splat_steps:
+                    return "pass", (f"steps {done} done: trained {', '.join(trained)}; "
+                                    "next: choose-training")
                 return "stop", "no splat was written"
             if count < MIN_SPLAT_GAUSSIANS:
                 return "warn", f"only {count:,} gaussians"
@@ -1381,15 +1467,23 @@ class Agent:
 
     # ------------------------------------------------------------------- run
     def load_earlier_stages(self, first: str) -> None:
-        """Keep the record of stages before `first`; later ones are now stale."""
+        """Keep the record of stages before `first`; later ones are now stale.
+        When stage 4 starts at a later step, the records of its earlier steps
+        are kept too."""
         path = self.space / "agent-report.json"
         if not path.exists() or first == STAGES[0]:
             return
         earlier = set(STAGES[:STAGES.index(first)])
+        earlier_steps = (set(SPLAT_STEPS[:SPLAT_STEPS.index(self.splat_steps[0])])
+                         if first == "splat" else set())
+
+        def kept(entry, stage):
+            return stage in earlier or (stage == "splat" and entry.get("step") in earlier_steps)
+
         previous = json.loads(path.read_text())
-        self.stages = [e for e in previous.get("decisions", []) if e["stage"] in earlier]
+        self.stages = [e for e in previous.get("decisions", []) if kept(e, e["stage"])]
         self.judgements = [j for j in previous.get("judgements", [])
-                           if JUDGEMENT_STAGE.get(j["stage"], j["stage"]) in earlier]
+                           if kept(j, JUDGEMENT_STAGE.get(j["stage"], j["stage"]))]
         self.gates = {k: v for k, v in previous.get("gates", {}).items() if k in earlier}
 
     def go(self, stages: list[str], accept_warnings: bool = False) -> int:
@@ -1501,6 +1595,9 @@ def main() -> int:
     parser.add_argument("--trained-elsewhere", action="store_true",
                         help="stage 4 uses splat-quick.ply / splat-long.ply already in the space "
                              "(trained on a Colab GPU) instead of training")
+    parser.add_argument("--splat-steps", nargs="+", choices=SPLAT_STEPS, default=None,
+                        help="with --stage splat: run only these steps of stage 4, in order "
+                             "(" + ", ".join(SPLAT_STEPS) + ")")
     parser.add_argument("--retrain", action="store_true",
                         help="train the splats again even if ones trained from the current "
                              "dense cloud are already in the space")
@@ -1515,7 +1612,8 @@ def main() -> int:
     agent = Agent(source, args.name, args.fps, not args.no_splat,
                   allow_retry=not args.no_retry, use_claude=not args.no_claude,
                   long_splat={"auto": None, "on": True, "off": False}[args.long_splat],
-                  trained_elsewhere=args.trained_elsewhere, retrain=args.retrain)
+                  trained_elsewhere=args.trained_elsewhere, retrain=args.retrain,
+                  splat_steps=args.splat_steps)
     if args.stage:
         stages = [args.stage]
     else:

@@ -186,7 +186,13 @@ the agent's judgement:
    real video frames between two trained frames, which neither splat saw,
    with the camera placed between its neighbours. Claude ranks them, new
    views weighing most, and the better one becomes `splat.ply`
-   (`splat-training.json` and `training-compare/` hold the evidence). `pipeline/splat_export.py`
+   (`splat-training.json` and `training-compare/` hold the evidence).
+   Stage 4 runs as steps that can each run on their own
+   (`--stage splat --splat-steps ...`): `train-quick`, `train-long` (saved every
+   10,000 steps as `splat-long_<step>.ply` and resumed from the newest save),
+   `choose-training`, `fill` and `choose-best`. A splat already trained from the
+   current dense cloud is reused (`--retrain` trains again), so a run cut short
+   carries on where it stopped. `pipeline/splat_export.py`
    then writes `splat.splat` beside `splat.ply`: the viewer's compact format,
    about 8x smaller. It also writes `splat.view.json`, the starting camera: of
    the views at, just behind or just ahead of each capture position, level and
@@ -204,6 +210,20 @@ the agent's judgement:
    runs', filled or not) is compared the same way, and Claude's pick is
    copied to `splats/<video>/best.splat` with `choice.json` explaining it.
    `splat_edit` edits then start from the kept result.
+
+## Running on a Colab GPU from this Mac
+
+`python3 tools/colab_pipeline.py videos/<video> --name <space>` runs every stage
+on a Colab GPU through Google's Colab CLI (`colab`, signed in once):
+- **Upload:** this commit and the video go up in md5-checked parts.
+- **Installs:** the notebook's install cells run on the VM, only those the requested steps need.
+- **Claude:** checks are answered here through `tools/claude_relay.py`.
+- **Stages:** stages 1–3 and stage 4's steps each run as their own job, and the space's new files come back to `spaces/<space>` after each one (every 10 minutes during training).
+- **Best splat:** the choice runs here at the end, against every earlier splat of the video.
+- **OpenSplat:** the binary built on Colab is kept in `tools/colab-cache/` and reused.
+
+If the session dies, run the command again with `--stages` from the step that
+did not finish, e.g. `--stages train-long choose-training fill`.
 
 ## Editing the splat
 

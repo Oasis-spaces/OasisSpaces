@@ -22,13 +22,19 @@ taught (Sep 2026), done the same way every time:
   - at the end, tools/splat_choose.py here compares the new splats with every
     earlier splat of the same video and publishes the best to splats/.
 
-If the session dies, run the same command again with --stages from the stage
+Stage 4 runs as its steps, each its own job, fetched before the next:
+train-quick, train-long (saved every 10,000 steps and resumed from the newest
+save), choose-training, fill; choose-best then runs here. A session installs
+only what its steps need, and the OpenSplat binary built on Colab is kept in
+tools/colab-cache/ and reused by later sessions with the same PyTorch and GPU.
+
+If the session dies, run the same command again with --stages from the step
 that did not finish: a new session gets the code and the space as it stands
 here, and carries on.
 
 Usage:
     python3 tools/colab_pipeline.py videos/IMG_4182.MOV --name walkthrough-colab3
-    python3 tools/colab_pipeline.py videos/IMG_4182.MOV --name walkthrough-colab3 --stages shapes splat
+    python3 tools/colab_pipeline.py videos/IMG_4182.MOV --name walkthrough-colab3 --stages train-long choose-training fill
 """
 
 from __future__ import annotations
@@ -45,7 +51,25 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-STAGES = ["reconstruct", "densify", "shapes", "splat"]
+# Stages 1-3, then stage 4 as its steps (pipeline/agent.py SPLAT_STEPS), each
+# its own job on the VM with its results fetched before the next starts. The
+# last step, choosing the best splat of the video, runs here after the fetch,
+# where every earlier splat of the video is.
+STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "choose-training", "fill"]
+SPLAT_STEPS = STEPS[3:]
+# The notebook install cells each step needs. OpenSplat links OpenCV, which the
+# COLMAP cell installs, so training needs that cell too.
+NEEDS = {
+    "reconstruct": ["install-colmap", "install-python"],
+    "densify": ["install-python"],
+    "shapes": ["install-python", "install-blender"],
+    "train-quick": ["install-colmap", "install-python", "install-opensplat"],
+    "train-long": ["install-colmap", "install-python", "install-opensplat"],
+    "choose-training": ["install-python"],
+    "fill": ["install-python"],
+}
+CACHE = ROOT / "tools" / "colab-cache"   # the OpenSplat binary built on Colab, reused
+OPENSPLAT_BIN = "/content/OpenSplat/build/opensplat"
 REMOTE_ROOT = "/content/OasisSpaces"
 REMOTE_VIDEOS = "/content/videos"
 REMOTE_WORK = "/content/oasis-run"
@@ -262,21 +286,62 @@ def upload_code(vm: Colab) -> str:
     return commit
 
 
-def start_installs(vm: Colab) -> None:
+def opensplat_key(vm: Colab) -> str:
+    """What a built OpenSplat binary depends on: Colab's PyTorch and the GPU."""
+    out = vm.shell("python -c 'import torch; print(torch.__version__)' && "
+                   "nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1", timeout=300)
+    torch_version, cap = (out.split() + ["?", "?"])[:2]
+    return f"opensplat-torch{torch_version.replace('+', '_')}-sm{cap.replace('.', '')}"
+
+
+def start_installs(vm: Colab, needed: list[str]) -> None:
     scripts = install_scripts()
-    for name, script in scripts.items():
+    for name in [n for n in INSTALL_CELLS if n in needed]:
         if vm.finished(name) == 0:
             continue  # installed by an earlier run in this session
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / f"{name}.sh"
-            path.write_text(script)
+            path.write_text(scripts[name])
             vm.put(path, f"{REMOTE_WORK}/{name}.sh")
-        vm.background(f"bash {REMOTE_WORK}/{name}.sh", name)
-    log("  installs running on the VM: " + ", ".join(n for n in scripts if vm.finished(n) != 0))
+        command = f"bash {REMOTE_WORK}/{name}.sh"
+        if name == "install-opensplat":
+            command = opensplat_job(vm, command)
+        vm.background(command, name)
+    log("  installs running on the VM: " + ", ".join(n for n in needed if vm.finished(n) != 0))
 
 
-def wait_installs(vm: Colab) -> None:
-    pending = list(INSTALL_CELLS)
+def opensplat_job(vm: Colab, build: str) -> str:
+    """OpenSplat links OpenCV from the COLMAP cell, so its job waits for that
+    cell, as the notebook's cell order does. A binary built in an earlier
+    session for this PyTorch and GPU (tools/colab-cache/) is tried first, and
+    the ~10 minute build runs only if it does not start."""
+    cached = f"{REMOTE_WORK}/opensplat-cached"
+    local = CACHE / opensplat_key(vm)
+    if local.exists():
+        vm.put(local, cached)
+        log(f"  OpenSplat binary from the cache: {local.name}")
+    wait = (f"while [ ! -f {REMOTE_WORK}/install-colmap.exit ]; do sleep 5; done; "
+            f"[ \"$(cat {REMOTE_WORK}/install-colmap.exit)\" = 0 ] || exit 1; ")
+    try_cached = (f"if [ -f {cached} ]; then mkdir -p $(dirname {OPENSPLAT_BIN}) && "
+                  f"cp {cached} {OPENSPLAT_BIN} && chmod +x {OPENSPLAT_BIN} && "
+                  f"{remote_env()} && {OPENSPLAT_BIN} --help > /dev/null && "
+                  f"{{ echo 'OpenSplat from the cache'; exit 0; }}; "
+                  f"echo 'the cached OpenSplat does not run here; building'; rm -f {OPENSPLAT_BIN}; fi; ")
+    return wait + try_cached + build
+
+
+def keep_opensplat(vm: Colab) -> None:
+    key = opensplat_key(vm)
+    if (CACHE / key).exists():
+        return
+    CACHE.mkdir(parents=True, exist_ok=True)
+    vm.get(OPENSPLAT_BIN, CACHE / key)
+    (CACHE / key).chmod(0o755)
+    log(f"  kept the built OpenSplat as tools/colab-cache/{key}")
+
+
+def wait_installs(vm: Colab, needed: list[str]) -> None:
+    pending = [n for n in INSTALL_CELLS if n in needed]
     while pending:
         for name in list(pending):
             code = vm.finished(name)
@@ -298,9 +363,13 @@ def upload_space(vm: Colab, name: str) -> None:
         return
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / f"{name}.tar"
+        saves = sorted((int(p.stem.rsplit("_", 1)[1]), p.name) for p in space.glob("splat-long_*.ply")
+                       if p.stem.rsplit("_", 1)[1].isdigit())
+        superseded = {f"{name}/{n}" for _, n in saves[:-1]}
         with tarfile.open(archive, "w") as tar:
             tar.add(space, arcname=name,
-                    filter=lambda info: None if any(skip in info.name for skip in NOT_FETCHED) else info)
+                    filter=lambda info: None if (any(skip in info.name for skip in NOT_FETCHED)
+                                                 or info.name in superseded) else info)
         vm.put(archive, f"{REMOTE_WORK}/space-{name}.tar")
     vm.shell(f"mkdir -p {REMOTE_ROOT}/spaces && tar -xf {REMOTE_WORK}/space-{name}.tar -C {REMOTE_ROOT}/spaces",
              timeout=600)
@@ -316,12 +385,18 @@ import json, os, tarfile
 root = '{REMOTE_ROOT}/spaces/{name}'
 manifest_path = '{manifest_remote}'
 sent = json.load(open(manifest_path)) if os.path.exists(manifest_path) else {{}}
+import re
+saves = sorted((int(m.group(1)), f) for f in os.listdir(root)
+               for m in [re.fullmatch(r'splat-long_(\\d+)\\.ply', f)] if m)
+superseded = {{f for _, f in saves[:-1]}}   # only the newest long-training save crosses
 now, changed = {{}}, []
 for folder, dirs, files in os.walk(root):
     for f in files:
         full = os.path.join(folder, f)
         rel = os.path.relpath(full, root)
         if any(skip in rel for skip in {NOT_FETCHED!r}) or os.path.islink(full):
+            continue
+        if rel in superseded:
             continue
         st = os.stat(full)
         now[rel] = [st.st_size, int(st.st_mtime)]
@@ -372,19 +447,21 @@ def gate_of(vm: Colab, name: str, stage: str, since: int) -> dict:
     return (json.loads(lines[-1][5:]) if lines else None) or {"status": "stop", "why": "no gate recorded"}
 
 
-def run_stage(vm: Colab, video_remote: str, name: str, stage: str, extra: list[str]) -> dict:
+def run_stage(vm: Colab, video_remote: str, name: str, step: str, extra: list[str]) -> dict:
     """pipeline/agent.py --stage on the VM, its output shown here as it runs.
     During stage 4 the space is fetched every FETCH_DURING_MINUTES, so a
     trained splat is already here if the session dies during the next one."""
-    job = f"{name}-{stage}"
+    job = f"{name}-{step}"
+    stage = "splat" if step in SPLAT_STEPS else step
     command = (f"{remote_env()} && mkdir -p {RELAY} && cd {REMOTE_ROOT} && "
                f"python pipeline/agent.py {shlex.quote(video_remote)} --name {shlex.quote(name)} "
-               f"--stage {stage} {' '.join(shlex.quote(a) for a in extra)}")
+               f"--stage {stage} " + (f"--splat-steps {step} " if stage == "splat" else "")
+               + " ".join(shlex.quote(a) for a in extra))
     since = int(vm.shell("date +%s", timeout=120).split()[0])
     vm.background(command, job)
     offset, last_fetch = 0, time.time()
     while True:
-        if stage == "splat" and time.time() - last_fetch > FETCH_DURING_MINUTES * 60:
+        if step.startswith("train") and time.time() - last_fetch > FETCH_DURING_MINUTES * 60:
             try:
                 log(f"  fetched {fetch_space(vm, name)} file(s) so far")
             except RuntimeError as exc:
@@ -415,7 +492,8 @@ def main() -> None:
     parser.add_argument("--name", required=True, help="space name (spaces/<name> here and on the VM)")
     parser.add_argument("--session", default="oasis", help="Colab CLI session name")
     parser.add_argument("--gpu", default="T4")
-    parser.add_argument("--stages", nargs="+", choices=STAGES, default=STAGES)
+    parser.add_argument("--stages", nargs="+", choices=STEPS, default=STEPS,
+                        help="stages 1-3 and stage 4's steps to run, in order")
     parser.add_argument("--agent-args", default="", help="extra pipeline/agent.py arguments")
     parser.add_argument("--keep-session", action="store_true", help="do not stop the session at the end")
     args = parser.parse_args()
@@ -428,20 +506,26 @@ def main() -> None:
     if fresh:
         vm.create(args.gpu)
     log("code: " + upload_code(vm))
-    installed = all(vm.finished(c) == 0 for c in INSTALL_CELLS)
+    needed = sorted({cell for step in args.stages for cell in NEEDS[step]}, key=INSTALL_CELLS.index)
+    installed = all(vm.finished(c) == 0 for c in needed)
     if not installed:
-        start_installs(vm)   # skips any install still running from an earlier run
+        start_installs(vm, needed)   # skips anything installed or still running
     video_remote = f"{REMOTE_VIDEOS}/{video.name}"
     log(f"video: {video.name}")
     vm.put(video, video_remote)
-    if args.stages[0] != STAGES[0]:
+    if args.stages[0] != STEPS[0]:
         remote_has = vm.shell(f"test -f {REMOTE_ROOT}/spaces/{args.name}/agent-report.json && echo yes || true",
                               timeout=120).strip() == "yes"
         if not remote_has:
             upload_space(vm, args.name)
     if not installed:
-        log("waiting for the installs (about 15-25 minutes, OpenSplat's build is most of it)")
-        wait_installs(vm)
+        log("waiting for the installs: " + ", ".join(needed))
+        wait_installs(vm, needed)
+    if "install-opensplat" in needed:
+        try:
+            keep_opensplat(vm)
+        except RuntimeError as exc:
+            log(f"  could not keep the OpenSplat binary ({exc})")
 
     relay_log = ROOT / "spaces" / f"{args.name}-relay.log"
     relay_log.parent.mkdir(parents=True, exist_ok=True)
@@ -451,18 +535,19 @@ def main() -> None:
     log(f"Claude relay running here (log: {relay_log.relative_to(ROOT)})")
     extra = shlex.split(args.agent_args)
     try:
-        for stage in args.stages:
-            log(f"stage {stage} on the VM")
-            gate = run_stage(vm, video_remote, args.name, stage, extra)
-            log(f"{stage}: {gate.get('status', '?').upper()} - {gate.get('why', '')}")
+        for step in args.stages:
+            log(f"{step} on the VM")
+            gate = run_stage(vm, video_remote, args.name, step, extra)
+            log(f"{step}: {gate.get('status', '?').upper()} - {gate.get('why', '')}")
             log(f"  fetched {fetch_space(vm, args.name)} new or changed file(s) into spaces/{args.name}")
             if gate.get("status") == "stop":
-                sys.exit(f"{stage} stopped; fix it, then run again with --stages {stage} ...")
+                rest = " ".join(args.stages[args.stages.index(step):])
+                sys.exit(f"{step} stopped; fix it, then run again with --stages {rest}")
     finally:
         relay.terminate()
 
-    if "splat" in args.stages:
-        log("comparing every splat of this video here (tools/splat_choose.py)")
+    if any(step in args.stages for step in ("choose-training", "fill")):
+        log("choose-best: comparing every splat of this video here (tools/splat_choose.py)")
         subprocess.run([sys.executable, str(ROOT / "tools" / "splat_choose.py"), str(video)], cwd=ROOT)
     if not args.keep_session:
         vm.cli("stop", "-s", args.session, timeout=300)

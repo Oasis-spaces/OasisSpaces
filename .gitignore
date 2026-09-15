@@ -19,3 +19,6 @@ splats/
 
 # Source videos for Colab runs (large, never committed)
 videos/
+
+# OpenSplat built on Colab, reused by tools/colab_pipeline.py
+tools/colab-cache/
