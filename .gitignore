@@ -16,3 +16,6 @@ tools/default.metallib
 
 # Copies of finished splats (large binaries, kept out of git)
 splats/
+
+# Source videos for Colab runs (large, never committed)
+videos/
