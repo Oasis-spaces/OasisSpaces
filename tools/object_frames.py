@@ -162,6 +162,50 @@ def draw_object_frames(space: Path, out: Path, include=None) -> dict[int, dict]:
     return chosen
 
 
+DETECTION_TILE_LONG = 640
+DETECTION_COLOURS = [(230, 60, 60), (60, 180, 75), (60, 110, 230), (240, 170, 40),
+                     (170, 70, 220), (40, 190, 200), (240, 90, 190), (150, 150, 40)]
+
+
+def draw_detections(space: Path, out: Path, count: int = 6) -> list[str]:
+    """Tile `count` keyframes, spread across the video, with every detection
+    box densify.py recorded drawn and named on them. Returns the frames used."""
+    space = Path(space)
+    meta = json.loads((space / "densify.json").read_text())
+    detections = meta.get("detections") or {}
+    names = sorted(detections)
+    if not names:
+        return []
+    picks = [names[round(i)] for i in np.linspace(0, len(names) - 1, min(count, len(names)))]
+    colour_of, tiles = {}, []
+    for name in picks:
+        img = Image.open(space / "workspace" / "images" / name).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        # Text stays readable after the frame shrinks to a tile.
+        font = ImageFont.load_default(size=max(16, max(img.size) // 45))
+        width = max(4, img.width // 300)
+        for det in sorted(detections[name], key=lambda d: -d["score"]):
+            colour = colour_of.setdefault(det["label"], DETECTION_COLOURS[len(colour_of) % len(DETECTION_COLOURS)])
+            draw.rectangle(det["box"], outline=colour, width=width)
+            text = f"{det['label']} {det['score']:.2f}"
+            at = (det["box"][0] + width, det["box"][1] + width)
+            box = draw.textbbox(at, text, font=font)
+            draw.rectangle(box, fill=(255, 255, 255))
+            draw.text(at, text, fill=colour, font=font)
+        draw.text((20, img.height - 2 * font.size), name, fill="white", font=font,
+                  stroke_width=3, stroke_fill="black")
+        img.thumbnail((DETECTION_TILE_LONG, DETECTION_TILE_LONG))
+        tiles.append(img)
+    cols = 3 if len(tiles) > 4 else len(tiles)
+    rows = (len(tiles) + cols - 1) // cols
+    tw, th = max(t.width for t in tiles), max(t.height for t in tiles)
+    sheet = Image.new("RGB", (cols * tw, rows * th), "white")
+    for n, tile in enumerate(tiles):
+        sheet.paste(tile, ((n % cols) * tw, (n // cols) * th))
+    sheet.save(out)
+    return picks
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)

@@ -118,9 +118,14 @@ between them, so a capture can be processed unattended:
 
 Claude makes the judgement calls that measurements cannot, through
 `pipeline/advisor.py`: it looks at frames from the capture and chooses how to
-retry a weak solve, checks the detector's labels against what is actually in
-frame, judges the finished room against a real photo, and writes the capture
-advice. The advisor uses the `claude` CLI (your existing login, no API key;
+retry a weak solve, names the objects in the room before detection, checks
+the detection boxes drawn on keyframes and revises the object list (densify
+then runs again with it), reviews the room's walls and boxes, judges the
+finished room against a real photo (a structural problem sends the structure
+review round again with that complaint, and the room with fewer problems is
+kept), picks the view each splat opens at from six rendered options, keeps or
+rejects each filled surface, picks the best splat of the video, and writes the
+capture advice. The advisor uses the `claude` CLI (your existing login, no API key;
 run `claude login` if the session has expired), or the Anthropic API when
 `ANTHROPIC_API_KEY` is set, and otherwise reports `offline` and leaves the
 agent to its numeric rules. A measurement always overrules an opinion: if
@@ -141,7 +146,17 @@ the agent's judgement:
    Anything V2 path.
 
    It also runs `pipeline/semantics.py`: an open-vocabulary detector
-   (GroundingDINO-tiny, local, no API) names the objects in each keyframe.
+   (GroundingDINO-tiny, local, no API) finds objects in each keyframe. What it
+   searches for is the room's own list: the agent first shows Claude ten
+   frames of the video, and Claude writes `spaces/<name>/objects.json` with
+   plain detector-friendly names ("wardrobe" for an almirah) and a role for
+   each (furniture with what to build it as, storage, small things on
+   furniture, floor coverings, unreliable glass and screens, hanging things,
+   fixtures). Mirrors, windows and screens are always searched for. Without
+   Claude, or through `process_video.sh`, a general default list is used;
+   an `objects.json` already in the space is reused, so edit it and re-run
+   densify to change what is found. The list used is recorded in
+   `densify.json` and read by every later stage.
    A detection is a rectangle, and a rectangle round a bed also holds floor
    and curtain, so SAM 2.1 (hiera-tiny, local) cuts each one to the object's
    outline first (`--no-outlines` keeps rectangles). Every dense point knows
@@ -154,8 +169,7 @@ the agent's judgement:
    and highest downward-facing height levels inside the walls, so a strip of
    floor is enough and a lower corridor floor seen through a door is ignored.
    Detected furniture is excluded from plane fitting and becomes one box per
-   object; the storage labels (wardrobe, cabinet, shelf, bookcase, chest of
-   drawers) are grouped first, because a cupboard filmed side-on comes out as
+   object; the storage names are grouped first, because a cupboard filmed side-on comes out as
    slivers of each. Whatever is left is grouped geometrically as before. The
    classifier keeps a detected object's identity but still applies its
    sanity checks, and marks a box `build: false` when it is scan debris
@@ -163,7 +177,16 @@ the agent's judgement:
 4. `tools/blender_room.py` — a parametric Blender room.
 5. `pipeline/splat_seed.py` then `tools/opensplat` — a Gaussian splat. The
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's
-   sparse points, so low-texture walls start filled in. `pipeline/splat_export.py`
+   sparse points, so low-texture walls start filled in. The agent trains a
+   quick splat (10,000 steps on quarter-size frames, minutes) and, with a CUDA
+   GPU or `--long-splat on`, a long one (30,000 steps on half-size frames;
+   sharper where the video saw clearly, but it can overfit the frames it
+   learned from, and about 2.5 hours on an 8 GB Mac). `tools/splat_choose.py`
+   renders both beside the real photo at trained frames and at new views:
+   real video frames between two trained frames, which neither splat saw,
+   with the camera placed between its neighbours. Claude ranks them, new
+   views weighing most, and the better one becomes `splat.ply`
+   (`splat-training.json` and `training-compare/` hold the evidence). `pipeline/splat_export.py`
    then writes `splat.splat` beside `splat.ply`: the viewer's compact format,
    about 8x smaller. It also writes `splat.view.json`, the starting camera: of
    the views at, just behind or just ahead of each capture position, level and
@@ -171,13 +194,15 @@ the agent's judgement:
    the least blur (no wall pressed against the lens, no cupboard filmed
    edge-on). The viewer opens there, with a fixed 55° vertical field of view.
    Open it with `splat-viewer/index.html?url=../spaces/<name>/splat.splat`.
-   Then `tools/splat_edit.py fill-room` fills floor, walls and flat furniture
-   faces the splat has nothing for into `splat-filled.splat` (see Editing the
-   splat). The agent renders three views before and after with
-   `tools/splat_render.py`: the start view and the two surfaces that changed
-   most, from capture positions. It keeps the fill only if see-through gaps
-   shrink, pixels that were already solid barely change (under 6/255 on
-   average, and no more than 0.5% of them by over 40), and Claude agrees.
+   Then the floor, walls and flat furniture faces the splat has nothing for
+   are filled (see Editing the splat), and judged surface by surface: each is
+   rendered before and after from a video frame that looks at it, beside that
+   frame, and kept only if Claude says so and the numbers agree (see-through
+   gaps shrink, and no more than 0.5% of solid pixels away from the gaps
+   change by over 40/255). Kept surfaces go into `splat-filled.splat`.
+   Last, every finished splat of the same video (this run's and earlier
+   runs', filled or not) is compared the same way, and Claude's pick is
+   copied to `splats/<video>/best.splat` with `choice.json` explaining it.
    `splat_edit` edits then start from the kept result.
 
 ## Editing the splat

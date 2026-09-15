@@ -195,16 +195,24 @@ def start_view(space: Path, splat: Path | None = None) -> dict | None:
     score_view on the splat itself. The exact capture pose often sits pressed
     against a wall, or beside a cupboard filmed edge-on, which then fills part
     of the screen as a blur."""
+    views = start_views(space, splat, 1)
+    return views[0] if views else None
+
+
+def start_views(space: Path, splat: Path | None = None, count: int = 6) -> list[dict]:
+    """The `count` best-scoring start views (see start_view), best first, from
+    capture positions spread through the video, so they show different parts
+    of the room; the agent lets Claude choose among them."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from densify import read_images_bin
 
     model = model_dir(space)
     splat = splat or space / "splat.ply"
     if model is None or not splat.exists():
-        return None
+        return []
     images = list(read_images_bin(model / "images.bin").values())
     if not images:
-        return None
+        return []
     blobs = splat_blobs(splat)
     shapes_path = space / "shapes.json"
     if shapes_path.exists():
@@ -221,8 +229,8 @@ def start_view(space: Path, splat: Path | None = None) -> dict | None:
 
     tree = cKDTree(blobs[0][blobs[2] > 0.3])
     step = max(1, len(images) // MAX_CAMERAS)
-    best = None
-    for info in sorted(images, key=lambda im: im["name"])[::step]:
+    scored = []
+    for order, info in enumerate(sorted(images, key=lambda im: im["name"])[::step]):
         centre = -info["R"].T @ info["t"]
         heading = info["R"][2] - up * (info["R"][2] @ up)
         if np.linalg.norm(heading) < 1e-6:
@@ -240,17 +248,26 @@ def start_view(space: Path, splat: Path | None = None) -> dict | None:
                 if tree.query(position)[0] < CLEAR_METRES * metre:
                     continue  # standing inside furniture or a wall
                 score, coverage, bad, depth = score_view(blobs, R, position, metre)
-                if best is None or score > best[0]:
-                    best = (score, R, position, info["name"], turn, back, coverage, bad, depth)
-    if best is None:
-        return None
-    score, R, position, name, turn, back, coverage, bad, depth = best
-    return view_json(R, position, frame=name, turn=turn, backMetres=back,
-                     coverage=round(coverage, 2), blurShare=round(bad, 2),
-                     medianDepthMetres=round(depth, 2),
-                     # The room's up direction and scale, so a viewer can walk level at
-                     # walking speed (apps/SplatViewer).
-                     up=[round(float(v), 5) for v in up], metre=round(float(metre), 5))
+                scored.append((score, order, R, position, info["name"], turn, back,
+                               coverage, bad, depth))
+    # Best first, each from a capture position at least this far through the
+    # video from the ones already taken.
+    spacing = max(2, len(images) // step // (3 * count))
+    views, taken = [], []
+    for score, order, R, position, name, turn, back, coverage, bad, depth in sorted(
+            scored, key=lambda v: -v[0]):
+        if score <= 0 or any(abs(order - o) < spacing for o in taken):
+            continue
+        taken.append(order)
+        views.append(view_json(R, position, frame=name, turn=turn, backMetres=back,
+                               coverage=round(coverage, 2), blurShare=round(bad, 2),
+                               medianDepthMetres=round(depth, 2), score=round(float(score), 3),
+                               # The room's up direction and scale, so a viewer can walk
+                               # level at walking speed (apps/SplatViewer).
+                               up=[round(float(v), 5) for v in up], metre=round(float(metre), 5)))
+        if len(views) == count:
+            break
+    return views
 
 
 def main() -> None:

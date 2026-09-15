@@ -51,6 +51,7 @@ from advisor import Advisor  # noqa: E402
 from evaluate_space import evaluate, ply_vertex_count  # noqa: E402
 from plan_image import draw_plan  # noqa: E402
 from object_frames import draw_object_frames  # noqa: E402
+from semantics import MAX_OBJECTS, ROLES, Vocabulary, clean_name, room_vocabulary  # noqa: E402
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
 from reconstruct import (  # noqa: E402
     camera_path_jump, registered_images, solved_models,
@@ -83,6 +84,91 @@ FILL_DAMAGE_STEP = 40
 FILL_MAX_DAMAGED_SHARE = 0.005
 FILL_EDGE_PX = 12       # pixels this close to an original gap are allowed to change
 FILL_MIN_BLOBS = 500    # smaller fills are not worth a review (and are not kept)
+
+# Stage 4 trains two splats and keeps the better one (see choose_training): a
+# quick one, and a long one at twice the resolution, sharper where the video
+# saw clearly but able to overfit the frames it trained on. Claude compares
+# them at real video frames neither was trained on.
+# The long run takes minutes on a CUDA GPU (Colab) but about 2.5 hours on an
+# 8 GB Mac, so by default it only runs where there is CUDA.
+SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2)}   # steps, image downscale
+# OpenSplat keeps every training image on the GPU as 32-bit floats; past this
+# it reads them from memory each step instead, so an 8 GB Mac is not swamped.
+MAX_GPU_IMAGE_CACHE_GB = 1.5
+
+# Before stage 2, Claude names what the room holds (see name_objects).
+OBJECT_NAMING_FRAMES = 10
+OBJECT_NAMING_PROMPT = """You are preparing object detection for a 3D reconstruction of a room, filmed on a phone by an ordinary person. The {count} attached frames are spread across the whole video.
+
+Name every kind of thing in the room that the reconstruction needs to know about. An open-vocabulary detector (GroundingDINO) will search every keyframe for exactly your names, so anything you leave out is never found, and anything you name that is not there can mislabel something else. Each name's role tells the pipeline what to do with the points the detector labels.
+
+Naming rules:
+- Short, plain English nouns a general detector knows, 1 to 3 words, no commas: "wardrobe" for an almirah, "sofa" for a couch, "shelf" for a wall rack. The plainest common word wins.
+- One name per kind of thing, even if there are several (one "chair" for four chairs).
+- Never give one object names in two different roles: a cupboard front that looks like a door is "wardrobe", not also "door". Two storage names for the same piece are fine (a "wardrobe" with a "chest of drawers" base).
+- Only things you can actually see in these frames. Leave out walls, floor, ceiling, skirting, beams, tiles, light switches and anything smaller than a shoebox, unless it is glass or a screen.
+- Always include every mirror, window, glass door or glass panel, television and monitor you see: depth on them is wrong and those points must be removed.
+- Most important first, at most {limit} names.
+
+Roles:
+- "furniture": a piece of furniture or an appliance standing on the floor. build_as: "bed"; "seat" for anything sat on (sofa, chair, stool, bench, pouffe); "table" for tables, desks, dressing tables, counters; "block" for anything else solid (fridge, washing machine, air cooler, trunk, bin, stacked boxes).
+- "storage": wardrobes, almirahs, cupboards, cabinets, shelves, bookcases, chests of drawers, sideboards, TV units standing on the floor. build_as "wardrobe" (it is built from the floor up). A tall closed unit that could be storage or an appliance (a grey steel almirah can look like a fridge) is storage: storage names are grouped even when the detector sees the unit in parts, so a wrong appliance name splits it.
+- "on_furniture": decor that sits on other furniture and belongs in a model of the room (table lamp, potted plant, vase, pillow). build_as "block".
+- "loose": belongings that do not belong in a model of the room, wherever they lie (clothes, bags, laptops, keyboards, towels, shoes, toys, bottles). build_as null.
+- "floor_covering": rugs, mats, carpets lying on the floor. build_as "block".
+- "unreliable": mirrors, windows, glass doors and panels, televisions, monitors. build_as null.
+- "hanging": curtains, blinds, clothes or towels hanging in front of a wall. build_as null.
+- "fixture": part of the room itself: doors, door frames, pinboards, pictures, air conditioners, ceiling fans, radiators, and shelves or cabinets mounted on a wall that do not reach the floor. build_as null.
+
+Fields: {{"objects": [{{"name": string, "role": string, "build_as": string or null}}], "room": one sentence describing the room}}"""
+# Claude picks the view a splat opens at from this many rendered options.
+START_VIEW_CHOICES = 6
+START_VIEW_TILE = (384, 240)       # the viewer's 16:10 shape
+START_VIEW_PROMPT = """You choose the opening view of a 3D capture of a room (a Gaussian splat made from a phone video):
+the first thing a person sees when they open it, before they move. The first image shows {count} candidate views,
+labelled {letters}, rendered from the reconstruction. The other images are frames of the real room from the video.
+
+Pick the view that best shows this room to someone seeing it for the first time:
+- the room reads as a room: some floor, walls and the main furniture, rather than a close-up of one surface
+- what is in view is sharp and solid, like the real frames: no smears, streaks, fog, floating specks, holes or black areas
+- not staring at a blank wall, into a corner, into a curtain, or pressed against furniture
+Prefer the clean view over the wide one if the wide one shows reconstruction damage.
+Reply with a single JSON object and nothing else:
+{{"best": letter, "ranking": [letters best first], "why": one sentence}}"""
+
+# Files that make up a built room, kept aside while stage 3 is reviewed again.
+STRUCTURE_FILES = ["shapes.json", "room.blend", "room-render.png", "room-render-plan.png",
+                   "plan-reviewed.png"]
+RECHECK_NOTE = """
+
+This is a second look. The room built from the first review was rendered and checked, and the check found these
+structural problems: {problems}. The last {count} image(s) are that render, from an angle and from straight above
+(grey shapes are walls, floor and furniture boxes). Use the same actions to fix them where the images show what is
+wrong: drop a box that is not a free-standing object of its own (part of the bed, a panel, a sliver of a cupboard) or
+that duplicates another, drop a wall that stands free or duplicates a wall. Leave alone what the check did not flag."""
+
+# After detection, Claude checks the boxes against the list (see review_labels).
+LABEL_REVIEW_PROMPT = """You check object detection for a 3D reconstruction of a room filmed on a phone.
+An open-vocabulary detector (GroundingDINO) searched {keyframes} keyframes for exactly the names in this list; each name has a
+role that tells the pipeline what to do with the points it labels:
+{listing}
+The first image shows {shown} of the keyframes with every detection box drawn and named (name and confidence). The other
+images are plain frames from the same video.
+
+Revise the list so the detector finds what is really in the room, and nothing else:
+- "add": objects clearly visible in the frames that no box covers and that matter to the room model: furniture, storage,
+  glass or screens, curtains, and loose belongings big enough to confuse the furniture boxes (a heap of clothes, a bag on
+  the floor). Skip anything smaller than a shoebox that is not glass or a screen. Same roles and build_as as the list.
+- "rename": a name whose object is visible but was never or rarely boxed, where a plainer, more common English word would
+  help the detector ("almirah" -> "wardrobe", "monitor" -> "computer screen").
+- "remove": a name whose boxes land on something else (a "chest of drawers" box on the side of a bed, a "wardrobe" box
+  on a wall shelf) and whose own object is not in the room. Removing it frees those points for the right name.
+Change nothing when the detections already match the room. Mirrors, windows and screens are always searched for.
+At most {limit} names in total.
+Fields: {{"objects_seen": array of short phrases, "missed": array of objects no box covers, "wrong": array of
+"name: what its boxes are really on", "add": [{{"name": string, "role": string, "build_as": string or null}}],
+"rename": [{{"from": string, "to": string}}], "remove": [{{"name": string, "why": string}}], "why": one sentence}}"""
+
 FILL_REVIEW_PROMPT = """You review an automatic fill in a 3D room reconstruction (a Gaussian splat) made from a phone video.
 The reconstruction has gaps where the camera never saw a surface clearly: black holes, see-through patches or smears on
 floors, walls and furniture. A fill adds new surface there, continuing the texture around it.
@@ -110,6 +196,12 @@ NOISY_WALL_RMS_PCT = 1.5
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 
+def structural_problems(verdict: dict | None) -> list:
+    """The render check's problems graded structural."""
+    return [p for p in (verdict or {}).get("problems") or []
+            if isinstance(p, dict) and p.get("severity") == "structural"]
+
+
 def problem_text(problem) -> str:
     """A render-check problem as text: a plain phrase, or {what, severity}."""
     if isinstance(problem, dict):
@@ -119,11 +211,13 @@ def problem_text(problem) -> str:
 
 class Agent:
     def __init__(self, source: Path, name: str, fps: float, do_splat: bool,
-                 allow_retry: bool = True, use_claude: bool = True):
+                 allow_retry: bool = True, use_claude: bool = True,
+                 long_splat: bool | None = None):
         self.source = source
         self.name = name
         self.fps = fps
         self.do_splat = do_splat
+        self.long_splat = shutil.which("nvidia-smi") is not None if long_splat is None else long_splat
         self.allow_retry = allow_retry
         self.space = ROOT / "spaces" / name
         self.log_path = self.space / "agent.log"
@@ -262,30 +356,120 @@ class Agent:
                         + (f" [{problems}]" if problems else ""))
         return verdict
 
-    def label_verdict(self, dense: dict) -> None:
-        """Claude checks what the detector named against what is in the frame."""
+    def name_objects(self) -> None:
+        """Claude names what is in this room before stage 2, so the detector
+        searches for the room's own objects instead of a fixed list, and each
+        name carries its role (see ROLES in pipeline/semantics.py). Written to
+        objects.json, which densify.py reads; an existing list is kept, so a
+        re-run labels the cloud the same way."""
+        path = self.space / "objects.json"
+        if path.exists():
+            print(f"    object list: keeping {path.name} "
+                  f"({len(json.loads(path.read_text()).get('objects', []))} names)")
+            return
         if not self.advisor.available:
+            print("    object list: Claude unavailable, the detector uses the default list")
             return
-        found = ", ".join(dense.get("labels", {})) or "nothing"
-        prompt = (
-            "Attached is one frame from an indoor capture. An open-vocabulary detector "
-            f"labelled the reconstructed 3D points as: {found}.\n"
-            "List the furniture and fixtures you can actually see in this frame, then "
-            "say which of those labels look wrong, and which visible objects the "
-            "detector missed.\n"
-            'Fields: {"objects": array, "wrong": array, "missing": array}')
-        verdict = self.advisor.ask_json(prompt, self.sample_frames(1))
-        if not verdict:
+        frames = self.sample_frames(OBJECT_NAMING_FRAMES)
+        verdict = self.advisor.ask_json(
+            OBJECT_NAMING_PROMPT.format(count=len(frames), limit=MAX_OBJECTS - 4),
+            frames, max_tokens=2000)
+        vocabulary = Vocabulary((verdict or {}).get("objects") or [], "claude")
+        if not vocabulary.furniture:
+            print("    object list: no usable answer, the detector uses the default list"
+                  + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
             return
-        self.judged("densify", verdict,
-                    f"sees {', '.join(verdict.get('objects', [])[:6]) or 'nothing'}"
-                    + (f"; missed {', '.join(verdict.get('missing', [])[:4])}"
-                       if verdict.get("missing") else ""))
+        path.write_text(json.dumps({**vocabulary.to_json(), "room": verdict.get("room"),
+                                    "frames": [f.name for f in frames]}, indent=1) + "\n")
+        self.judged("objects", {"objects": vocabulary.objects, "room": verdict.get("room")},
+                    f"{len(vocabulary.names)} names: " + ", ".join(
+                        f"{o['name']} ({o['role']})" for o in vocabulary.objects[:12])
+                    + (" ..." if len(vocabulary.names) > 12 else ""))
 
-    def structure_review(self) -> None:
+    def review_labels(self) -> bool:
+        """Claude checks what the detector found, on keyframes with every
+        detection box drawn, against the room's object list, and revises the
+        list: names to add for objects that were never boxed, plainer words for
+        names the detector does not understand, and names to remove that land
+        on something else. Returns True when the list changed, so densify runs
+        again with it (once)."""
+        if not self.advisor.available:
+            return False
+        from object_frames import draw_detections
+
+        dense = json.loads((self.space / "densify.json").read_text())
+        vocabulary = room_vocabulary(self.space)
+        sheet = self.space / "detections.png"
+        frames = self.safe(draw_detections, self.space, sheet, default=[]) or []
+        if not frames:
+            return False
+        found_in = {}
+        for dets in (dense.get("detections") or {}).values():
+            for name in {d["label"] for d in dets}:
+                found_in[name] = found_in.get(name, 0) + 1
+        listing = [{"name": o["name"], "role": o["role"],
+                    "keyframes_found_in": found_in.get(o["name"], 0),
+                    "points_labelled": (dense.get("labels") or {}).get(o["name"], 0)}
+                   for o in vocabulary.objects]
+        verdict = self.advisor.ask_json(LABEL_REVIEW_PROMPT.format(
+            keyframes=len(dense.get("detections") or {}), shown=len(frames),
+            listing=json.dumps(listing), limit=MAX_OBJECTS - 4),
+            [sheet] + self.sample_frames(4), max_tokens=2000)
+        if not verdict:
+            return False
+        revised, changes = self.revise_objects(vocabulary, verdict)
+        self.judged("densify", {**verdict, "applied": changes},
+                    ("; ".join(changes) if changes else "the object list stands")
+                    + (f"; missed {', '.join(map(str, verdict.get('missed', [])[:4]))}"
+                       if verdict.get("missed") else ""))
+        if not changes:
+            return False
+        path = self.space / "objects.json"
+        previous = json.loads(path.read_text()) if path.exists() else {"objects": vocabulary.objects}
+        revisions = previous.pop("revisions", [])
+        revisions.append({"objects": previous.get("objects"), "changes": changes,
+                          "why": verdict.get("why")})
+        path.write_text(json.dumps({**previous, **revised.to_json(), "revisions": revisions},
+                                   indent=1) + "\n")
+        return True
+
+    def revise_objects(self, vocabulary, verdict: dict):
+        """Apply Claude's add / rename / remove to the object list, within
+        limits: names are cleaned like any other, roles must be known, and the
+        list stays under the detector's size."""
+        objects = [dict(o) for o in vocabulary.objects]
+        by_name = {o["name"]: o for o in objects}
+        changes = []
+        for item in verdict.get("remove") or []:
+            name = clean_name(item.get("name", "") if isinstance(item, dict) else item)
+            if name in by_name:
+                objects.remove(by_name.pop(name))
+                changes.append(f"removed '{name}'")
+        for item in verdict.get("rename") or []:
+            old, new = clean_name(item.get("from", "")), clean_name(item.get("to", ""))
+            if old in by_name and new and new not in by_name:
+                by_name[new] = by_name.pop(old)
+                by_name[new]["name"] = new
+                changes.append(f"renamed '{old}' to '{new}'")
+        for item in verdict.get("add") or []:
+            name = clean_name(item.get("name", ""))
+            if name and name not in by_name and item.get("role") in ROLES:
+                entry = {"name": name, "role": item["role"], "build_as": item.get("build_as")}
+                objects.append(entry)
+                by_name[name] = entry
+                changes.append(f"added '{name}' ({item['role']})")
+        revised = Vocabulary(objects, "claude")
+        dropped = [o["name"] for o in objects if o["name"] not in revised.names]
+        if dropped:
+            changes.append("left out " + ", ".join(dropped) + " (limits)")
+        return revised, (changes if revised.objects != vocabulary.objects else [])
+
+    def structure_review(self, feedback: list | None = None) -> None:
         """Claude decides what each measured candidate is. It can drop a wall or
         a box, or relabel a box, but never move or resize anything, so the room
-        keeps the measured geometry."""
+        keeps the measured geometry. With `feedback` (the structural problems
+        the render check found in the room built from an earlier review), it
+        looks again with those problems and the renders in front of it."""
         if not self.advisor.available:
             return
         shapes_path = self.space / "shapes.json"
@@ -349,6 +533,11 @@ class Agent:
             '"relabel_boxes": [{"id": string, "label": string, "why": string}], '
             '"notes": one sentence}')
         images = [plan] + ([sheet] if picked else []) + self.room_frames(3)
+        if feedback:
+            renders = [r for r in (self.space / "room-render.png", self.space / "room-render-plan.png")
+                       if r.exists()]
+            prompt += RECHECK_NOTE.format(count=len(renders), problems=json.dumps(feedback))
+            images += renders
         verdict = self.advisor.ask_json(prompt, images, max_tokens=2048)
         if not verdict:
             print(f"    claude (structure): no usable answer"
@@ -497,13 +686,54 @@ class Agent:
         if not verdict:
             print(f"    claude (blender): no usable answer"
                   + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
-            return
+            return None
         self.judged("blender", verdict,
                     ("plausible room" if verdict.get("plausible") else "not a plausible room")
                     + (f" - wrong: {', '.join(problem_text(p) for p in verdict['problems'][:3])}"
                        if verdict.get("problems") else "")
                     + (f"; missing: {', '.join(verdict.get('missing', [])[:3])}"
                        if verdict.get("missing") else ""))
+        return verdict
+
+    def recheck_structure(self, first: dict) -> None:
+        """The render check found the built room structurally wrong: run the
+        structure review again with those problems, rebuild, check again, and
+        keep whichever room has fewer structural problems (the first one on a
+        tie). The first room is kept in structure-first/."""
+        problems = structural_problems(first)
+        kept = self.space / "structure-first"
+        kept.mkdir(exist_ok=True)
+        saved = [name for name in STRUCTURE_FILES if (self.space / name).exists()]
+        for name in saved:
+            shutil.copy2(self.space / name, kept / name)
+        self.decide("shapes", "recheck",
+                    "Claude's render check found structural problems ("
+                    + ", ".join(problem_text(p) for p in problems[:3])
+                    + "); reviewing the structure again with them")
+        self.structure_review(feedback=problems)
+        self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"),
+                  str(self.space), "--finish-only"], "finish", "after the second review")
+        self.build_room()
+        second = self.safe(self.render_verdict)
+        if second is not None and len(structural_problems(second)) < len(problems):
+            self.decide("shapes", "accept",
+                        f"the second review left {len(structural_problems(second))} structural "
+                        f"problem(s), down from {len(problems)}")
+            return
+        for name in saved:
+            shutil.copy2(kept / name, self.space / name)
+        # The gate reads the latest render check: that is the first room's again.
+        self.judgements.append({"stage": "blender", **first, "restored": True})
+        self.decide("shapes", "revert",
+                    "the second review did not reduce the structural problems"
+                    + ("" if second is not None else " (no answer from the render check)")
+                    + "; kept the first room")
+
+    def build_room(self) -> None:
+        self.run([BLENDER, "--background",
+                  "--python", str(ROOT / "tools/blender_room.py"), "--",
+                  str(self.space / "shapes.json"), str(self.space / "room.blend"),
+                  str(self.space / "room-render.png")], "blender", "build the room")
 
     # ------------------------------------------------------------ inspection
     def reconstruction_metrics(self) -> dict:
@@ -532,8 +762,17 @@ class Agent:
         }
 
     def densify_metrics(self) -> dict:
+        """densify.json without its bulky records (every detection box, the
+        full object list), which belong to later stages, not to reports."""
         path = self.space / "densify.json"
-        return json.loads(path.read_text()) if path.exists() else {}
+        if not path.exists():
+            return {}
+        meta = json.loads(path.read_text())
+        meta.pop("detections", None)
+        objects = meta.pop("objects", None)
+        if objects:
+            meta["object_list"] = f"{objects.get('source')}, {len(objects.get('objects', []))} names"
+        return meta
 
     def shape_metrics(self) -> dict:
         path = self.space / "shapes.json"
@@ -627,6 +866,7 @@ class Agent:
         return True
 
     def step_densify(self) -> bool:
+        self.safe(self.name_objects)
         ok, _ = self.run([sys.executable, str(ROOT / "pipeline/densify.py"),
                           str(self.space)], "densify", "MoGe-2 + object detection and outlines")
         if not ok:
@@ -649,11 +889,24 @@ class Agent:
                 ok, _ = self.run([sys.executable, str(ROOT / "pipeline/densify.py"),
                                   str(self.space)], "densify", "after remapping")
                 metrics = self.densify_metrics()
+        if self.safe(self.review_labels, default=False):
+            # Claude revised the object list: label the cloud again with it.
+            ok, _ = self.run([sys.executable, str(ROOT / "pipeline/densify.py"),
+                              str(self.space)], "densify", "again, with the revised object list")
+            if not ok:
+                self.decide("densify", "stop", "densify failed with the revised object list")
+                return False
+            metrics = self.densify_metrics()
+            labels = json.loads((self.space / "densify.json").read_text()).get("labels", {})
+            self.decide("densify", "relabel",
+                        "Claude revised the object list after seeing the detections; "
+                        "labelled again: " + ", ".join(f"{k} {v:,}" for k, v in
+                                                       sorted(labels.items(), key=lambda kv: -kv[1])[:8]),
+                        metrics)
         self.decide("densify", "accept",
                     f"1 m = {metrics.get('colmap_units_per_metre', float('nan')):.3f} units, "
                     f"keyframes agree within {metrics.get('scale_spread', 0):.0%}, "
                     f"{metrics.get('points', 0):,} points", metrics)
-        self.safe(self.label_verdict, metrics)
         return True
 
     def step_shapes(self) -> bool:
@@ -679,11 +932,10 @@ class Agent:
                     f"{metrics.get('boxes', 0)} boxes worth building"
                     + (f"; found {', '.join(metrics['objects'])}" if metrics.get("objects") else ""),
                     metrics)
-        self.run([BLENDER, "--background",
-                  "--python", str(ROOT / "tools/blender_room.py"), "--",
-                  str(self.space / "shapes.json"), str(self.space / "room.blend"),
-                  str(self.space / "room-render.png")], "blender", "build the room")
-        self.safe(self.render_verdict)
+        self.build_room()
+        verdict = self.safe(self.render_verdict)
+        if verdict and structural_problems(verdict):
+            self.safe(self.recheck_structure, verdict)
         return True
 
     def step_splat(self) -> bool:
@@ -692,18 +944,109 @@ class Agent:
         if not ok:
             self.decide("splat", "skip", "could not build the splat project")
             return False
-        ok, _ = self.run([OPENSPLAT, str(self.space / "splat-project"),
-                          "-n", "10000", "-d", "4",
-                          "-o", str(self.space / "splat.ply")], "splat", "10000 steps")
+        trained = []
+        for run_name, (steps, downscale) in SPLAT_RUNS.items():
+            if run_name != "quick" and not self.long_splat:
+                continue
+            out = self.space / f"splat-{run_name}.ply"
+            args = [OPENSPLAT, str(self.space / "splat-project"), "-n", str(steps),
+                    "-d", str(downscale), "-o", str(out)]
+            if self.image_cache_gb(downscale) > MAX_GPU_IMAGE_CACHE_GB:
+                args.append("--no-gpu-cache")
+            ran, _ = self.run(args, "splat", f"{run_name}: {steps} steps at 1/{downscale} resolution")
+            if ran and out.exists():
+                trained.append({"label": f"{run_name} ({steps} steps, 1/{downscale} resolution)",
+                                "space": self.space, "ply": out})
+        ok = bool(trained)
+        if ok:
+            best = trained[0]
+            if len(trained) > 1:
+                best = self.safe(self.choose_training, trained, default=trained[0])
+            shutil.copyfile(best["ply"], self.space / "splat.ply")
         self.decide("splat", "accept" if ok else "skip",
-                    "trained" if ok else "OpenSplat failed; see the log")
+                    f"trained {len(trained)} splat(s); splat.ply is the {best['label']} one"
+                    if ok else "OpenSplat failed; see the log")
         if ok:
             # The viewer loads the compact copy; the .ply stays the full result.
             self.run([sys.executable, str(ROOT / "pipeline/splat_export.py"),
                       str(self.space / "splat.ply")], "splat export", "compact copy for the viewer")
+            self.safe(self.choose_start_view, self.space / "splat.ply")
             self.safe(self.fill_surfaces)
+            fill = self.space / "splat-filled.fill.json"
+            if fill.exists() and json.loads(fill.read_text()).get("kept"):
+                self.safe(self.choose_start_view, self.space / "splat-filled.ply")
             self.safe(self.choose_best)
         return ok
+
+    def image_cache_gb(self, downscale: int) -> float:
+        """What OpenSplat's GPU copy of the training images would take."""
+        from PIL import Image
+
+        images = sorted((self.space / "workspace" / "images").glob("*.jpg"))
+        if not images:
+            return 0.0
+        width, height = Image.open(images[0]).size
+        return len(images) * (width // downscale) * (height // downscale) * 3 * 4 / 1e9
+
+    def choose_training(self, trained: list[dict]) -> dict:
+        """Claude compares the trained splats at trained and new views
+        (tools/splat_choose.py) and the better one becomes splat.ply."""
+        from splat_choose import judge
+
+        record = judge(self.source, trained, self.space / "training-compare",
+                       log=lambda text: print("   " + text), advisor=self.advisor)
+        (self.space / "splat-training.json").write_text(json.dumps(record, indent=1) + "\n")
+        verdict = record.get("claude") or {}
+        self.judged("splat training", {"ranking": verdict.get("ranking"),
+                                       "reasons": verdict.get("reasons"),
+                                       "candidates": record["candidates"]},
+                    f"kept {record['best']} (decided by {record['decided_by']})")
+        return next(t for t in trained if t["label"] == record["best"])
+
+    def choose_start_view(self, ply: Path) -> None:
+        """Claude picks the view a splat opens at: the best-scoring start
+        views from different capture positions are rendered side by side, next
+        to frames of the real room, and the chosen one is written to the
+        splat's .view.json (the choice and the options to .view-choice.json)."""
+        from PIL import Image, ImageDraw, ImageFont
+        from splat_export import start_views
+        from splat_render import render
+        from splat_tools import read_splat
+
+        if not self.advisor.available or not ply.exists():
+            return
+        views = start_views(self.space, ply, START_VIEW_CHOICES)
+        if len(views) < 2:
+            return
+        arr, _ = read_splat(ply)
+        letters = "ABCDEFGH"[:len(views)]
+        cols = 3
+        rows = (len(views) + cols - 1) // cols
+        w, h = START_VIEW_TILE
+        sheet = Image.new("RGB", (cols * (w + 8), rows * (h + 30)), "white")
+        draw = ImageDraw.Draw(sheet)
+        font = ImageFont.load_default(size=20)
+        for n, (letter, view) in enumerate(zip(letters, views)):
+            image = render(arr, view["viewMatrix"], w, h, view["fovY"])
+            x, y = (n % cols) * (w + 8), (n // cols) * (h + 30)
+            sheet.paste(Image.fromarray(image), (x, y + 30))
+            draw.text((x + 4, y + 4), letter, fill="black", font=font)
+        sheet_path = self.space / f"{ply.stem}-start-views.png"
+        sheet.save(sheet_path)
+        verdict = self.advisor.ask_json(START_VIEW_PROMPT.format(count=len(views), letters=", ".join(letters)),
+                                        [sheet_path] + self.room_frames(2), max_tokens=1000)
+        pick = verdict.get("best") if verdict else None
+        chosen = views[letters.index(pick)] if pick in letters else views[0]
+        view_path = ply.with_name(ply.stem + ".view.json")
+        view_path.write_text(json.dumps({**chosen, "chosenBy": "claude" if pick in letters else "score"}) + "\n")
+        ply.with_name(ply.stem + ".view-choice.json").write_text(json.dumps(
+            {"options": {letter: {k: v[k] for k in ("frame", "turn", "backMetres", "coverage",
+                                                    "blurShare", "score")}
+                         for letter, v in zip(letters, views)},
+             "claude": verdict, "chosen": pick if pick in letters else "A"}, indent=1) + "\n")
+        if verdict:
+            self.judged("start view", {"splat": ply.name, **verdict},
+                        f"{ply.name} opens at {pick} (near {chosen['frame']}): {verdict.get('why', '')}")
 
     def choose_best(self) -> None:
         """Compare every finished splat of this video (this run's trained and
@@ -1043,11 +1386,10 @@ class Agent:
         if run_is_over:
             self.capture_advice(recon, dense, shapes, row)
             for j in self.judgements:
-                if j["stage"] == "densify" and j.get("missing"):
+                if j["stage"] == "densify" and j.get("missed") and not j.get("applied"):
                     self.advice.append(
-                        "The detector missed " + ", ".join(map(str, j["missing"][:6]))
-                        + ". Adding those words to VOCABULARY in pipeline/semantics.py "
-                        "would let them become furniture instead of leftover points.")
+                        "The detector missed " + ", ".join(map(str, j["missed"][:6]))
+                        + ", so they stay leftover points instead of furniture.")
                 if j["stage"] == "blender" and j.get("plausible") is False:
                     self.advice += [a for a in (j.get("advice") or [])[:3] if isinstance(a, str)]
             if self.advisor.available:
@@ -1128,13 +1470,17 @@ def main() -> int:
                         help="run each stage once, never retry with other settings")
     parser.add_argument("--no-claude", action="store_true",
                         help="decide from the measurements alone, without asking Claude")
+    parser.add_argument("--long-splat", choices=["auto", "on", "off"], default="auto",
+                        help="also train a long splat and let Claude keep the better one "
+                             "(auto: only with a CUDA GPU; about 2.5 hours on an 8 GB Mac)")
     args = parser.parse_args()
 
     source = Path(args.source).expanduser()
     if not source.exists():
         sys.exit(f"Source not found: {source}")
     agent = Agent(source, args.name, args.fps, not args.no_splat,
-                  allow_retry=not args.no_retry, use_claude=not args.no_claude)
+                  allow_retry=not args.no_retry, use_claude=not args.no_claude,
+                  long_splat={"auto": None, "on": True, "off": False}[args.long_splat])
     if args.stage:
         stages = [args.stage]
     else:

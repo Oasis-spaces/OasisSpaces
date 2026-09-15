@@ -41,6 +41,7 @@ from pointcloud import (
 )
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff", ".bmp"}
+GRID_LONG_SIDE = 768       # the small copies of every extracted frame (video-grid/)
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 # Largest believable camera move between consecutive video frames, as a
 # fraction of the scene's size (coherent models stay under ~0.1).
@@ -198,7 +199,14 @@ def extract_frames(video: Path, images_dir: Path, fps: float, log: Path) -> None
     Motion blur varies frame to frame (hand shake, walking bounce); dense
     extraction plus sharpness selection means a fast or shaky video still
     contributes its crispest moments at the requested spacing.
+
+    The frames not kept are real photos no splat is trained on, so a small
+    copy of every candidate goes to workspace/video-grid/ with frames.json
+    saying which grid step each kept frame came from: tools/splat_choose.py
+    judges splats at those in-between moments without needing the video.
     """
+    from PIL import Image
+
     oversample = 3
     print(f"Extracting frames from {video.name} at {fps} fps "
           f"({oversample}x oversampled, keeping sharpest per window)")
@@ -209,15 +217,24 @@ def extract_frames(video: Path, images_dir: Path, fps: float, log: Path) -> None
         log,
     )
     candidates = sorted(images_dir.glob("candidate_*.jpg"))
-    kept = 0
+    grid_dir = images_dir.parent / "video-grid"
+    grid_dir.mkdir(parents=True, exist_ok=True)
+    for step, path in enumerate(candidates):
+        img = Image.open(path)
+        img.thumbnail((GRID_LONG_SIDE, GRID_LONG_SIDE))
+        img.convert("RGB").save(grid_dir / f"step_{step:05d}.jpg", quality=90)
+    kept, steps = 0, {}
     for start in range(0, len(candidates), oversample):
         window = candidates[start:start + oversample]
         best = max(window, key=sharpness)
         kept += 1
+        steps[f"frame_{kept:05d}.jpg"] = start + window.index(best)
         best.rename(images_dir / f"frame_{kept:05d}.jpg")
         for other in window:
             if other.exists():
                 other.unlink()
+    (grid_dir / "frames.json").write_text(json.dumps(
+        {"fps": fps * oversample, "frames": steps}, indent=1) + "\n")
     print(f"Kept {kept} sharpest frames of {len(candidates)} candidates")
 
 
