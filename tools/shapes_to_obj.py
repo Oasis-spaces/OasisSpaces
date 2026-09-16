@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+if len(sys.argv) < 2:
+    sys.exit(__doc__)
 space = Path(sys.argv[1])
 shapes = json.loads((space / "shapes.json").read_text())
 
