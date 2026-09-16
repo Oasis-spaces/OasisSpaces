@@ -110,9 +110,20 @@ class Colab:
     def cli(self, *args: str, timeout: float = 900) -> subprocess.CompletedProcess:
         return subprocess.run(["colab", *args], capture_output=True, text=True, timeout=timeout)
 
-    def alive(self) -> bool:
-        listed = self.cli("sessions", timeout=120)
-        return listed.returncode == 0 and self.session in listed.stdout
+    def alive(self, checks: int = 1) -> bool:
+        """The session is listed. With checks > 1 it must be missing that many
+        times in a row, a minute apart, to count as gone: one failed listing
+        on a shaky connection is not a dead session."""
+        for n in range(checks):
+            try:
+                listed = self.cli("sessions", timeout=120)
+                if listed.returncode == 0 and self.session in listed.stdout:
+                    return True
+            except subprocess.TimeoutExpired:
+                pass
+            if n + 1 < checks:
+                time.sleep(60)
+        return False
 
     def create(self, gpu: str) -> None:
         log(f"creating Colab session {self.session} ({gpu})")
@@ -138,7 +149,7 @@ class Colab:
                     return "\n".join(line for line in result.stdout.splitlines()
                                      if not line.startswith("[colab]"))
                 detail = (result.stderr[-1200:] + result.stdout[-600:]) if result else "no reply"
-                if "not found" in detail and "Session" in detail or not self.alive():
+                if "not found" in detail and "Session" in detail and not self.alive(checks=3):
                     raise SessionEnded(f"the Colab session {self.session} has ended")
                 log(f"  colab exec did not answer (attempt {attempt + 1}/{EXEC_ATTEMPTS}); retrying")
                 time.sleep(30 * (attempt + 1))

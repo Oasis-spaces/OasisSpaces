@@ -1505,7 +1505,10 @@ class Agent:
                                 self.shape_metrics())
         row = evaluate(self.space) if (self.space / "workspace").exists() else {}
         last = "shapes" if not self.do_splat else "splat"
-        run_is_over = stopped_at is not None or stages[-1] in (last, "splat")
+        # Stage 4 run step by step is over only after its last step; advice after
+        # every step would ask Claude the same question again each time.
+        splat_done = stages[-1] == "splat" and self.splat_steps[-1] == SPLAT_STEPS[-1]
+        run_is_over = stopped_at is not None or (stages[-1] == last and last != "splat") or splat_done
 
         self.advice = []
         if run_is_over:
