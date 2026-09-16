@@ -53,6 +53,7 @@ from plan_image import draw_plan  # noqa: E402
 from object_frames import draw_object_frames  # noqa: E402
 from semantics import MAX_OBJECTS, ROLES, Vocabulary, clean_name, room_vocabulary  # noqa: E402
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
+from pointcloud import space_model_dir  # noqa: E402
 from reconstruct import (  # noqa: E402
     camera_path_jump, registered_images, solved_models,
 )
@@ -265,8 +266,10 @@ class Agent:
 
         try:
             shapes = json.loads((self.space / "shapes.json").read_text())
-            model = Path(self.densify_metrics()["model_dir"])
+            model = space_model_dir(self.space)
             room = shapes["room"]
+            if model is None:
+                return self.sample_frames(count)
         except (OSError, KeyError, ValueError):
             return self.sample_frames(count)
         walls = [p for p in shapes["planes"] if p["kind"] == "wall" and p.get("build", True)]

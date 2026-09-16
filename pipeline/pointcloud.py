@@ -25,6 +25,29 @@ _PLY_TYPES = {
 }
 
 
+
+def space_model_dir(space: Path) -> Path | None:
+    """The camera model a space's dense cloud was made from.
+
+    densify.json records it as an absolute path, which is wrong as soon as the
+    space moves to another machine (a Colab VM, another Mac, a bundle). Then
+    the model of the same name in the space's own workspace/sparse is used,
+    and without a record, the largest model there."""
+    import json
+
+    space = Path(space)
+    sparse = space / "workspace" / "sparse"
+    meta = space / "densify.json"
+    candidates = []
+    if meta.exists():
+        recorded = json.loads(meta.read_text()).get("model_dir")
+        if recorded:
+            candidates += [Path(recorded), sparse / Path(recorded).name]
+    if sparse.exists():
+        candidates += sorted((d for d in sparse.iterdir() if (d / "points3D.bin").exists()),
+                             key=lambda d: -(d / "points3D.bin").stat().st_size)
+    return next((d for d in candidates if (d / "images.bin").exists()), None)
+
 @dataclass
 class PointCloud:
     points: np.ndarray  # (N, 3) float32

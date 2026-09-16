@@ -27,7 +27,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from densify import read_images_bin
-from pointcloud import load_ply
+from pointcloud import load_ply, space_model_dir
 from semantics import room_vocabulary
 
 
@@ -240,9 +240,9 @@ def main():
     models = [d for d in sparse_dir.iterdir() if (d / "points3D.bin").exists()] \
         if sparse_dir.exists() else []
     densify_meta = space / "densify.json"
-    if densify_meta.exists():
+    if densify_meta.exists() and space_model_dir(space) is not None:
         # The dense cloud lives in the frame of the model densify used.
-        up = estimate_up(Path(json.loads(densify_meta.read_text())["model_dir"]))
+        up = estimate_up(space_model_dir(space))
     elif models:
         up = estimate_up(max(models, key=lambda d: (d / "points3D.bin").stat().st_size))
     else:
@@ -392,8 +392,7 @@ def main():
 
     # What stands behind each wall (see FRONT_MIN_METRES). The cameras are in
     # the room, so "behind" is the side away from them.
-    model_dir = Path(json.loads(densify_meta.read_text())["model_dir"]) \
-        if densify_meta.exists() else None
+    model_dir = space_model_dir(space) if densify_meta.exists() else None
     if model_dir is not None and (model_dir / "images.bin").exists():
         cams = np.array([-v["R"].T @ v["t"] for v in
                          read_images_bin(model_dir / "images.bin").values()]) @ world.T

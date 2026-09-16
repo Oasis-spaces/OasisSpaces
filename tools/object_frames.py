@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
+from pointcloud import space_model_dir  # noqa: E402
 from semantics import room_vocabulary  # noqa: E402
 
 TILE_W, TILE_H = 300, 400
@@ -43,9 +44,7 @@ def best_frames(space: Path, boxes: dict[int, dict], per_box: int = 2) -> dict[i
     the best frames first, at least a tenth of the video apart."""
     shapes = json.loads((space / "shapes.json").read_text())
     meta = json.loads((space / "densify.json").read_text())
-    model = Path(meta["model_dir"])
-    if not (model / "images.bin").exists():
-        model = space / "workspace" / "sparse" / model.name
+    model = space_model_dir(space)
     world = np.array(shapes["world"])
     cameras = read_cameras_bin(model / "cameras.bin")
     detections = meta.get("detections", {})

@@ -83,16 +83,11 @@ GRID = (32, 20)          # screen cells for scoring
 
 def model_dir(space: Path) -> Path | None:
     """The camera model the splat was trained with."""
-    candidates = []
-    meta = space / "densify.json"
-    if meta.exists():
-        named = Path(json.loads(meta.read_text())["model_dir"])
-        candidates += [named, space / "workspace" / "sparse" / named.name]
-    candidates += sorted((p.parent for p in (space / "workspace" / "sparse").glob("*/images.bin")),
-                         key=lambda d: -(d / "images.bin").stat().st_size)
-    candidates.append(space / "splat-project")
+    from pointcloud import space_model_dir
+
+    candidates = [space_model_dir(space), space / "splat-project"]
     return next((d for d in candidates
-                 if (d / "images.bin").exists() and (d / "points3D.bin").exists()), None)
+                 if d is not None and (d / "images.bin").exists() and (d / "points3D.bin").exists()), None)
 
 
 def look_matrix(position: np.ndarray, forward: np.ndarray, up: np.ndarray) -> np.ndarray:

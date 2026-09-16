@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from pointcloud import PointCloud, load_ply, voxel_downsample
+from pointcloud import PointCloud, load_ply, space_model_dir, voxel_downsample
 
 
 def write_points3d_bin(cloud: PointCloud, path: Path) -> None:
@@ -64,14 +64,10 @@ def main() -> None:
     args = parser.parse_args()
 
     space = Path(args.space).resolve()
-    densify_meta = space / "densify.json"
-    if densify_meta.exists():
-        # The dense cloud lives in the frame of the model densify used.
-        model_dir = Path(json.loads(densify_meta.read_text())["model_dir"])
-    else:
-        models = [d for d in (space / "workspace" / "sparse").iterdir()
-                  if (d / "points3D.bin").exists()]
-        model_dir = max(models, key=lambda d: (d / "points3D.bin").stat().st_size)
+    # The dense cloud lives in the frame of the model densify used.
+    model_dir = space_model_dir(space)
+    if model_dir is None:
+        sys.exit(f"no camera model in {space / 'workspace' / 'sparse'}")
     print(f"Cameras from {model_dir}")
 
     project = space / "splat-project"
