@@ -125,10 +125,25 @@ class Colab:
                 time.sleep(60)
         return False
 
-    def create(self, gpu: str) -> None:
-        log(f"creating Colab session {self.session} ({gpu})")
-        made = self.cli("new", "-s", self.session, "--gpu", gpu, timeout=900)
-        if made.returncode != 0 or not self.alive():
+    def create(self, gpu: str, wait_minutes: float = 0) -> None:
+        """A new session. Colab answers "Service Unavailable" when it has no GPU
+        to give (none free, or the free tier's allowance is used up for now);
+        with wait_minutes, ask again every 10 minutes until then."""
+        deadline = time.time() + wait_minutes * 60
+        while True:
+            log(f"creating Colab session {self.session} ({gpu})")
+            made = self.cli("new", "-s", self.session, "--gpu", gpu, timeout=900)
+            if made.returncode == 0 and self.alive():
+                return
+            text = made.stdout + made.stderr
+            if "Service Unavailable" in text and time.time() < deadline:
+                log(f"  Colab has no {gpu} to give right now; asking again in 10 minutes "
+                    f"(until {time.strftime('%H:%M', time.localtime(deadline))})")
+                time.sleep(600)
+                continue
+            if "Service Unavailable" in text:
+                sys.exit(f"Colab has no {gpu} to give (none free, or the free allowance is used up "
+                         "for now). Try later, or pass --wait-gpu <minutes>.")
             sys.exit(f"could not create the session:\n{made.stdout[-2000:]}\n{made.stderr[-2000:]}")
 
     def python(self, code: str, timeout: float = 300) -> str:
@@ -551,6 +566,8 @@ def main() -> None:
                         help="stages 1-3 and stage 4's steps to run, in order")
     parser.add_argument("--agent-args", default="", help="extra pipeline/agent.py arguments")
     parser.add_argument("--keep-session", action="store_true", help="do not stop the session at the end")
+    parser.add_argument("--wait-gpu", type=float, default=0, metavar="MINUTES",
+                        help="when Colab has no GPU to give, keep asking for this long")
     args = parser.parse_args()
 
     video = Path(args.video).resolve()
@@ -559,7 +576,7 @@ def main() -> None:
     vm = Colab(args.session)
     fresh = not vm.alive()
     if fresh:
-        vm.create(args.gpu)
+        vm.create(args.gpu, args.wait_gpu)
     log("code: " + upload_code(vm))
     needed = sorted({cell for step in args.stages for cell in NEEDS[step]}, key=INSTALL_CELLS.index)
     installed = all(vm.finished(c) == 0 for c in needed)
