@@ -385,11 +385,18 @@ def wait_installs(vm: Colab, needed: list[str]) -> None:
             time.sleep(30)
 
 
-def upload_space(vm: Colab, name: str) -> None:
-    """A space as it stands here, for a new session carrying on from a later stage."""
+# Outputs a stage-4 step makes again, left out when a new session carries on.
+REBUILT_BY_STAGE4 = ("splat.ply", "splat.splat", "splat-filled.ply", "splat-filled.splat")
+
+
+def upload_space(vm: Colab, name: str, first_step: str) -> None:
+    """A space as it stands here, for a new session carrying on from a later
+    step. Files the VM then has are marked as fetched, so they do not come
+    back with the step's results."""
     space = ROOT / "spaces" / name
     if not space.exists():
         return
+    skip_outputs = first_step in SPLAT_STEPS
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / f"{name}.tar"
         saves = sorted((int(p.stem.rsplit("_", 1)[1]), p.name) for p in space.glob("splat-long_*.ply")
@@ -398,14 +405,18 @@ def upload_space(vm: Colab, name: str) -> None:
         with tarfile.open(archive, "w") as tar:
             tar.add(space, arcname=name,
                     filter=lambda info: None if (any(skip in info.name for skip in NOT_FETCHED)
-                                                 or info.name in superseded) else info)
+                                                 or info.name in superseded
+                                                 or (skip_outputs and info.name in
+                                                     {f"{name}/{f}" for f in REBUILT_BY_STAGE4}))
+                    else info)
         vm.put(archive, f"{REMOTE_WORK}/space-{name}.tar")
     vm.shell(f"mkdir -p {REMOTE_ROOT}/spaces && tar -xf {REMOTE_WORK}/space-{name}.tar -C {REMOTE_ROOT}/spaces",
              timeout=600)
+    fetch_space(vm, name, mark_only=True)
     log(f"  uploaded spaces/{name}")
 
 
-def fetch_space(vm: Colab, name: str) -> int:
+def fetch_space(vm: Colab, name: str, mark_only: bool = False) -> int:
     """Bring the space's new and changed files here (all of them, the dense
     cloud included), so nothing is lost if the session dies."""
     manifest_remote = f"{REMOTE_WORK}/fetched-{name}.json"
@@ -443,7 +454,9 @@ print(json.dumps(changed))
     if not counted:
         raise RuntimeError(f"could not list the new files of spaces/{name} on the VM")
     count = int(counted[-1].split()[1])
-    if not count:
+    if mark_only or not count:
+        # Nothing to bring (or the files came from here): the listing becomes the record.
+        vm.shell(f"mv {manifest_remote}.next {manifest_remote}", timeout=120)
         return 0
     local_space = ROOT / "spaces" / name
     local_space.mkdir(parents=True, exist_ok=True)
@@ -542,13 +555,20 @@ def main() -> None:
     if not installed:
         start_installs(vm, needed)   # skips anything installed or still running
     video_remote = f"{REMOTE_VIDEOS}/{video.name}"
-    log(f"video: {video.name}")
-    vm.put(video, video_remote)
+    grid = ROOT / "spaces" / args.name / "workspace" / "video-grid"
+    if "reconstruct" not in args.stages and any(grid.glob("step_*.jpg")):
+        # Only stage 1 reads the video; later steps judge splats from the frames
+        # grid the space already has. The agent still needs the path to exist.
+        vm.shell(f"mkdir -p {REMOTE_VIDEOS} && touch {shlex.quote(video_remote)}", timeout=120)
+        log(f"video: not uploaded (stage 1 is not run and spaces/{args.name} has its frames grid)")
+    else:
+        log(f"video: {video.name}")
+        vm.put(video, video_remote)
     if args.stages[0] != STEPS[0]:
         remote_has = vm.shell(f"test -f {REMOTE_ROOT}/spaces/{args.name}/agent-report.json && echo yes || true",
                               timeout=120).strip() == "yes"
         if not remote_has:
-            upload_space(vm, args.name)
+            upload_space(vm, args.name, args.stages[0])
         else:
             # Carrying on in the same session: bring what the VM has here first.
             log(f"  fetched {fetch_space(vm, args.name)} file(s) already on the VM")
