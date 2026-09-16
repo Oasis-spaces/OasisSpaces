@@ -22,3 +22,9 @@ videos/
 
 # OpenSplat built on Colab, reused by tools/colab_pipeline.py
 tools/colab-cache/
+
+# Bundles built for another machine
+bundle/
+
+# Logs of pipeline runs (tools/colab_pipeline.py)
+runs/
