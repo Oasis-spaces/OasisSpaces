@@ -22,8 +22,19 @@
 	<string>1</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_oasisstation._tcp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Oasis Capture films the room and tracks how the phone moves, to guide you while you record.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Oasis Capture sends your recordings to your Mac on the same Wi-Fi and shows the results it makes.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>

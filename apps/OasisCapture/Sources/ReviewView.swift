@@ -57,6 +57,10 @@ struct ReviewView: View {
                     }
                 }
 
+                if let folder = result.folder {
+                    SendSection(folder: folder)
+                }
+
                 Section("Files") {
                     if let folder = result.folder {
                         Text("Saved in Files › On My iPhone › Oasis Capture › Captures › \(folder.lastPathComponent)")
@@ -125,6 +129,43 @@ private struct Stat: View {
                 Image(systemName: good ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                     .foregroundStyle(good ? .green : .orange)
             }
+        }
+    }
+}
+
+/// Name the room and send the recording to the paired Mac for analysis.
+private struct SendSection: View {
+    @ObservedObject var link = LinkStore.shared
+    let folder: URL
+    @State private var name = ""
+
+    var body: some View {
+        Section {
+            if link.paired == nil {
+                Label("Pair with your Mac in the Mac tab to turn this into a 3D room.", systemImage: "laptopcomputer")
+                    .foregroundStyle(.secondary)
+            } else if let upload = link.upload, upload.recording == folder {
+                if let error = upload.error {
+                    Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(upload.step)
+                        ProgressView(value: upload.progress)
+                    }
+                }
+            } else {
+                TextField("Room name, e.g. Bedroom", text: $name)
+                Button {
+                    let room = name.trimmingCharacters(in: .whitespaces)
+                    Task { await link.send(recording: folder, name: room.isEmpty ? "Room" : room) }
+                } label: {
+                    Label("Send to \(link.paired?.name ?? "Mac")", systemImage: "arrow.up.forward.app")
+                }
+            }
+        } header: {
+            Text("Make the 3D room")
+        } footer: {
+            Text("The Mac analyses it. Follow it and view the result in the Scans tab.")
         }
     }
 }

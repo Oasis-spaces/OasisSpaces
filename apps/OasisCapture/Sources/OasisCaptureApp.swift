@@ -11,18 +11,33 @@ struct OasisCaptureApp: App {
     }
 }
 
-/// Tips first, then the camera; the review sheet opens when a recording is saved.
+/// Scan (tips, then the camera), Scans (send to the Mac, follow the analysis,
+/// see results) and Mac (pairing).
 struct RootView: View {
     @State private var capturing = false
+    @State private var tab = 0
 
     var body: some View {
-        NavigationStack {
-            TipsView(tips: RuleConfig.bundled().tips) { capturing = true }
-                .navigationDestination(isPresented: $capturing) {
-                    CaptureScreen()
-                        .navigationBarBackButtonHidden(true)
-                        .toolbar(.hidden, for: .navigationBar)
-                }
+        TabView(selection: $tab) {
+            NavigationStack {
+                TipsView(tips: RuleConfig.bundled().tips) { capturing = true }
+                    .navigationDestination(isPresented: $capturing) {
+                        CaptureScreen()
+                            .navigationBarBackButtonHidden(true)
+                            .toolbar(.hidden, for: .navigationBar)
+                    }
+            }
+            .toolbar(capturing ? .hidden : .visible, for: .tabBar)
+            .tabItem { Label("Scan", systemImage: "camera.viewfinder") }
+            .tag(0)
+
+            ScansView()
+                .tabItem { Label("Scans", systemImage: "cube.transparent") }
+                .tag(1)
+
+            MacView()
+                .tabItem { Label("Mac", systemImage: "laptopcomputer") }
+                .tag(2)
         }
     }
 }
