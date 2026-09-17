@@ -318,6 +318,52 @@ Reply with a single JSON object and nothing else:
 {{"ranking": [letters best first], "best": letter, "reasons": {{letter: one sentence on what is good or bad about it}}, "confidence": "high" | "medium" | "low"}}"""
 
 
+# Claude's pick stands unless it measures clearly worse at the new views than
+# another candidate that is up for choice: lower on both of these at once.
+GUARD_NEW_SSIM = 0.01
+GUARD_NEW_PSNR = 0.3
+
+
+def published_best(video: Path) -> dict | None:
+    """The splat splats/<video>/ currently publishes as the video's best, as a
+    candidate ({label, space, ply}); None before the first choice."""
+    folders = sorted((ROOT / "splats").glob(f"{video.stem}*")) if (ROOT / "splats").exists() else []
+    record = folders[0] / "choice.json" if folders else None
+    if not record or not record.exists():
+        return None
+    choice = json.loads(record.read_text())
+    best = next((c for c in choice.get("candidates", {}).values() if c.get("label") == choice.get("best")), None)
+    if not best or not Path(best["splat"]).exists():
+        return None
+    ply = Path(best["splat"])
+    space = ply.parent
+    return {"label": f"published best ({best['label']})", "space": space, "ply": ply}
+
+
+def guarded(record: dict, choosable: set[str]) -> dict:
+    """Keep Claude's pick among the `choosable` labels unless another choosable
+    candidate beats it at the new views by GUARD_NEW_SSIM and GUARD_NEW_PSNR
+    both. Sets record["chosen"] (a choosable label) and, when the numbers
+    overrule, record["overruled"]."""
+    rows = {c["label"]: c for c in record["candidates"].values()}
+    ranking = [record["candidates"][L]["label"] for L in ((record.get("claude") or {}).get("ranking") or [])
+               if L in record["candidates"]]
+    by_claude = next((label for label in ranking if label in choosable), None)
+    new_view = lambda label: (rows[label].get("new_ssim", rows[label]["ssim"]),
+                              rows[label].get("new_psnr", rows[label]["psnr"]))
+    by_numbers = max(choosable, key=new_view)
+    chosen = by_claude or by_numbers
+    if by_claude and by_claude != by_numbers:
+        (s_pick, p_pick), (s_num, p_num) = new_view(by_claude), new_view(by_numbers)
+        if s_num - s_pick > GUARD_NEW_SSIM and p_num - p_pick > GUARD_NEW_PSNR:
+            chosen = by_numbers
+            record["overruled"] = (f"Claude picked {by_claude}, but at the new views it measures "
+                                   f"SSIM {s_pick:.3f} / {p_pick:.1f} dB against {s_num:.3f} / {p_num:.1f} dB "
+                                   f"for {by_numbers}; kept {by_numbers}")
+    record["chosen"] = chosen
+    return record
+
+
 def judge(video: Path, candidates: list[dict], out_dir: Path, log=print, advisor=None) -> dict:
     """Compare `candidates` ({label, space, ply}) with sheets in `out_dir`;
     Claude ranks them, the measurements decide without Claude. Returns the

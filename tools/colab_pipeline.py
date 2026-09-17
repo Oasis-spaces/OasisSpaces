@@ -565,7 +565,8 @@ def main() -> None:
     parser.add_argument("--name", required=True, help="space name (spaces/<name> here and on the VM)")
     parser.add_argument("--session", default="oasis", help="Colab CLI session name")
     parser.add_argument("--gpu", default="T4")
-    parser.add_argument("--stages", nargs="+", choices=STEPS, default=STEPS,
+    parser.add_argument("--stages", nargs="+", choices=STEPS,
+                        default=[step for step in STEPS if step != "train-long"],
                         help="stages 1-3 and stage 4's steps to run, in order")
     parser.add_argument("--agent-args", default="", help="extra pipeline/agent.py arguments")
     parser.add_argument("--keep-session", action="store_true", help="do not stop the session at the end")
@@ -619,6 +620,8 @@ def main() -> None:
                              stdout=open(relay_log, "a"), stderr=subprocess.STDOUT)
     log(f"Claude relay running here (log: {relay_log.relative_to(ROOT)})")
     extra = shlex.split(args.agent_args)
+    if "train-long" in args.stages and "--long-splat" not in extra:
+        extra += ["--long-splat", "on"]   # asked for by name, so train it
     done_steps: list[str] = []
     try:
         for step in args.stages:

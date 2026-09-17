@@ -95,8 +95,9 @@ FILL_MIN_BLOBS = 500    # smaller fills are not worth a review (and are not kept
 # quick one, and a long one at twice the resolution, sharper where the video
 # saw clearly but able to overfit the frames it trained on. Claude compares
 # them at real video frames neither was trained on.
-# The long run takes minutes on a CUDA GPU (Colab) but about 2.5 hours on an
-# 8 GB Mac, so by default it only runs where there is CUDA.
+# The long run (about 40 minutes on a Colab T4, 2.5 hours on an 8 GB Mac) is
+# off unless --long-splat on: on both test videos it scored worse than the
+# quick run at the views it did not train on.
 SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2)}   # steps, image downscale
 # Stage 4 in steps that can each run on their own (a Colab session can die at
 # any time): every step keeps its results in the space, and the next one
@@ -231,7 +232,9 @@ class Agent:
         self.fps = fps
         self.do_splat = do_splat
         self.cuda = shutil.which("nvidia-smi") is not None
-        self.long_splat = self.cuda if long_splat is None else long_splat
+        # The long run measured worse than the quick one on both test videos
+        # (Sep 2026), so it only runs when asked for.
+        self.long_splat = bool(long_splat)
         self.trained_elsewhere = trained_elsewhere
         self.retrain = retrain
         self.splat_steps = splat_steps or list(SPLAT_STEPS)
@@ -1035,8 +1038,7 @@ class Agent:
         save trained from this dense cloud."""
         if self.trained_elsewhere or not self.long_splat:
             self.decide("splat", "skip", "no long training here"
-                        + ("" if self.trained_elsewhere else
-                           " (no CUDA GPU; --long-splat on to train it anyway)"))
+                        + ("" if self.trained_elsewhere else " (--long-splat on to train it)"))
             return True
         if not self.retrain and self.trained_splat("long"):
             self.decide("splat", "reuse", "splat-long.ply is already trained from this dense cloud")
@@ -1101,18 +1103,31 @@ class Agent:
 
     def choose_training(self, trained: list[dict]) -> dict:
         """Claude compares the trained splats at trained and new views
-        (tools/splat_choose.py) and the better one becomes splat.ply."""
-        from splat_choose import judge
+        (tools/splat_choose.py), in context: the video's currently published
+        best splat is shown beside them as a reference (Claude judged every
+        splat of a video together reliably, and one pair alone less so). Its
+        pick among this run's splats stands unless it measures clearly worse at
+        the new views (splat_choose.guarded); the choice becomes splat.ply."""
+        from splat_choose import guarded, judge, published_best
 
-        record = judge(self.source, trained, self.space / "training-compare",
+        reference = self.safe(published_best, self.source)
+        # A published best from this same space is one of this run's own splats.
+        shown = trained + ([reference] if reference and reference["space"].resolve() != self.space.resolve()
+                           else [])
+        record = judge(self.source, shown, self.space / "training-compare",
                        log=lambda text: print("   " + text), advisor=self.advisor)
+        guarded(record, {t["label"] for t in trained})
         (self.space / "splat-training.json").write_text(json.dumps(record, indent=1) + "\n")
         verdict = record.get("claude") or {}
         self.judged("splat training", {"ranking": verdict.get("ranking"),
                                        "reasons": verdict.get("reasons"),
-                                       "candidates": record["candidates"]},
-                    f"kept {record['best']} (decided by {record['decided_by']})")
-        return next(t for t in trained if t["label"] == record["best"])
+                                       "candidates": record["candidates"],
+                                       "overruled": record.get("overruled")},
+                    f"kept {record['chosen']}"
+                    + (f" ({record['overruled']})" if record.get("overruled") else
+                       f" (decided by {record['decided_by']})")
+                    + (f"; best of all shown: {record['best']}" if len(shown) > len(trained) else ""))
+        return next(t for t in trained if t["label"] == record["chosen"])
 
     def choose_start_view(self, ply: Path) -> None:
         """Claude picks the view a splat opens at: the best-scoring start
@@ -1607,9 +1622,9 @@ def main() -> int:
     parser.add_argument("--retrain", action="store_true",
                         help="train the splats again even if ones trained from the current "
                              "dense cloud are already in the space")
-    parser.add_argument("--long-splat", choices=["auto", "on", "off"], default="auto",
-                        help="also train a long splat and let Claude keep the better one "
-                             "(auto: only with a CUDA GPU; about 2.5 hours on an 8 GB Mac)")
+    parser.add_argument("--long-splat", choices=["on", "off"], default="off",
+                        help="also train a long splat (30,000 steps at half resolution) for Claude "
+                             "to choose from; off by default, as it scored worse on both test videos")
     args = parser.parse_args()
 
     source = Path(args.source).expanduser()
@@ -1617,7 +1632,7 @@ def main() -> int:
         sys.exit(f"Source not found: {source}")
     agent = Agent(source, args.name, args.fps, not args.no_splat,
                   allow_retry=not args.no_retry, use_claude=not args.no_claude,
-                  long_splat={"auto": None, "on": True, "off": False}[args.long_splat],
+                  long_splat=args.long_splat == "on",
                   trained_elsewhere=args.trained_elsewhere, retrain=args.retrain,
                   splat_steps=args.splat_steps)
     if args.stage:

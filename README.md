@@ -178,14 +178,18 @@ the agent's judgement:
 5. `pipeline/splat_seed.py` then `tools/opensplat` — a Gaussian splat. The
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's
    sparse points, so low-texture walls start filled in. The agent trains a
-   quick splat (10,000 steps on quarter-size frames, minutes) and, with a CUDA
-   GPU or `--long-splat on`, a long one (30,000 steps on half-size frames;
-   sharper where the video saw clearly, but it can overfit the frames it
-   learned from, and about 2.5 hours on an 8 GB Mac). `tools/splat_choose.py`
+   quick splat (10,000 steps on quarter-size frames, minutes). With
+   `--long-splat on` it also trains a long one (30,000 steps on half-size
+   frames; about 40 minutes on a Colab T4, 2.5 hours on an 8 GB Mac). It is off
+   by default: on both test videos it scored worse than the quick splat at the
+   views it did not train on. `tools/splat_choose.py`
    renders both beside the real photo at trained frames and at new views:
    real video frames between two trained frames, which neither splat saw,
    with the camera placed between its neighbours. Claude ranks them, new
-   views weighing most, and the better one becomes `splat.ply`
+   views weighing most, with the video's currently published best splat shown
+   beside them for context. Its pick becomes `splat.ply` unless it measures
+   clearly worse at the new views than the other (SSIM lower by 0.01 and PSNR
+   by 0.3 dB), in which case the numbers decide and the report says so
    (`splat-training.json` and `training-compare/` hold the evidence).
    Stage 4 runs as steps that can each run on their own
    (`--stage splat --splat-steps ...`): `train-quick`, `train-long` (saved every
