@@ -15,17 +15,20 @@ struct ScansView: View {
                 }
 
                 Section {
-                    if link.paired == nil {
-                        Label("Pair with your Mac in the Mac tab to analyse recordings.", systemImage: "laptopcomputer")
+                    if link.paired == nil && !link.cloud.isAvailable {
+                        Label("Pair with your Mac in the Mac tab, or sign in there, to analyse recordings.", systemImage: "laptopcomputer")
                             .foregroundStyle(.secondary)
-                    } else if link.jobs.isEmpty {
+                    } else if link.jobs.isEmpty && link.cloudJobs.isEmpty {
                         Text("Nothing analysed yet.").foregroundStyle(.secondary)
                     }
                     ForEach(link.jobs) { job in
                         NavigationLink(value: job.id) { JobRow(job: job) }
                     }
+                    ForEach(link.cloudJobs) { job in
+                        NavigationLink(value: job.id) { JobRow(job: job) }
+                    }
                 } header: {
-                    Text("On your Mac")
+                    Text(link.cloudJobs.isEmpty ? "On your Mac" : "On your Mac and in the cloud")
                 }
 
                 Section {
@@ -87,21 +90,32 @@ private struct RecordingRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button(link.sentJobID(folder) != nil ? "Send again" : "Send to Mac") {
+            Button(link.sentJobID(folder) != nil ? "Send again" : "Send") {
                 name = ""
                 asking = true
             }
             .buttonStyle(.bordered)
-            .disabled(link.paired == nil || (link.upload != nil && link.upload?.error == nil && (link.upload?.progress ?? 0) < 1))
+            .disabled(!(link.canSendToMac || link.canSendThroughCloud)
+                      || (link.upload != nil && link.upload?.error == nil && (link.upload?.progress ?? 0) < 1))
         }
         .alert("Name this room", isPresented: $asking) {
             TextField("Bedroom", text: $name)
-            Button("Send") {
-                let room = name.trimmingCharacters(in: .whitespaces)
-                Task { await link.send(recording: folder, name: room.isEmpty ? "Room" : room) }
+            if link.canSendToMac {
+                Button("Send to \(link.paired?.name ?? "Mac")") { send(.mac) }
+            }
+            if link.canSendThroughCloud {
+                Button(link.canSendToMac ? "Send through the cloud" : "Send") { send(.cloud) }
             }
             Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(link.canSendToMac ? "Your Mac is on this Wi-Fi. The cloud works from anywhere; your Mac picks it up when it is on."
+                 : "Goes through the cloud to whichever Mac is signed in to your account.")
         }
+    }
+
+    private func send(_ route: LinkStore.Route) {
+        let room = name.trimmingCharacters(in: .whitespaces)
+        Task { await link.send(recording: folder, name: room.isEmpty ? "Room" : room, via: route) }
     }
 
     private var title: String {
@@ -116,6 +130,9 @@ struct JobRow: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(job.name).font(.headline)
+                if job.cloud {
+                    Image(systemName: "icloud").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Image(systemName: icon).foregroundStyle(color)
             }
@@ -150,8 +167,8 @@ struct JobRow: View {
 
     private var status: String {
         switch job.status {
-        case .receiving: return "Being sent to the Mac"
-        case .queued: return "Waiting its turn on the Mac"
+        case .receiving: return job.cloud ? "Being uploaded" : "Being sent to the Mac"
+        case .queued: return job.cloud ? "Waiting for a Mac signed in to your account" : "Waiting its turn on the Mac"
         case .running: return "Step \(job.stageIndex + 1) of \(job.stages.count): \(job.message ?? job.currentStage ?? "")"
         case .done: return "Ready to view"
         case .failed: return job.message ?? "The analysis failed"
@@ -165,7 +182,7 @@ struct JobDetail: View {
     let jobID: String
     @State private var viewing = false
 
-    private var job: Job? { link.jobs.first { $0.id == jobID } }
+    private var job: Job? { link.job(jobID) }
 
     var body: some View {
         List {
@@ -212,7 +229,7 @@ struct JobDetail: View {
                         } else {
                             HStack {
                                 ProgressView()
-                                Text("Fetching the results from the Mac…").foregroundStyle(.secondary)
+                                Text(job.cloud ? "Fetching the results from the cloud…" : "Fetching the results from the Mac…").foregroundStyle(.secondary)
                             }
                         }
                     }

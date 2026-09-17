@@ -17,6 +17,7 @@ Run locally:
 import json
 import os
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -33,7 +34,16 @@ PART_BYTES = 40 * 1024 * 1024
 STAGES = ["reconstruct", "densify", "shapes", "splat"]
 SIGNED_SECONDS = 3600
 
-app = FastAPI(title="Oasis relay", version=str(VERSION))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not hasattr(app.state, "client"):
+        app.state.client = httpx.AsyncClient(timeout=30)
+    yield
+
+
+app = FastAPI(title="Oasis relay", version=str(VERSION), lifespan=lifespan)
 
 
 class Supabase:
@@ -92,12 +102,6 @@ class Supabase:
         if r.status_code >= 400:
             return []
         return [f"{prefix}/{o['name']}" for o in r.json() if o.get("name")]
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    if not hasattr(app.state, "client"):
-        app.state.client = httpx.AsyncClient(timeout=30)
 
 
 def bearer(authorization: str | None) -> str:

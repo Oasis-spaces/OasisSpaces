@@ -4,6 +4,7 @@ import CaptureRules
 @main
 struct OasisCaptureApp: App {
     init() {
+        AppLog.begin()
         // Start compiling the detector models now, so the camera is ready when opened.
         SceneRunner.shared.preload()
     }

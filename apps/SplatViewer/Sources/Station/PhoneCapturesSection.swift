@@ -20,7 +20,7 @@ struct PhoneCapturesSection: View {
             HStack(alignment: .top, spacing: 16) {
                 pairingCard
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Open Oasis Capture on your phone, on the same Wi-Fi as this Mac. It finds this Mac by itself; enter the code once to pair. Recordings you send are analysed here, and the results show on both.")
+                    Text("Open Oasis Capture on your phone, on the same Wi-Fi as this Mac. It finds this Mac by itself; enter the code once to pair. Recordings you send are analysed here, and the results show on both. Signed in on both, recordings also reach this Mac through the cloud from anywhere.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -47,6 +47,11 @@ struct PhoneCapturesSection: View {
                 }
             }
 
+            if let problem = station.cloudProblem {
+                Text(problem)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+            }
             if station.jobs.isEmpty {
                 Text("No recordings yet.")
                     .font(.system(size: 12))
@@ -128,6 +133,12 @@ private struct JobRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(job.name).font(.system(size: 13, weight: .medium))
+                    if job.cloud {
+                        Image(systemName: "icloud")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .help("Sent through the cloud")
+                    }
                     Text(job.capturedAt, style: .date)
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
@@ -147,7 +158,7 @@ private struct JobRow: View {
                 Button { station.reveal(job) } label: { Image(systemName: "folder") }
                     .help("Show in Finder")
             }
-            if job.status == .failed || job.status == .done {
+            if (job.status == .failed || job.status == .done) && !job.cloud {
                 Button { station.runAgain(job) } label: { Image(systemName: "arrow.clockwise") }
                     .help("Analyse again")
             }
@@ -169,8 +180,9 @@ private struct JobRow: View {
     private var statusText: String {
         switch job.status {
         case .receiving:
-            return "Receiving from the phone (\(job.filesReceived.count) of \(job.filesExpected.count) files)"
-        case .queued: return "Waiting for the analysis before it"
+            return job.cloud ? "The phone is uploading it (\(job.filesReceived.count) of \(job.filesExpected.count) files)"
+                : "Receiving from the phone (\(job.filesReceived.count) of \(job.filesExpected.count) files)"
+        case .queued: return job.cloud ? "In the cloud, waiting for this Mac" : "Waiting for the analysis before it"
         case .running:
             let step = "Step \(job.stageIndex + 1) of \(job.stages.count)"
             return job.message.map { "\(step): \($0)" } ?? step

@@ -30,13 +30,19 @@ xcodegen generate --quiet
 # The first paired iPhone that is connected: CoreDevice id for devicectl, UDID for xcodebuild.
 # ("unavailable" contains "available": match the connected state exactly.)
 device=$(xcrun devicectl list devices 2>/dev/null | awk '/iPhone/ && / available \(paired\)/ {for (i=1;i<=NF;i++) if ($i ~ /^[0-9A-F-]{36}$/) {print $i; exit}}')
-[ -n "$device" ] || { echo "No connected iPhone (unlock it and check it is paired)"; exit 1; }
-udid=$(xcrun devicectl device info details --device "$device" 2>/dev/null | awk '/ udid:/ {print $NF; exit}')
+if [ -n "$device" ]; then
+    udid=$(xcrun devicectl device info details --device "$device" 2>/dev/null | awk '/ udid:/ {print $NF; exit}')
+    destination="id=$udid"
+elif [ "${1:-}" = "--build-only" ]; then
+    destination="generic/platform=iOS"
+else
+    echo "No connected iPhone (unlock it and check it is paired)"; exit 1
+fi
 
 log=build/xcodebuild.log
 mkdir -p build
 xcodebuild -project OasisCapture.xcodeproj -scheme OasisCapture -configuration Debug \
-    -destination "id=$udid" -derivedDataPath build/DerivedData -allowProvisioningUpdates \
+    -destination "$destination" -derivedDataPath build/DerivedData -allowProvisioningUpdates \
     build > "$log" 2>&1 || true
 grep -E "error:|warning: .*Sources/" "$log" | sort -u || true
 if ! grep -q "BUILD SUCCEEDED" "$log"; then

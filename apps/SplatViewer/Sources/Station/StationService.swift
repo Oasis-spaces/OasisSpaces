@@ -30,6 +30,9 @@ final class StationService {
     @ObservationIgnored private var server: HTTPServer?
     @ObservationIgnored private var station: Station?
     @ObservationIgnored private let runner: PipelineRunner
+    /// Jobs sent through the cloud relay by phones on the account, when signed in.
+    @ObservationIgnored private var cloud: CloudWorker?
+    private(set) var cloudProblem: String?
 
     private init() {
         let repository = UserDefaults.standard.string(forKey: "station.repository") ?? NSHomeDirectory() + "/OasisSpaces"
@@ -70,6 +73,11 @@ final class StationService {
         } catch {
             problem = "Could not start the phone link: \(error.localizedDescription)"
         }
+        let worker = CloudWorker(cloud: CloudLink(account: account), runner: runner,
+                                 folder: support.appendingPathComponent("Cloud", isDirectory: true))
+        worker.onChange = { Task { @MainActor in StationService.shared.refresh() } }
+        cloud = worker
+        worker.start()
         refresh()
         station.resume()
         applyAccount()
@@ -91,7 +99,8 @@ final class StationService {
 
     func refresh() {
         guard let station else { return }
-        jobs = station.allJobs
+        jobs = (station.allJobs + (cloud?.jobs ?? [])).sorted { $0.createdAt > $1.createdAt }
+        cloudProblem = cloud?.problem
         pairingCode = station.pairingCode
         pairedDevices = station.pairedDevices
     }
@@ -107,12 +116,13 @@ final class StationService {
     }
 
     func runAgain(_ job: Job) {
+        guard !job.cloud else { return }
         station?.retry(job.id)
         refresh()
     }
 
     func resultURL(_ job: Job, _ name: String) -> URL? {
-        station?.resultURL(job: job.id, name: name)
+        job.cloud ? cloud?.resultURL(job: job.id, name: name) : station?.resultURL(job: job.id, name: name)
     }
 
     /// Opens the job's splat (the filled one when there is one) as a tab.

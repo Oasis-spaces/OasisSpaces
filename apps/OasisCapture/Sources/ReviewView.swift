@@ -152,10 +152,18 @@ private struct SendSection: View {
     let folder: URL
     @State private var name = ""
 
+    private func send(_ route: LinkStore.Route) {
+        let room = name.trimmingCharacters(in: .whitespaces)
+        Task { await link.send(recording: folder, name: room.isEmpty ? "Room" : room, via: route) }
+    }
+
     var body: some View {
         Section {
-            if link.paired == nil {
-                Label("Pair with your Mac in the Mac tab to turn this into a 3D room.", systemImage: "laptopcomputer")
+            if !link.canSendToMac && !link.canSendThroughCloud {
+                Label(link.paired == nil
+                      ? "Pair with your Mac in the Mac tab, or sign in there, to turn this into a 3D room."
+                      : "Your Mac is not on this Wi-Fi. Sign in (Mac tab) to send through the cloud instead.",
+                      systemImage: "laptopcomputer")
                     .foregroundStyle(.secondary)
             } else if let upload = link.upload, upload.recording == folder {
                 if let error = upload.error {
@@ -168,11 +176,19 @@ private struct SendSection: View {
                 }
             } else {
                 TextField("Room name, e.g. Bedroom", text: $name)
-                Button {
-                    let room = name.trimmingCharacters(in: .whitespaces)
-                    Task { await link.send(recording: folder, name: room.isEmpty ? "Room" : room) }
-                } label: {
-                    Label("Send to \(link.paired?.name ?? "Mac")", systemImage: "arrow.up.forward.app")
+                if link.canSendToMac {
+                    Button {
+                        send(.mac)
+                    } label: {
+                        Label("Send to \(link.paired?.name ?? "Mac")", systemImage: "arrow.up.forward.app")
+                    }
+                }
+                if link.canSendThroughCloud {
+                    Button {
+                        send(.cloud)
+                    } label: {
+                        Label(link.canSendToMac ? "Send through the cloud instead" : "Send through the cloud", systemImage: "icloud.and.arrow.up")
+                    }
                 }
             }
         } header: {

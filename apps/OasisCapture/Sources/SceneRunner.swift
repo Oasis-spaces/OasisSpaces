@@ -86,7 +86,7 @@ final class SceneRunner {
             /// model it cannot take still runs fine on the GPU, just slower).
             func request(_ name: String) -> VNCoreMLRequest? {
                 guard let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc") else {
-                    print("Oasis Capture: \(name) is not in the app bundle")
+                    AppLog.write("\(name) is not in the app bundle")
                     return nil
                 }
                 for units in [MLComputeUnits.all, .cpuAndGPU] {
@@ -98,11 +98,11 @@ final class SceneRunner {
                         let request = VNCoreMLRequest(model: try VNCoreMLModel(for: model))
                         // The whole frame, squeezed to the model's input: results map back by scaling.
                         request.imageCropAndScaleOption = .scaleFill
-                        print(String(format: "Oasis Capture: %@ loaded in %.1f s (%@)", name, Date().timeIntervalSince(started),
+                        AppLog.write(String(format: "%@ loaded in %.1f s (%@)", name, Date().timeIntervalSince(started),
                                      units == .all ? "Neural Engine" : "GPU"))
                         return request
                     } catch {
-                        print("Oasis Capture: \(name) failed to load (\(units == .all ? "Neural Engine" : "GPU")): \(error)")
+                        AppLog.write("\(name) failed to load (\(units == .all ? "Neural Engine" : "GPU")): \(error)")
                     }
                 }
                 return nil
@@ -116,7 +116,7 @@ final class SceneRunner {
             self.detector = detector
             self.loadSeconds = Date().timeIntervalSince(began)
             self.lock.unlock()
-            print(String(format: "Oasis Capture: models ready in %.1f s (surfaces %@, depth %@, objects %@)",
+            AppLog.write(String(format: "models ready in %.1f s (surfaces %@, depth %@, objects %@)",
                          self.loadSeconds, segmentation == nil ? "missing" : "ok", depth == nil ? "missing" : "ok",
                          detector == nil ? "missing" : "ok"))
         }
@@ -191,7 +191,7 @@ final class SceneRunner {
             self.analysisSeconds = self.analysisSeconds == 0 ? took : self.analysisSeconds * 0.9 + took * 0.1
             self.runs += 1
             if self.runs % 20 == 0 {
-                print(String(format: "Oasis Capture: analysis %.0f ms/frame, %d things, depth %@", self.analysisSeconds * 1000,
+                AppLog.write(String(format: "analysis %.0f ms/frame, %d things, depth %@", self.analysisSeconds * 1000,
                              instances.count, understanding.depthFit.map { String(format: "fit %.2f", $0.error) } ?? "none"))
             }
             done(understanding)
@@ -214,7 +214,7 @@ final class SceneRunner {
         let anchors = predictions.shape[2].intValue
         let channels = predictions.shape[1].intValue
         guard channels == 4 + objects.classes.count + 32 else {
-            print("Oasis Capture: the object model has \(channels - 36) classes, object-classes.json \(objects.classes.count)")
+            AppLog.write("the object model has \(channels - 36) classes, object-classes.json \(objects.classes.count)")
             return []
         }
         let maskHeight = protos.shape[2].intValue, maskWidth = protos.shape[3].intValue

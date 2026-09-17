@@ -246,3 +246,35 @@ private final class NoRunner: JobRunner, @unchecked Sendable {
         JobOutcome(ok: true)
     }
 }
+
+final class CloudModelTests: XCTestCase {
+    /// The relay's JSON (Postgres dates with offsets and microseconds, the
+    /// cloud flag and parts) decodes into the same Job the Mac sends.
+    func testRelayJobDecodes() throws {
+        let json = """
+        {"id": "ab12cd34", "name": "Bedroom", "createdAt": "2026-09-18T02:40:12.123456+00:00",
+         "capturedAt": "2026-09-18T02:39:00Z", "status": "queued", "stages": ["reconstruct", "densify", "shapes", "splat"],
+         "stageIndex": 0, "message": null, "filesExpected": ["capture.json", "video.mov"],
+         "filesReceived": ["capture.json", "video.mov"], "results": [], "parts": {"video.mov": 4, "capture.json": 1},
+         "station": null, "cloud": true}
+        """
+        let job = try JSONDecoder.link.decode(Job.self, from: Data(json.utf8))
+        XCTAssertTrue(job.cloud)
+        XCTAssertEqual(job.parts["video.mov"], 4)
+        XCTAssertEqual(job.status, .queued)
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        XCTAssertEqual(utc.component(.minute, from: job.createdAt), 40)
+        XCTAssertEqual(utc.component(.hour, from: job.createdAt), 2)
+        // A Mac station's job (no cloud fields) still decodes, as before.
+        let local = try JSONDecoder.link.decode(Job.self, from: try JSONEncoder.link.encode(
+            Job(id: "x", name: "Hall", createdAt: Date(), capturedAt: Date(), status: .done, stages: [], filesExpected: [])))
+        XCTAssertFalse(local.cloud)
+        XCTAssertTrue(local.parts.isEmpty)
+    }
+
+    func testCloudConfigIsBundled() {
+        let config = CloudConfig.load()
+        XCTAssertEqual(config?.url.host, "oasis-relay.onrender.com")
+    }
+}

@@ -88,10 +88,17 @@ public struct Job: Codable, Sendable, Identifiable, Equatable {
     public var filesExpected: [String]
     public var filesReceived: [String]
     public var results: [ResultFile]
+    /// Went through the cloud relay rather than the local network.
+    public var cloud: Bool = false
+    /// Parts each input file was uploaded in (cloud jobs).
+    public var parts: [String: Int] = [:]
+    /// The Mac that took it (cloud jobs).
+    public var station: String? = nil
 
     public init(id: String, name: String, createdAt: Date, capturedAt: Date, status: JobStatus,
                 stages: [String], stageIndex: Int = 0, message: String? = nil,
-                filesExpected: [String], filesReceived: [String] = [], results: [ResultFile] = []) {
+                filesExpected: [String], filesReceived: [String] = [], results: [ResultFile] = [],
+                cloud: Bool = false, parts: [String: Int] = [:], station: String? = nil) {
         self.id = id
         self.name = name
         self.createdAt = createdAt
@@ -103,6 +110,32 @@ public struct Job: Codable, Sendable, Identifiable, Equatable {
         self.filesExpected = filesExpected
         self.filesReceived = filesReceived
         self.results = results
+        self.cloud = cloud
+        self.parts = parts
+        self.station = station
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, createdAt, capturedAt, status, stages, stageIndex, message, filesExpected, filesReceived,
+             results, cloud, parts, station
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        capturedAt = try c.decode(Date.self, forKey: .capturedAt)
+        status = try c.decode(JobStatus.self, forKey: .status)
+        stages = try c.decodeIfPresent([String].self, forKey: .stages) ?? []
+        stageIndex = try c.decodeIfPresent(Int.self, forKey: .stageIndex) ?? 0
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+        filesExpected = try c.decodeIfPresent([String].self, forKey: .filesExpected) ?? []
+        filesReceived = try c.decodeIfPresent([String].self, forKey: .filesReceived) ?? []
+        results = try c.decodeIfPresent([ResultFile].self, forKey: .results) ?? []
+        cloud = try c.decodeIfPresent(Bool.self, forKey: .cloud) ?? false
+        parts = try c.decodeIfPresent([String: Int].self, forKey: .parts) ?? [:]
+        station = try c.decodeIfPresent(String.self, forKey: .station)
     }
 
     /// 0...1 over the pipeline's stages.
@@ -130,7 +163,17 @@ public extension JSONEncoder {
 public extension JSONDecoder {
     static let link: JSONDecoder = {
         let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
+        let plain = ISO8601DateFormatter()
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        d.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            // Postgres writes "+00:00" and up to six decimals; both formatters want "Z" or an offset.
+            if let date = plain.date(from: text) ?? fractional.date(from: text) { return date }
+            let trimmed = text.replacingOccurrences(of: #"(\.\d{3})\d+"#, with: "$1", options: .regularExpression)
+            if let date = fractional.date(from: trimmed) ?? plain.date(from: trimmed) { return date }
+            throw DecodingError.dataCorruptedError(in: try decoder.singleValueContainer(), debugDescription: "not a date: \(text)")
+        }
         return d
     }()
 }

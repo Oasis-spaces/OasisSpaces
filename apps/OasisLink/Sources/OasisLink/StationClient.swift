@@ -4,6 +4,10 @@ public struct LinkError: Error, LocalizedError, Sendable {
     public var status: Int
     public var message: String
     public var errorDescription: String? { message }
+    public init(status: Int, message: String) {
+        self.status = status
+        self.message = message
+    }
 }
 
 /// Talks to one Mac station. Every call but info and pair needs the token
@@ -83,6 +87,103 @@ public final class StationClient: NSObject, @unchecked Sendable {
         return target
     }
 
+    // MARK: The cloud relay's routes (the same client, a few more calls)
+
+    public struct SignedUpload: Decodable, Sendable {
+        public var url: URL
+        public var partBytes: Int?
+    }
+
+    /// Where to PUT one part of one input file.
+    public func uploadURL(job: String, file: String, part: Int) async throws -> SignedUpload {
+        try await send("POST", "jobs/\(job)/upload", body: ["file": file, "part": String(part)])
+    }
+
+    /// All parts of one input file are up.
+    public func received(job: String, file: String, parts: Int) async throws -> Job {
+        try await send("POST", "jobs/\(job)/received", body: ["file": file, "parts": String(parts)])
+    }
+
+    /// Jobs in one state (the relay filters; a Mac station returns everything).
+    public func jobs(status: JobStatus) async throws -> [Job] {
+        try await get("jobs?status=\(status.rawValue)")
+    }
+
+    /// Takes a queued cloud job for this Mac; fails with 409 when another Mac was first.
+    public func claim(job: String, station: String) async throws -> Job {
+        try await send("POST", "jobs/\(job)/claim", body: ["station": station])
+    }
+
+    /// Signed downloads of every part of one input file, in order.
+    public func downloadURLs(job: String, file: String) async throws -> [URL] {
+        struct Reply: Decodable { var urls: [URL] }
+        let reply: Reply = try await send("POST", "jobs/\(job)/download", body: ["file": file])
+        return reply.urls
+    }
+
+    public struct Progress: Encodable, Sendable {
+        public var stageIndex: Int?
+        public var message: String?
+        public var status: JobStatus?
+        public var results: [ResultFile]?
+        public init(stageIndex: Int? = nil, message: String? = nil, status: JobStatus? = nil, results: [ResultFile]? = nil) {
+            self.stageIndex = stageIndex; self.message = message; self.status = status; self.results = results
+        }
+    }
+
+    /// Progress, outcome and results of a cloud job (from the Mac).
+    public func report(job: String, _ progress: Progress) async throws -> Job {
+        try await send("PATCH", "jobs/\(job)", body: progress)
+    }
+
+    /// Where to PUT one result file.
+    public func resultUploadURL(job: String, name: String) async throws -> URL {
+        struct Reply: Decodable { var url: URL }
+        let reply: Reply = try await send("POST", "jobs/\(job)/results/upload", body: ["name": name])
+        return reply.url
+    }
+
+    /// The Mac has the capture: the relay frees its storage.
+    public func deleteInputs(job: String) async throws {
+        let _: [String: Int] = try await send("POST", "jobs/\(job)/inputs/delete", body: [String: String]())
+    }
+
+    public func deleteJob(_ id: String) async throws {
+        var request = URLRequest(url: url("jobs/\(id)"))
+        request.httpMethod = "DELETE"
+        authorize(&request)
+        let (data, response) = try await session.data(for: request)
+        try check(response, data)
+    }
+
+    /// PUTs bytes to a signed storage URL (no token: the URL carries its own).
+    public func put(_ data: Data, to signed: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        var request = URLRequest(url: signed)
+        request.httpMethod = "PUT"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let (body, response) = try await session.upload(for: request, from: data, delegate: UploadProgress(progress))
+        try check(response, body)
+    }
+
+    /// Downloads a signed storage URL and appends it to `file` (parts in order make the file).
+    public func fetch(_ signed: URL, appendingTo file: URL) async throws {
+        let (temporary, response) = try await session.download(from: signed)
+        try check(response, nil)
+        if !FileManager.default.fileExists(atPath: file.path) {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: temporary, to: file)
+            return
+        }
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        let source = try FileHandle(forReadingFrom: temporary)
+        defer { try? source.close(); try? FileManager.default.removeItem(at: temporary) }
+        while let chunk = try source.read(upToCount: 8 << 20), !chunk.isEmpty {
+            try handle.write(contentsOf: chunk)
+        }
+    }
+
     // MARK: -
 
     private func url(_ path: String) -> URL {
@@ -115,8 +216,10 @@ public final class StationClient: NSObject, @unchecked Sendable {
     private func check(_ response: URLResponse, _ data: Data?) throws {
         guard let http = response as? HTTPURLResponse else { throw LinkError(status: 0, message: "no response") }
         guard (200..<300).contains(http.statusCode) else {
-            let message = data.flatMap { try? JSONDecoder().decode([String: String].self, from: $0)["error"] }
-            throw LinkError(status: http.statusCode, message: message ?? "The Mac answered \(http.statusCode)")
+            // A Mac station answers {"error": ...}; the relay {"detail": ...}.
+            let fields = data.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+            let message = fields?["error"] ?? fields?["detail"]
+            throw LinkError(status: http.statusCode, message: message ?? "The server answered \(http.statusCode)")
         }
     }
 }
