@@ -9,6 +9,7 @@ struct SplatViewerApp: App {
         Window("Splat Viewer", id: "main") {
             ContentView()
                 .environment(Library.shared)
+                .environment(StationService.shared)
                 .frame(minWidth: 760, minHeight: 520)
                 // Files opened from Finder, the Dock icon or `open -a`. Delivered to the
                 // window (which SwiftUI creates if needed); an app delegate taking the

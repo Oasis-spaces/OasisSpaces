@@ -23,6 +23,7 @@ struct HomeContent: View {
             VStack(alignment: .leading, spacing: 30) {
                 header
                 DropZone(targeted: dropTargeted) { library.importing = true }
+                PhoneCapturesSection()
                 if let notice = library.notice {
                     NoticeBanner(text: notice) { library.notice = nil }
                 }

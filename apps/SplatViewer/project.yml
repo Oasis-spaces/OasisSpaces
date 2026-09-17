@@ -11,6 +11,8 @@ packages:
   MetalSplatter:
     url: https://github.com/scier/MetalSplatter
     exactVersion: 1.0.1
+  OasisLink:
+    path: ../OasisLink
 
 targets:
   SplatViewer:
@@ -22,6 +24,7 @@ targets:
         excludes:
           - Info.plist
     dependencies:
+      - package: OasisLink
       - package: MetalSplatter
         product: MetalSplatter
       - package: MetalSplatter
@@ -36,6 +39,8 @@ targets:
         LSApplicationCategoryType: public.app-category.graphics-design
         LSMinimumSystemVersion: "15.0"
         NSHumanReadableCopyright: Oasis-spaces
+        NSLocalNetworkUsageDescription: Splat Viewer receives room recordings from the Oasis Capture app on your phone over the local network.
+        NSBonjourServices: [_oasisstation._tcp]
         CFBundleDocumentTypes:
           - CFBundleTypeName: Gaussian splat
             CFBundleTypeRole: Viewer
