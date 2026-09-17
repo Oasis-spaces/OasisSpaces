@@ -333,6 +333,12 @@ phone (no model calls, no network while recording). Build and install with
   results (up to 50 MB each) and frees the capture. Tests:
   `~/.venvs/oasis-relay/bin/python -m pytest relay/tests`.
 
+`tools/splat_prune.py spaces/<name>` measures how much of a splat floats in
+free air (Gaussians in front of the surfaces the dense cloud measured, seen
+from the keyframes) and writes a copy without them. On this project's captures
+that copy always measured worse, because training had put real image content
+on those floaters, so it is a diagnostic rather than a stage; see its docstring.
+
 ## Splat Viewer (Mac app)
 
 `apps/SplatViewer` is a native macOS app (SwiftUI + Metal, macOS 15+, Apple
