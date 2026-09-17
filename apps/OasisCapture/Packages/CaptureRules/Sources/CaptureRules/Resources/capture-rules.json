@@ -1,0 +1,110 @@
+{
+  "comment": "Thresholds and messages for live capture guidance. Shared spec: the iPhone app reads this through the CaptureRules package; an Android port should read the same file. Distances in metres, angles in degrees, times in seconds.",
+  "holdSeconds": 0.5,
+  "releaseSeconds": 1.0,
+  "hapticGapSeconds": 2.0,
+  "maxAngularSpeed": 70,
+  "maxLinearSpeed": 1.0,
+  "maxBlurDegrees": 0.6,
+  "spinWindowSeconds": 4.0,
+  "spinMinTurn": 120,
+  "spinMaxTravel": 0.25,
+  "floorCheckAfterSeconds": 8.0,
+  "floorPitch": -20,
+  "minAmbientIntensity": 250,
+  "minMeanLuma": 0.12,
+  "maxSaturatedShare": 0.15,
+  "minSurfaceDistance": 0.45,
+  "minFeaturePoints": 40,
+  "coverageSectors": 12,
+  "coverageMinPitch": -60,
+  "coverageMaxPitch": 35,
+  "coverageHintAfterSeconds": 20.0,
+  "coverageGoal": 0.75,
+  "minDurationSeconds": 20.0,
+  "loopCloseDistance": 1.0,
+  "messages": {
+    "trackingLost": "Tracking lost. Hold still and point at the room",
+    "relocalizing": "Go back to where you just were",
+    "initializing": "Move the phone slowly side to side to start",
+    "tooFast": "Slow down",
+    "blurRisk": "Hold steadier, the picture is blurring",
+    "spinning": "Walk around the room, don't turn on the spot",
+    "tooDark": "Too dark. Turn on the lights",
+    "glare": "Bright window in view. Angle away from it",
+    "tooClose": "Too close. Step back",
+    "lowTexture": "Plain surface. Keep furniture or corners in view",
+    "person": "Someone is in view. Ask them to step out",
+    "lookDown": "Tilt down so the floor meets the walls",
+    "coverage": "Turn to show the walls you haven't filmed yet",
+    "tooShort": "Keep going. Film the whole room",
+    "closeLoop": "Finish near where you started"
+  },
+  "tips": {
+    "comment": "Shown before recording. icon is an SF Symbols name (iOS); an Android port maps it to its own icon set.",
+    "good": [
+      {
+        "icon": "lightbulb.max",
+        "title": "Turn on the lights",
+        "detail": "Switch on the room lights and open curtains halfway, so every corner is bright but no window blazes."
+      },
+      {
+        "icon": "figure.walk",
+        "title": "Walk around the room slowly",
+        "detail": "Move in one slow loop around the room. Don't stand in one spot and turn."
+      },
+      {
+        "icon": "iphone",
+        "title": "Hold the phone upright and steady",
+        "detail": "Keep it at chest height, screen facing you, and move it smoothly."
+      },
+      {
+        "icon": "arrow.down.to.line",
+        "title": "Show where the floor meets the walls",
+        "detail": "Tilt down every few steps so the floor edge is in view."
+      },
+      {
+        "icon": "square.dashed",
+        "title": "Film every wall",
+        "detail": "Get all walls and corners in view, then finish near where you started. One to two minutes is plenty."
+      },
+      {
+        "icon": "person.slash",
+        "title": "Keep people and pets out",
+        "detail": "Anything that moves while you record comes out smeared."
+      }
+    ],
+    "best": [
+      {
+        "icon": "tshirt",
+        "title": "Clear loose clutter",
+        "detail": "Put away clothes, bags and boxes on the floor and bed. Furniture can stay."
+      },
+      {
+        "icon": "door.left.hand.open",
+        "title": "Doors fully open or closed",
+        "detail": "Half-open doors and wardrobes confuse the walls behind them."
+      },
+      {
+        "icon": "rectangle.portrait.on.rectangle.portrait.angled",
+        "title": "Film mirrors and windows at an angle",
+        "detail": "Straight on, they show a reflection or the outside, not a surface."
+      },
+      {
+        "icon": "camera.aperture",
+        "title": "Wipe the camera lens",
+        "detail": "A smudged lens makes every frame soft."
+      },
+      {
+        "icon": "arrow.left.and.right",
+        "title": "Keep a step back from walls",
+        "detail": "Stay about a metre or two away so each frame shows plenty of the room."
+      },
+      {
+        "icon": "tortoise",
+        "title": "Pause at corners",
+        "detail": "Slow down when you turn; turning fast blurs the picture."
+      }
+    ]
+  }
+}
