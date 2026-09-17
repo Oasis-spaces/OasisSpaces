@@ -27,39 +27,65 @@ struct FrameUnderstanding {
 /// land on the same object in the room, so it fuses into one box instead of a
 /// new one per viewpoint.
 final class SceneRunner {
+    /// One runner for the app: its models are loaded once, starting at launch.
+    static let shared = SceneRunner()
+
     let spec = DetectionSpec.bundled()
     /// Seconds between runs.
     var interval: Double = 0.3
     /// Pixels between depth samples on the depth map.
     var sampleStep = 6
 
-    private let segmentation: VNCoreMLRequest?
-    private let depth: VNCoreMLRequest?
+    private var segmentation: VNCoreMLRequest?
+    private var depth: VNCoreMLRequest?
     private let queue = DispatchQueue(label: "capture.scene", qos: .userInitiated)
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private var busy = false
     private var lastRun: Double = -1
     private var latest: SegmentationResult?
     private let lock = NSLock()
+    private var loading = false
+    private(set) var loadSeconds: Double = 0
 
-    init() {
-        let configuration = MLModelConfiguration()
-        configuration.computeUnits = .all   // the Neural Engine where there is one
-        func request(_ name: String) -> VNCoreMLRequest? {
-            guard let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc"),
-                  let model = try? MLModel(contentsOf: url, configuration: configuration),
-                  let visionModel = try? VNCoreMLModel(for: model) else { return nil }
-            let request = VNCoreMLRequest(model: visionModel)
-            // The whole frame, squeezed to the model's input: results map back by scaling.
-            request.imageCropAndScaleOption = .scaleFill
-            return request
+    /// Loads the models off the main thread. The first load of a model on a
+    /// phone compiles it for the Neural Engine, which can take tens of
+    /// seconds; done on the main thread, iOS kills the app for hanging.
+    func preload() {
+        lock.lock()
+        let start = !loading && segmentation == nil
+        loading = true
+        lock.unlock()
+        guard start else { return }
+        queue.async { [self] in
+            let began = Date()
+            let configuration = MLModelConfiguration()
+            configuration.computeUnits = .all   // the Neural Engine where there is one
+            func request(_ name: String) -> VNCoreMLRequest? {
+                guard let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc"),
+                      let model = try? MLModel(contentsOf: url, configuration: configuration),
+                      let visionModel = try? VNCoreMLModel(for: model) else {
+                    print("Oasis Capture: could not load \(name)")
+                    return nil
+                }
+                let request = VNCoreMLRequest(model: visionModel)
+                // The whole frame, squeezed to the model's input: results map back by scaling.
+                request.imageCropAndScaleOption = .scaleFill
+                return request
+            }
+            let segmentation = request("RoomSegmentation")
+            let depth = request("RoomDepth")
+            self.lock.lock()
+            self.segmentation = segmentation
+            self.depth = depth
+            self.loadSeconds = Date().timeIntervalSince(began)
+            self.lock.unlock()
+            print(String(format: "Oasis Capture: models ready in %.1f s (segmentation %@, depth %@)",
+                         self.loadSeconds, segmentation == nil ? "missing" : "ok", depth == nil ? "missing" : "ok"))
         }
-        segmentation = request("RoomSegmentation")
-        depth = request("RoomDepth")
     }
 
-    var isAvailable: Bool { segmentation != nil }
-    var hasDepth: Bool { depth != nil }
+    var isReady: Bool { lock.withLock { segmentation != nil } }
+    var hasDepth: Bool { lock.withLock { depth != nil } }
 
     /// The latest segmentation, safe to read from any queue.
     var current: SegmentationResult? {
@@ -70,6 +96,7 @@ final class SceneRunner {
     /// Analyses this frame if the previous run finished and the interval has
     /// passed. `done` gets the result on the scene queue.
     func submit(_ frame: ARFrame, glow wantGlow: Bool, done: @escaping (FrameUnderstanding) -> Void) {
+        let (segmentation, depthRequest) = lock.withLock { (self.segmentation, self.depth) }
         guard let segmentation, !busy, frame.timestamp - lastRun >= interval else { return }
         busy = true
         lastRun = frame.timestamp
@@ -99,7 +126,7 @@ final class SceneRunner {
             // 2. Depth, on the sensor image as it is (landscape, like the model was trained).
             var understanding = FrameUnderstanding(time: time, segmentation: result, depthFit: nil,
                                                    labelledPoints: [], glow: nil)
-            if let depthRequest = self.depth,
+            if let depthRequest,
                (try? VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .up).perform([depthRequest])) != nil,
                let depthMap = (depthRequest.results?.first as? VNPixelBufferObservation)?.pixelBuffer,
                let values = Self.floats(from: depthMap) {

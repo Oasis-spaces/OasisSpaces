@@ -56,7 +56,7 @@ private struct CaptureContent: View {
                     }
                     .buttonStyle(.plain)
                 }
-                GuidanceBanner(guidance: state.guidance, isRecording: state.isRecording)
+                GuidanceBanner(guidance: state.guidance, isRecording: state.isRecording, modelsReady: state.modelsReady)
                 Spacer()
                 if state.isRecording && !state.detected.isEmpty {
                     DetectedStrip(labels: state.detected)
@@ -97,6 +97,7 @@ struct ARCameraView: UIViewRepresentable {
 struct GuidanceBanner: View {
     let guidance: Guidance?
     let isRecording: Bool
+    var modelsReady = true
 
     var body: some View {
         let (text, icon, color) = content
@@ -115,6 +116,9 @@ struct GuidanceBanner: View {
     }
 
     private var content: (String, String, Color) {
+        if !modelsReady {
+            return ("Preparing the room detector… (the first time takes a minute)", "hourglass", .black)
+        }
         guard let guidance else {
             return isRecording
                 ? ("Looking good. Keep walking around the room", "checkmark.circle.fill", .green)

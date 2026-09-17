@@ -26,6 +26,8 @@ final class CaptureState: ObservableObject {
     @Published var map = RoomMap()
     @Published var glow: CGImage?
     @Published var depthOK = false
+    /// The detector models are loaded (the first launch compiles them, which takes a while).
+    @Published var modelsReady = false
 }
 
 struct CaptureResult: Identifiable {
@@ -54,7 +56,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
     private let queue = DispatchQueue(label: "capture.frames", qos: .userInteractive)
     private var engine: RuleEngine
     private let analyzer = FrameAnalyzer()
-    let scene = SceneRunner()
+    let scene = SceneRunner.shared
     /// Seconds each detected class was in view while recording (for capture.json).
     private var secondsSeen: [String: Double] = [:]
     private var lastSegmentationTime: Double?
@@ -86,6 +88,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
     }
 
     func start() {
+        scene.preload()
         let configuration = ARWorldTrackingConfiguration()
         configuration.worldAlignment = .gravity
         configuration.isLightEstimationEnabled = true
@@ -163,6 +166,10 @@ final class CaptureController: NSObject, ARSessionDelegate {
             sample.peopleInView = result.personShare >= scene.spec.personWarnShare ? 1 : 0
         }
         let guidance = engine.update(sample)
+        if !modelsReported, scene.isReady {
+            modelsReported = true
+            DispatchQueue.main.async { self.state.modelsReady = true }
+        }
         scene.submit(frame, glow: wantGlow) { [weak self] understanding in self?.understood(understanding) }
 
         if recording {
@@ -358,6 +365,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
     /// Whether to render the glow: only while the outlines are shown.
     private var wantGlow: Bool { glowWanted }
     private var glowWanted = true
+    private var modelsReported = false
 
     /// A frame was analysed (on the scene queue): its depth points go into the
     /// room map, its regions are steadied for the overlay, and what was seen
