@@ -1189,6 +1189,12 @@ class Agent:
                                    "reasons": record["claude"].get("reasons"),
                                    "candidates": record["candidates"]},
                         f"best splat of {self.source.name}: {record['best']}")
+        if record.get("kept_earlier"):
+            self.decide("splat", "keep",
+                        f"Claude did not decide this time, so {record['best']} stays the best splat of "
+                        f"{self.source.name} as Claude chose earlier (the numbers alone would pick "
+                        f"{record['numbers_now']})", {"best_splat": record["best"]})
+            return
         self.decide("splat", "accept", f"published {record['best']} as the best splat of "
                     f"{self.source.name} (decided by {record['decided_by']}"
                     + (f"; {record['claude']['agreement']}" if (record.get("claude") or {}).get("agreement") else "")
@@ -1245,7 +1251,12 @@ class Agent:
             piece = by_surface[row["surface"]]
             claude = verdicts.get(row["id"])
             numbers_ok = row["gaps_after"] <= row["gaps_before"] and row["damaged"] <= FILL_MAX_DAMAGED_SHARE
-            keep = numbers_ok and (bool(claude.get("keep")) if claude else not self.advisor.available)
+            # Numbers cannot see blotches or pasted-on patches, which is what the
+            # review is for. Without Claude's verdict a fill is kept only when the
+            # run was started without Claude on purpose (--no-claude), never
+            # because Claude could not be reached (a dropped connection kept fills
+            # Claude had rejected).
+            keep = numbers_ok and (bool(claude.get("keep")) if claude else not self.use_claude)
             row.update({"keep": keep, "numbers_ok": numbers_ok,
                         "claude": (claude or {}).get("why"), "sheet": str(row["sheet"])})
             if keep:
@@ -1272,7 +1283,9 @@ class Agent:
         self.decide("splat", "accept" if kept_pieces else "skip",
                     (f"kept the fill on {', '.join(p['surface'] for p in kept_pieces)}"
                      if kept_pieces else "kept no fill: no surface was clearly better")
-                    + ("" if verdicts else " (not reviewed by Claude)"),
+                    + ("" if verdicts else
+                       " (not reviewed by Claude)" if not self.use_claude else
+                       f" (Claude could not be reached: {self.advisor.reason}; unreviewed fills are not kept)"),
                     {"fill_surfaces_kept": [p["surface"] for p in kept_pieces]})
 
     def review_surface(self, n: int, piece: dict, original, room) -> dict | None:

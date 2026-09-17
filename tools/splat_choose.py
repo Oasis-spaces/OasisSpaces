@@ -481,6 +481,16 @@ def choose(video: Path, log=print, advisor=None) -> dict | None:
     existing = sorted((ROOT / "splats").glob(f"{video.stem}*")) if (ROOT / "splats").exists() else []
     out_dir = existing[0] if existing and existing[0].is_dir() else ROOT / "splats" / video.stem
     record = judge(video, candidates, out_dir, log, advisor)
+    earlier = out_dir / "choice.json"
+    if record["decided_by"] == "numbers" and earlier.exists():
+        previous = json.loads(earlier.read_text())
+        if previous.get("decided_by") == "claude" and (out_dir / "best.splat").exists():
+            # Claude was not reached this time (or split with no winner): the
+            # numbers alone do not overturn a best Claude chose from the same splats.
+            log(f"  Claude did not decide this time; keeping the best Claude chose earlier "
+                f"({previous.get('best')}). The numbers would pick {record['best']}.")
+            (out_dir / "choice-unpublished.json").write_text(json.dumps(record, indent=1) + "\n")
+            return {**previous, "kept_earlier": True, "numbers_now": record["best"]}
     best = next(c for c in candidates if c["label"] == record["best"])
 
     # Publish: the best splat, every candidate's viewer file, the evidence.
