@@ -136,8 +136,11 @@ class Colab:
             if made.returncode == 0 and self.alive():
                 return
             text = made.stdout + made.stderr
-            if "Service Unavailable" in text and time.time() < deadline:
-                log(f"  Colab has no {gpu} to give right now; asking again in 10 minutes "
+            offline = any(k in text for k in ("NameResolutionError", "ConnectionError",
+                                               "Max retries exceeded", "timed out"))
+            if ("Service Unavailable" in text or offline) and time.time() < deadline:
+                reason = "the connection to Colab failed" if offline else f"Colab has no {gpu} to give right now"
+                log(f"  {reason}; asking again in 10 minutes "
                     f"(until {time.strftime('%H:%M', time.localtime(deadline))})")
                 time.sleep(600)
                 continue
