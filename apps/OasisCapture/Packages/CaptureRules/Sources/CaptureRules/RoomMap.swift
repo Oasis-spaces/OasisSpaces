@@ -43,20 +43,50 @@ public struct WallSegment: Identifiable, Sendable, Equatable {
     public var kind: PlaneInfo.Kind
 }
 
-/// A piece of furniture (or fixture) the scan has placed: an axis-aligned box.
+/// A piece of furniture (or fixture) the scan has placed: a box turned by
+/// `yaw` about the vertical, so it lies along the room's walls like the
+/// furniture does.
 public struct ObjectBox: Identifiable, Sendable, Equatable {
     public var id: String
     public var classId: Int
     public var label: String
     public var group: String
     public var family: String
-    public var min: SIMD3<Float>
-    public var max: SIMD3<Float>
+    public var center: SIMD3<Float>
+    /// Width (along the box's own x), height, depth (along its own z), metres.
+    public var size: SIMD3<Float>
+    /// Turn about the vertical, radians, of the box's own x axis from world x.
+    public var yaw: Float
     public var points: Int
 
-    public var center: SIMD3<Float> { (min + max) / 2 }
-    public var size: SIMD3<Float> { max - min }
-    /// Top-down footprint (x, z).
+    public init(id: String, classId: Int, label: String, group: String, family: String,
+                center: SIMD3<Float>, size: SIMD3<Float>, yaw: Float, points: Int) {
+        self.id = id; self.classId = classId; self.label = label; self.group = group; self.family = family
+        self.center = center; self.size = size; self.yaw = yaw; self.points = points
+    }
+
+    /// The box's own axes on the floor (x, z).
+    public var axisX: SIMD2<Float> { SIMD2(cos(yaw), sin(yaw)) }
+    public var axisZ: SIMD2<Float> { SIMD2(-sin(yaw), cos(yaw)) }
+
+    /// The four corners of the footprint, seen from above (x, z), in order.
+    public var footprint: [SIMD2<Float>] {
+        let c = SIMD2(center.x, center.z)
+        let hx = axisX * (size.x / 2), hz = axisZ * (size.z / 2)
+        return [c - hx - hz, c + hx - hz, c + hx + hz, c - hx + hz]
+    }
+
+    /// World-aligned bounds of the whole box.
+    public var min: SIMD3<Float> {
+        let f = footprint
+        return SIMD3(f.map(\.x).min()!, center.y - size.y / 2, f.map(\.y).min()!)
+    }
+
+    public var max: SIMD3<Float> {
+        let f = footprint
+        return SIMD3(f.map(\.x).max()!, center.y + size.y / 2, f.map(\.y).max()!)
+    }
+
     public var footprintMin: SIMD2<Float> { SIMD2(min.x, min.z) }
     public var footprintMax: SIMD2<Float> { SIMD2(max.x, max.z) }
 }
@@ -82,6 +112,26 @@ public struct RoomMap: Sendable, Equatable {
     }
 
     public var floors: [PlaneInfo] { planes.filter { !$0.vertical && $0.kind == .floor } }
+
+    /// The direction the room's walls run, radians in 0..<pi/2: the longest
+    /// walls' directions folded into one quarter turn and averaged. Furniture
+    /// boxes are turned to it. Nil without walls.
+    public var roomYaw: Float? {
+        let walls = self.walls.filter { simd_distance($0.from, $0.to) > 0.5 }
+        guard !walls.isEmpty else { return nil }
+        // Average the doubled-doubled angle, so directions a quarter turn apart agree.
+        var sx: Float = 0, sy: Float = 0
+        for wall in walls {
+            let d = wall.to - wall.from
+            let angle = atan2(d.y, d.x) * 4
+            let weight = simd_length(d)
+            sx += cos(angle) * weight
+            sy += sin(angle) * weight
+        }
+        var yaw = atan2(sy, sx) / 4
+        if yaw < 0 { yaw += .pi / 2 }
+        return yaw
+    }
 
     /// Extent of everything on the floor plan: (min, max) in x, z.
     public var bounds: (min: SIMD2<Float>, max: SIMD2<Float>)? {
@@ -174,7 +224,7 @@ public final class RoomMapBuilder {
         lock.withLock {
             var map = RoomMap()
             map.planes = planes.values.sorted { $0.id.uuidString < $1.id.uuidString }
-            let candidates = candidateBoxes()
+            let candidates = candidateBoxes(yaw: map.roomYaw ?? 0)
             track(candidates)
             map.objects = tracked.filter(\.shown).map(\.box).sorted { $0.points > $1.points }
             return map
@@ -186,12 +236,15 @@ public final class RoomMapBuilder {
     private struct Candidate {
         var family: String
         var votes: [Int: Int]
-        var min: SIMD3<Float>
-        var max: SIMD3<Float>
+        var center: SIMD3<Float>
+        var size: SIMD3<Float>
+        var yaw: Float
         var voxels: Int
+        var min: SIMD3<Float> { ObjectBox(id: "", classId: 0, label: "", group: "", family: "", center: center, size: size, yaw: yaw, points: 0).min }
+        var max: SIMD3<Float> { ObjectBox(id: "", classId: 0, label: "", group: "", family: "", center: center, size: size, yaw: yaw, points: 0).max }
     }
 
-    private func candidateBoxes() -> [Candidate] {
+    private func candidateBoxes(yaw: Float) -> [Candidate] {
         let v = spec.voteVoxelMetres
         // Each voxel takes its majority family, if that majority is clear.
         var byFamily: [String: [(SIMD3<Int32>, [Int: Int])]] = [:]
@@ -233,18 +286,26 @@ public final class RoomMapBuilder {
                     }
                 }
                 guard members.count >= spec.minVoxels else { continue }
+                // Bounds in the room's frame (turned by yaw), so the box lies along the walls.
+                let ax = SIMD2(cos(yaw), sin(yaw)), az = SIMD2(-sin(yaw), cos(yaw))
                 var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude), hi = -lo
                 var memberVotes: [Int: Int] = [:]
                 for (key, counts) in members {
-                    let p = SIMD3<Float>(Float(key.x), Float(key.y), Float(key.z)) * v
-                    lo = simd_min(lo, p)
-                    hi = simd_max(hi, p + SIMD3(repeating: v))
+                    let p = (SIMD3<Float>(Float(key.x), Float(key.y), Float(key.z)) + 0.5) * v
+                    let flat = SIMD2(p.x, p.z)
+                    let local = SIMD3(simd_dot(flat, ax), p.y, simd_dot(flat, az))
+                    lo = simd_min(lo, local - v / 2)
+                    hi = simd_max(hi, local + v / 2)
                     for (cls, n) in counts { memberVotes[cls, default: 0] += n }
                 }
                 let size = hi - lo
                 // Bigger than any piece of furniture: mislabelled wall or floor points.
                 guard size.x <= spec.maxObjectMetres, size.y <= spec.maxObjectMetres, size.z <= spec.maxObjectMetres else { continue }
-                candidates.append(Candidate(family: family, votes: memberVotes, min: lo, max: hi, voxels: members.count))
+                let mid = (lo + hi) / 2
+                let flatCenter = ax * mid.x + az * mid.z
+                candidates.append(Candidate(family: family, votes: memberVotes,
+                                            center: SIMD3(flatCenter.x, mid.y, flatCenter.y), size: size, yaw: yaw,
+                                            voxels: members.count))
             }
         }
         return candidates
@@ -271,8 +332,9 @@ public final class RoomMapBuilder {
             let c = unmatched.remove(at: j)
             // Move part of the way: an object grows smoothly as more of it is seen.
             let k: Float = 0.35
-            tracked[i].box.min += (c.min - box.min) * k
-            tracked[i].box.max += (c.max - box.max) * k
+            tracked[i].box.center += (c.center - box.center) * k
+            tracked[i].box.size += (c.size - box.size) * k
+            tracked[i].box.yaw = c.yaw
             tracked[i].box.points = c.voxels
             tracked[i].votes = c.votes
             tracked[i].seen += 1
@@ -287,7 +349,7 @@ public final class RoomMapBuilder {
             guard let info = spec.info(top) else { continue }
             tracked.append(Tracked(
                 box: ObjectBox(id: "o\(nextID)", classId: top, label: info.label, group: info.group, family: c.family,
-                               min: c.min, max: c.max, points: c.voxels),
+                               center: c.center, size: c.size, yaw: c.yaw, points: c.voxels),
                 votes: c.votes, seen: 1, missed: 0, shown: spec.confirmBuilds <= 1))
             nextID += 1
         }

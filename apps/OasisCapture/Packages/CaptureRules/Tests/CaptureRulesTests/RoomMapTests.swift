@@ -118,6 +118,38 @@ final class RoomMapTests: XCTestCase {
         XCTAssertTrue(settled(builder).objects.isEmpty, "\(settled(builder).objects.map(\.label))")
     }
 
+    func testBoxesTurnWithTheRoomsWalls() {
+        let builder = RoomMapBuilder(spec: spec)
+        // A wall running 30 degrees off the world x axis.
+        let yaw: Float = .pi / 6
+        let along = SIMD3(cos(yaw), 0, sin(yaw))
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(0, 1.2, 0),
+                                        xAxis: along, zAxis: SIMD3(0, 1, 0), extent: SIMD2(4, 2.4)))
+        // A 2 m x 1 m table lying along that wall.
+        let across = SIMD3(-sin(yaw), 0, cos(yaw))
+        let id = classId("table")
+        for _ in 0..<3 {
+            var a: Float = 0
+            while a <= 2 {
+                var b: Float = 0
+                while b <= 1 {
+                    builder.add(point: along * a + across * (b + 0.5) + SIMD3(0, 0.7, 0), classId: id)
+                    b += 0.05
+                }
+                a += 0.05
+            }
+        }
+        let map = settled(builder)
+        XCTAssertEqual(map.roomYaw!, yaw, accuracy: 0.01)
+        let table = map.objects.first { $0.label == "table" }!
+        XCTAssertEqual(table.yaw, yaw, accuracy: 0.01)
+        XCTAssertEqual(table.size.x, 2.0, accuracy: 0.2, "long side along the wall (8 cm voxels pad the ends)")
+        XCTAssertEqual(table.size.z, 1.0, accuracy: 0.15)
+        // World-aligned bounds of a turned box are larger than the box itself.
+        XCTAssertGreaterThan(table.max.x - table.min.x, 2.0)
+        XCTAssertEqual(table.footprint.count, 4)
+    }
+
     func testWallsFromVerticalPlanesAndBounds() {
         var map = RoomMap()
         map.planes = [

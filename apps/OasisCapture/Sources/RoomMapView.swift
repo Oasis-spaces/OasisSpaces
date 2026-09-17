@@ -24,10 +24,6 @@ struct RoomMapCanvas: View {
             func toMap(_ p: SIMD2<Float>) -> CGPoint {
                 CGPoint(x: origin.x + CGFloat(p.x - lo.x) * scale, y: origin.y + CGFloat(p.y - lo.y) * scale)
             }
-            func rect(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> CGRect {
-                let p = toMap(a), q = toMap(b)
-                return CGRect(x: min(p.x, q.x), y: min(p.y, q.y), width: abs(q.x - p.x), height: abs(q.y - p.y))
-            }
 
             // Floor first, then scanned points faintly, then furniture, then walls on top.
             for floor in map.floors {
@@ -48,13 +44,17 @@ struct RoomMapCanvas: View {
             }
             for object in map.objects {
                 let color = Color(hex: spec.groups[object.group]?.color ?? "#FFFFFF")
-                let r = rect(object.footprintMin, object.footprintMax)
-                let shape = Path(roundedRect: r, cornerRadius: min(4, r.width / 4))
+                let corners = object.footprint.map(toMap)
+                var shape = Path()
+                shape.move(to: corners[0])
+                for c in corners.dropFirst() { shape.addLine(to: c) }
+                shape.closeSubpath()
                 context.fill(shape, with: .color(color.opacity(0.55)))
-                context.stroke(shape, with: .color(color), lineWidth: 1.5)
+                context.stroke(shape, with: .color(color), style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+                let r = shape.boundingRect
                 if detailed || r.width > 28 {
                     let text = context.resolve(Text(object.label).font(.system(size: detailed ? 12 : 9, weight: .semibold)).foregroundColor(.white))
-                    context.draw(text, at: CGPoint(x: r.midX, y: r.midY))
+                    context.draw(text, at: toMap(SIMD2(object.center.x, object.center.z)))
                 }
             }
             for wall in map.walls {

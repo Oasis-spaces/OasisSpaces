@@ -28,7 +28,9 @@ private struct CaptureContent: View {
         ZStack {
             ARCameraView(controller: controller)
                 .ignoresSafeArea()
-            OutlineOverlay(state: state, session: controller.session, spec: controller.segmentation.spec)
+            GlowOverlay(state: state, session: controller.session)
+                .ignoresSafeArea()
+            OutlineOverlay(state: state, session: controller.session, spec: controller.scene.spec)
                 .ignoresSafeArea()
 
             VStack(spacing: 12) {
@@ -49,7 +51,7 @@ private struct CaptureContent: View {
                     }
                     Spacer()
                     Button { showingMap = true } label: {
-                        CoverageMap(state: state, spec: controller.segmentation.spec)
+                        CoverageMap(state: state, spec: controller.scene.spec)
                             .frame(width: 140, height: 140)
                     }
                     .buttonStyle(.plain)
@@ -72,7 +74,7 @@ private struct CaptureContent: View {
             ReviewView(result: result, config: controller.config)
         }
         .sheet(isPresented: $showingMap) {
-            RoomMapSheet(state: state, spec: controller.segmentation.spec)
+            RoomMapSheet(state: state, spec: controller.scene.spec)
         }
     }
 }
@@ -169,7 +171,7 @@ struct RecordControls: View {
 
     var body: some View {
         HStack {
-            Text(state.pointCount > 0 ? "\(state.pointCount) points" : state.format)
+            Text(state.isRecording ? "\(state.map.objects.count) placed" + (state.depthOK ? "" : " · no depth") : state.format)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 100, alignment: .leading)

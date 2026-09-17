@@ -1230,7 +1230,7 @@
  ],
  "voteVoxelMetres": 0.08,
  "groupCellMetres": 0.25,
- "minVoxels": 12,
+ "minVoxels": 20,
  "confirmBuilds": 2,
  "graceBuilds": 3,
  "labelHistoryFrames": 6,

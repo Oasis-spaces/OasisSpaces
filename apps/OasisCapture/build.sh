@@ -11,6 +11,16 @@ if [ ! -d Resources/RoomSegmentation.mlpackage ]; then
     [ -x ~/.venvs/oasis-coreml/bin/python ] || { echo "Needs ~/.venvs/oasis-coreml (Python 3.12 with torch 2.5, transformers 4.46, coremltools 8.3) to build the model"; exit 1; }
     ~/.venvs/oasis-coreml/bin/python scripts/convert_segmentation.py
 fi
+# The depth model is Apple's Core ML build of Depth Anything V2 Small (48 MB, not checked in).
+if [ ! -f Resources/RoomDepth.mlpackage/Data/com.apple.CoreML/weights/weight.bin ]; then
+    echo "Downloading the depth model..."
+    B=https://huggingface.co/apple/coreml-depth-anything-v2-small/resolve/main/DepthAnythingV2SmallF16.mlpackage
+    D=Resources/RoomDepth.mlpackage
+    mkdir -p "$D/Data/com.apple.CoreML/weights"
+    curl -sL -o "$D/Manifest.json" "$B/Manifest.json"
+    curl -sL -o "$D/Data/com.apple.CoreML/model.mlmodel" "$B/Data/com.apple.CoreML/model.mlmodel"
+    curl -sL -o "$D/Data/com.apple.CoreML/weights/weight.bin" "$B/Data/com.apple.CoreML/weights/weight.bin"
+fi
 xcodegen generate --quiet
 
 # The first paired iPhone that is connected: CoreDevice id for devicectl, UDID for xcodebuild.

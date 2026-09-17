@@ -24,6 +24,8 @@ final class CaptureState: ObservableObject {
     @Published var showOutlines = true
     @Published var detected: [String] = []
     @Published var map = RoomMap()
+    @Published var glow: CGImage?
+    @Published var depthOK = false
 }
 
 struct CaptureResult: Identifiable {
@@ -52,7 +54,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
     private let queue = DispatchQueue(label: "capture.frames", qos: .userInteractive)
     private var engine: RuleEngine
     private let analyzer = FrameAnalyzer()
-    let segmentation = SegmentationRunner()
+    let scene = SceneRunner()
     /// Seconds each detected class was in view while recording (for capture.json).
     private var secondsSeen: [String: Double] = [:]
     private var lastSegmentationTime: Double?
@@ -156,14 +158,12 @@ final class CaptureController: NSObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         var sample = analyzer.sample(frame)
-        if let result = segmentation.current {
+        if let result = scene.current {
             // People from the segmentation, in place of a separate detector.
-            sample.peopleInView = result.personShare >= segmentation.spec.personWarnShare ? 1 : 0
+            sample.peopleInView = result.personShare >= scene.spec.personWarnShare ? 1 : 0
         }
         let guidance = engine.update(sample)
-        segmentation.submit(frame) { [weak self] result, points, camera in
-            self?.segmented(result, at: frame.timestamp, points: points, camera: camera)
-        }
+        scene.submit(frame, glow: wantGlow) { [weak self] understanding in self?.understood(understanding) }
 
         if recording {
             recorder?.append(frame)
@@ -316,6 +316,8 @@ final class CaptureController: NSObject, ARSessionDelegate {
             for object in map.objects {
                 let size = object.size
                 let color = UIColor(Color(hex: spec.groups[object.group]?.color ?? "#FFFFFF"))
+                // SceneKit turns about +y the other way round from the box's yaw.
+                let orientation = simd_quatf(angle: -object.yaw, axis: SIMD3(0, 1, 0))
                 if let node = self.boxNodes[object.id], let box = node.geometry as? SCNBox {
                     SCNTransaction.begin()
                     SCNTransaction.animationDuration = 0.6
@@ -323,6 +325,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
                     box.height = CGFloat(size.y)
                     box.length = CGFloat(size.z)
                     node.simdPosition = object.center
+                    node.simdOrientation = orientation
                     box.firstMaterial?.diffuse.contents = color
                     SCNTransaction.commit()
                 } else {
@@ -336,6 +339,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
                     let node = SCNNode(geometry: box)
                     node.name = "box"
                     node.simdPosition = object.center
+                    node.simdOrientation = orientation
                     self.mapNode.addChildNode(node)
                     self.boxNodes[object.id] = node
                 }
@@ -343,39 +347,24 @@ final class CaptureController: NSObject, ARSessionDelegate {
         }
     }
 
-    /// A segmentation finished (on the segmentation queue): label the frame's
-    /// tracked points with it for the room map, and count what was seen.
-    private func segmented(_ raw: SegmentationResult, at time: Double, points: [SIMD3<Float>], camera: ARCamera) {
-        let result = labelMemory.steady(raw)
-        let size = camera.imageResolution
-        let spec = mapBuilder.spec
-        let near = spec.pointDepthMetres.first ?? 0.3, far = spec.pointDepthMetres.last ?? 6
-        let toCamera = camera.transform.inverse
-        var labelled: [(SIMD3<Float>, Int)] = []
-        labelled.reserveCapacity(points.count)
-        for p in points {
-            // Only points at a sensible distance: far ones are imprecise, near ones are the phone's own hand.
-            let local = toCamera * SIMD4(p, 1)
-            guard -local.z >= near, -local.z <= far else { continue }
-            let q = camera.projectPoint(p, orientation: .landscapeRight, viewportSize: size)
-            guard q.x >= 0, q.y >= 0, q.x < size.width, q.y < size.height else { continue }
-            // Sensor (landscape) coordinates to the upright class map: the model saw the image rotated.
-            let x = 1 - Double(q.y / size.height), y = Double(q.x / size.width)
-            // Only points well inside a region count: the map is coarse, and a point
-            // on an object's edge is as likely to be the wall behind it.
-            guard let cls = result.classAt(x: x, y: y) else { continue }
-            let step = 2.5 / Double(result.width)
-            let inside = [(step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step)].allSatisfy { dx, dy in
-                result.classAt(x: x + dx, y: y + dy) == cls
-            }
-            if inside { labelled.append((p, cls)) }
-        }
-        mapBuilder.add(points: labelled)
+    /// Whether to render the glow: only while the outlines are shown.
+    private var wantGlow: Bool { glowWanted }
+    private var glowWanted = true
+
+    /// A frame was analysed (on the scene queue): its depth points go into the
+    /// room map, its regions are steadied for the overlay, and what was seen
+    /// is counted.
+    private func understood(_ understanding: FrameUnderstanding) {
+        let result = labelMemory.steady(understanding.segmentation)
+        let time = understanding.time
+        mapBuilder.add(points: understanding.labelledPoints)
+        let depthOK = (understanding.depthFit?.error ?? 1) < 0.2
+        let glow = understanding.glow
         queue.async {
             if self.recording {
                 let dt = min(1, time - (self.lastSegmentationTime ?? time))
-                for (id, share) in result.classShares where share >= self.segmentation.spec.minRegionShare {
-                    if let info = self.segmentation.spec.info(id), info.outline {
+                for (id, share) in result.classShares where share >= self.scene.spec.minRegionShare {
+                    if let info = self.scene.spec.info(id), info.outline {
                         self.secondsSeen[info.label, default: 0] += dt
                     }
                 }
@@ -392,6 +381,9 @@ final class CaptureController: NSObject, ARSessionDelegate {
             DispatchQueue.main.async {
                 self.state.regions = shown.regions
                 self.state.detected = detected
+                self.state.depthOK = depthOK
+                if let glow { self.state.glow = glow }
+                self.glowWanted = self.state.showOutlines
             }
         }
     }

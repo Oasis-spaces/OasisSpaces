@@ -2,3 +2,4 @@ OasisCapture.xcodeproj/
 build/
 .build/
 Resources/RoomSegmentation.mlpackage/
+Resources/RoomDepth.mlpackage/

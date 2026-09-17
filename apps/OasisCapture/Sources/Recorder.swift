@@ -141,8 +141,9 @@ final class Recorder {
                         "extent": [plane.extent.x, plane.extent.y]] as [String: Any] },
                     "objects": map.objects.map { object in [
                         "label": object.label, "group": object.group, "classId": object.classId,
-                        "min": [object.min.x, object.min.y, object.min.z],
-                        "max": [object.max.x, object.max.y, object.max.z],
+                        "center": [object.center.x, object.center.y, object.center.z],
+                        "size": [object.size.x, object.size.y, object.size.z],
+                        "yaw": object.yaw,
                         "voxels": object.points] as [String: Any] },
                 ] as [String: Any],
             ]
