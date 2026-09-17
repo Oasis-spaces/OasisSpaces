@@ -18,6 +18,7 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+      - path: Resources/RoomSegmentation.mlpackage
     dependencies:
       - package: CaptureRules
     settings:

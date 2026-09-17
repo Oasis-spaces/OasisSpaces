@@ -1,5 +1,4 @@
 import ARKit
-import Vision
 import CaptureRules
 
 /// Turns an ARFrame into a FrameSample for the rules, and samples colours for
@@ -7,12 +6,6 @@ import CaptureRules
 /// cheap: ARKit delivers 30-60 frames a second and stalls if a frame is held.
 final class FrameAnalyzer {
     private var frameIndex = 0
-    private var peopleRequestBusy = false
-    private var lastPeople: Int?
-    private let peopleQueue = DispatchQueue(label: "capture.people")
-
-    /// People detection every this many frames (about twice a second).
-    private let peopleEvery = 15
 
     func sample(_ frame: ARFrame) -> FrameSample {
         frameIndex += 1
@@ -24,11 +17,8 @@ final class FrameAnalyzer {
 
         let luma = lumaStats(frame.capturedImage)
         let features = frame.rawFeaturePoints?.points ?? []
-        var people: Int?
-        if frameIndex % peopleEvery == 0 {
-            detectPeople(in: frame.capturedImage)
-            people = lastPeople
-        }
+        // People come from the room segmentation (CaptureController).
+        let people: Int? = nil
 
         return FrameSample(
             time: frame.timestamp,
@@ -105,22 +95,6 @@ final class FrameAnalyzer {
         return Double(depths[depths.count / 10])
     }
 
-    /// Vision's human detector on a frame, at most one at a time, off the
-    /// capture queue; the count is used on the next sampled frame.
-    private func detectPeople(in buffer: CVPixelBuffer) {
-        guard !peopleRequestBusy else { return }
-        peopleRequestBusy = true
-        peopleQueue.async { [weak self] in
-            let request = VNDetectHumanRectanglesRequest()
-            request.upperBodyOnly = false
-            // The sensor image is landscape; the phone is held portrait.
-            let handler = VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .right)
-            try? handler.perform([request])
-            let found = (request.results ?? []).filter { $0.confidence > 0.6 }.count
-            self?.lastPeople = found
-            self?.peopleRequestBusy = false
-        }
-    }
 }
 
 /// The colour of a world point as the camera sees it this frame, or nil when

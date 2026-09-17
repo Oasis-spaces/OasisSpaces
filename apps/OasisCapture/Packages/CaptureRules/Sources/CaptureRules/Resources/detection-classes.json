@@ -1,0 +1,1081 @@
+{
+ "comment": "Classes of the on-device room segmentation model (SegFormer-B0 on ADE20K; id is the model's output). outline: drawn around while recording. Everything in a room is outlined except clothes (apparel) and outdoor classes; person only drives the 'someone in view' warning. Shared spec for other platforms.",
+ "model": "nvidia/segformer-b0-finetuned-ade-512-512",
+ "groups": {
+  "structure": {
+   "color": "#8FA3B8"
+  },
+  "furniture": {
+   "color": "#FF9F0A"
+  },
+  "storage": {
+   "color": "#BF5AF2"
+  },
+  "soft": {
+   "color": "#FF375F"
+  },
+  "fixture": {
+   "color": "#30D158"
+  },
+  "appliance": {
+   "color": "#64D2FF"
+  },
+  "person": {
+   "color": "#FF453A"
+  }
+ },
+ "minRegionShare": 0.004,
+ "personWarnShare": 0.02,
+ "classes": [
+  {
+   "id": 0,
+   "name": "wall",
+   "label": "wall",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 1,
+   "name": "building",
+   "label": "building",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 2,
+   "name": "sky",
+   "label": "sky",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 3,
+   "name": "floor",
+   "label": "floor",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 4,
+   "name": "tree",
+   "label": "tree",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 5,
+   "name": "ceiling",
+   "label": "ceiling",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 6,
+   "name": "road",
+   "label": "road",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 7,
+   "name": "bed",
+   "label": "bed",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 8,
+   "name": "windowpane",
+   "label": "window",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 9,
+   "name": "grass",
+   "label": "grass",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 10,
+   "name": "cabinet",
+   "label": "cabinet",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 11,
+   "name": "sidewalk",
+   "label": "sidewalk",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 12,
+   "name": "person",
+   "label": "person",
+   "group": "person",
+   "outline": false
+  },
+  {
+   "id": 13,
+   "name": "earth",
+   "label": "earth",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 14,
+   "name": "door",
+   "label": "door",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 15,
+   "name": "table",
+   "label": "table",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 16,
+   "name": "mountain",
+   "label": "mountain",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 17,
+   "name": "plant",
+   "label": "plant",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 18,
+   "name": "curtain",
+   "label": "curtain",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 19,
+   "name": "chair",
+   "label": "chair",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 20,
+   "name": "car",
+   "label": "car",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 21,
+   "name": "water",
+   "label": "water",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 22,
+   "name": "painting",
+   "label": "painting",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 23,
+   "name": "sofa",
+   "label": "sofa",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 24,
+   "name": "shelf",
+   "label": "shelf",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 25,
+   "name": "house",
+   "label": "house",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 26,
+   "name": "sea",
+   "label": "sea",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 27,
+   "name": "mirror",
+   "label": "mirror",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 28,
+   "name": "rug",
+   "label": "rug",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 29,
+   "name": "field",
+   "label": "field",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 30,
+   "name": "armchair",
+   "label": "armchair",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 31,
+   "name": "seat",
+   "label": "seat",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 32,
+   "name": "fence",
+   "label": "fence",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 33,
+   "name": "desk",
+   "label": "desk",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 34,
+   "name": "rock",
+   "label": "rock",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 35,
+   "name": "wardrobe",
+   "label": "wardrobe",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 36,
+   "name": "lamp",
+   "label": "lamp",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 37,
+   "name": "bathtub",
+   "label": "bathtub",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 38,
+   "name": "railing",
+   "label": "railing",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 39,
+   "name": "cushion",
+   "label": "cushion",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 40,
+   "name": "base",
+   "label": "base",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 41,
+   "name": "box",
+   "label": "box",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 42,
+   "name": "column",
+   "label": "column",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 43,
+   "name": "signboard",
+   "label": "signboard",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 44,
+   "name": "chest of drawers",
+   "label": "chest of drawers",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 45,
+   "name": "counter",
+   "label": "counter",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 46,
+   "name": "sand",
+   "label": "sand",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 47,
+   "name": "sink",
+   "label": "sink",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 48,
+   "name": "skyscraper",
+   "label": "skyscraper",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 49,
+   "name": "fireplace",
+   "label": "fireplace",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 50,
+   "name": "refrigerator",
+   "label": "refrigerator",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 51,
+   "name": "grandstand",
+   "label": "grandstand",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 52,
+   "name": "path",
+   "label": "path",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 53,
+   "name": "stairs",
+   "label": "stairs",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 54,
+   "name": "runway",
+   "label": "runway",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 55,
+   "name": "case",
+   "label": "display case",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 56,
+   "name": "pool table",
+   "label": "pool table",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 57,
+   "name": "pillow",
+   "label": "pillow",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 58,
+   "name": "screen door",
+   "label": "screen door",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 59,
+   "name": "stairway",
+   "label": "stairway",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 60,
+   "name": "river",
+   "label": "river",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 61,
+   "name": "bridge",
+   "label": "bridge",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 62,
+   "name": "bookcase",
+   "label": "bookcase",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 63,
+   "name": "blind",
+   "label": "blind",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 64,
+   "name": "coffee table",
+   "label": "coffee table",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 65,
+   "name": "toilet",
+   "label": "toilet",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 66,
+   "name": "flower",
+   "label": "flower",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 67,
+   "name": "book",
+   "label": "book",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 68,
+   "name": "hill",
+   "label": "hill",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 69,
+   "name": "bench",
+   "label": "bench",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 70,
+   "name": "countertop",
+   "label": "countertop",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 71,
+   "name": "stove",
+   "label": "stove",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 72,
+   "name": "palm",
+   "label": "palm",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 73,
+   "name": "kitchen island",
+   "label": "kitchen island",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 74,
+   "name": "computer",
+   "label": "computer",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 75,
+   "name": "swivel chair",
+   "label": "swivel chair",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 76,
+   "name": "boat",
+   "label": "boat",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 77,
+   "name": "bar",
+   "label": "bar",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 78,
+   "name": "arcade machine",
+   "label": "arcade machine",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 79,
+   "name": "hovel",
+   "label": "hovel",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 80,
+   "name": "bus",
+   "label": "bus",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 81,
+   "name": "towel",
+   "label": "towel",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 82,
+   "name": "light",
+   "label": "light",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 83,
+   "name": "truck",
+   "label": "truck",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 84,
+   "name": "tower",
+   "label": "tower",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 85,
+   "name": "chandelier",
+   "label": "chandelier",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 86,
+   "name": "awning",
+   "label": "awning",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 87,
+   "name": "streetlight",
+   "label": "streetlight",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 88,
+   "name": "booth",
+   "label": "booth",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 89,
+   "name": "television receiver",
+   "label": "TV",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 90,
+   "name": "airplane",
+   "label": "airplane",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 91,
+   "name": "dirt track",
+   "label": "dirt track",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 92,
+   "name": "apparel",
+   "label": "apparel",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 93,
+   "name": "pole",
+   "label": "pole",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 94,
+   "name": "land",
+   "label": "land",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 95,
+   "name": "bannister",
+   "label": "bannister",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 96,
+   "name": "escalator",
+   "label": "escalator",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 97,
+   "name": "ottoman",
+   "label": "ottoman",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 98,
+   "name": "bottle",
+   "label": "bottle",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 99,
+   "name": "buffet",
+   "label": "buffet",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 100,
+   "name": "poster",
+   "label": "poster",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 101,
+   "name": "stage",
+   "label": "stage",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 102,
+   "name": "van",
+   "label": "van",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 103,
+   "name": "ship",
+   "label": "ship",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 104,
+   "name": "fountain",
+   "label": "fountain",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 105,
+   "name": "conveyer belt",
+   "label": "conveyer belt",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 106,
+   "name": "canopy",
+   "label": "canopy",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 107,
+   "name": "washer",
+   "label": "washer",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 108,
+   "name": "plaything",
+   "label": "plaything",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 109,
+   "name": "swimming pool",
+   "label": "swimming pool",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 110,
+   "name": "stool",
+   "label": "stool",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 111,
+   "name": "barrel",
+   "label": "barrel",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 112,
+   "name": "basket",
+   "label": "basket",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 113,
+   "name": "waterfall",
+   "label": "waterfall",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 114,
+   "name": "tent",
+   "label": "tent",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 115,
+   "name": "bag",
+   "label": "bag",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 116,
+   "name": "minibike",
+   "label": "minibike",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 117,
+   "name": "cradle",
+   "label": "cradle",
+   "group": "furniture",
+   "outline": true
+  },
+  {
+   "id": 118,
+   "name": "oven",
+   "label": "oven",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 119,
+   "name": "ball",
+   "label": "ball",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 120,
+   "name": "food",
+   "label": "food",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 121,
+   "name": "step",
+   "label": "step",
+   "group": "structure",
+   "outline": true
+  },
+  {
+   "id": 122,
+   "name": "tank",
+   "label": "tank",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 123,
+   "name": "trade name",
+   "label": "trade name",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 124,
+   "name": "microwave",
+   "label": "microwave",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 125,
+   "name": "pot",
+   "label": "pot",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 126,
+   "name": "animal",
+   "label": "animal",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 127,
+   "name": "bicycle",
+   "label": "bicycle",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 128,
+   "name": "lake",
+   "label": "lake",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 129,
+   "name": "dishwasher",
+   "label": "dishwasher",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 130,
+   "name": "screen",
+   "label": "screen",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 131,
+   "name": "blanket",
+   "label": "blanket",
+   "group": "soft",
+   "outline": true
+  },
+  {
+   "id": 132,
+   "name": "sculpture",
+   "label": "sculpture",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 133,
+   "name": "hood",
+   "label": "hood",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 134,
+   "name": "sconce",
+   "label": "sconce",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 135,
+   "name": "vase",
+   "label": "vase",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 136,
+   "name": "traffic light",
+   "label": "traffic light",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 137,
+   "name": "tray",
+   "label": "tray",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 138,
+   "name": "ashcan",
+   "label": "bin",
+   "group": "storage",
+   "outline": true
+  },
+  {
+   "id": 139,
+   "name": "fan",
+   "label": "fan",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 140,
+   "name": "pier",
+   "label": "pier",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 141,
+   "name": "crt screen",
+   "label": "screen",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 142,
+   "name": "plate",
+   "label": "plate",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 143,
+   "name": "monitor",
+   "label": "monitor",
+   "group": "appliance",
+   "outline": true
+  },
+  {
+   "id": 144,
+   "name": "bulletin board",
+   "label": "bulletin board",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 145,
+   "name": "shower",
+   "label": "shower",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 146,
+   "name": "radiator",
+   "label": "radiator",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 147,
+   "name": "glass",
+   "label": "glass",
+   "group": "ignored",
+   "outline": false
+  },
+  {
+   "id": 148,
+   "name": "clock",
+   "label": "clock",
+   "group": "fixture",
+   "outline": true
+  },
+  {
+   "id": 149,
+   "name": "flag",
+   "label": "flag",
+   "group": "fixture",
+   "outline": true
+  }
+ ]
+}

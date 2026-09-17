@@ -6,6 +6,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 command -v xcodegen >/dev/null || { echo "Needs XcodeGen: brew install xcodegen"; exit 1; }
+# The on-device segmentation model is generated, not checked in (see scripts/convert_segmentation.py).
+if [ ! -d Resources/RoomSegmentation.mlpackage ]; then
+    [ -x ~/.venvs/oasis-coreml/bin/python ] || { echo "Needs ~/.venvs/oasis-coreml (Python 3.12 with torch 2.5, transformers 4.46, coremltools 8.3) to build the model"; exit 1; }
+    ~/.venvs/oasis-coreml/bin/python scripts/convert_segmentation.py
+fi
 xcodegen generate --quiet
 
 # The first paired iPhone that is connected: CoreDevice id for devicectl, UDID for xcodebuild.

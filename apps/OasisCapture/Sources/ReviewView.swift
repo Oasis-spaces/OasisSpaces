@@ -51,6 +51,12 @@ struct ReviewView: View {
                     }
                 }
 
+                if !result.objectsSeen.isEmpty {
+                    Section("Recognised in the room") {
+                        Text(result.objectsSeen.joined(separator: ", "))
+                    }
+                }
+
                 Section("Files") {
                     if let folder = result.folder {
                         Text("Saved in Files › On My iPhone › Oasis Capture › Captures › \(folder.lastPathComponent)")

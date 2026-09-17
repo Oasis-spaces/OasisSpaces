@@ -111,7 +111,7 @@ final class Recorder {
 
     /// Finishes the video and writes capture.json. Calls back on the main queue.
     func finish(summary: CaptureSummary, advice: [Rule], config: RuleConfig, format: String,
-                completion: @escaping (URL?) -> Void) {
+                objectsSeen: [String: Double], completion: @escaping (URL?) -> Void) {
         try? poses?.close()
         poses = nil
         let write = { [folder, framesWritten, framesDropped] in
@@ -129,6 +129,8 @@ final class Recorder {
                 "framesDropped": framesDropped,
                 "summary": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(summary))) ?? [:],
                 "advice": advice.map { ["rule": $0.rawValue, "message": config.message($0)] },
+                // What the on-device segmentation saw, and for how many seconds.
+                "objectsSeen": objectsSeen.mapValues { ($0 * 10).rounded() / 10 },
             ]
             if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
                 try? data.write(to: folder.appendingPathComponent("capture.json"))

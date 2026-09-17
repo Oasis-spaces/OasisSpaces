@@ -19,6 +19,9 @@ final class CaptureState: ObservableObject {
     @Published var pointCount = 0
     @Published var format = ""
     @Published var result: CaptureResult?
+    @Published var regions: [Region] = []
+    @Published var showOutlines = true
+    @Published var detected: [String] = []
 }
 
 struct CaptureResult: Identifiable {
@@ -26,6 +29,8 @@ struct CaptureResult: Identifiable {
     let folder: URL?
     let summary: CaptureSummary
     let advice: [Rule]
+    /// Recognised classes, most seen first.
+    var objectsSeen: [String] = []
 }
 
 /// Runs the AR session: every frame goes through the rules (before and during
@@ -41,6 +46,10 @@ final class CaptureController: NSObject, ARSessionDelegate {
     private let queue = DispatchQueue(label: "capture.frames", qos: .userInteractive)
     private var engine: RuleEngine
     private let analyzer = FrameAnalyzer()
+    let segmentation = SegmentationRunner()
+    /// Seconds each detected class was in view while recording (for capture.json).
+    private var secondsSeen: [String: Double] = [:]
+    private var lastSegmentationTime: Double?
     private let cloud = ScanCloud()
     private var recorder: Recorder?
     private var recording = false
@@ -90,6 +99,8 @@ final class CaptureController: NSObject, ARSessionDelegate {
                 return
             }
             self.engine.startRecording()
+            self.secondsSeen = [:]
+            self.lastSegmentationTime = nil
             self.cloud.reset()
             self.path = []
             self.recording = true
@@ -109,9 +120,11 @@ final class CaptureController: NSObject, ARSessionDelegate {
                 self.state.isRecording = false
                 self.state.isFinishing = true
             }
-            recorder.finish(summary: summary, advice: advice, config: self.config, format: self.formatName) { folder in
+            recorder.finish(summary: summary, advice: advice, config: self.config, format: self.formatName,
+                            objectsSeen: self.secondsSeen) { folder in
                 self.state.isFinishing = false
-                self.state.result = CaptureResult(folder: folder, summary: summary, advice: advice)
+                self.state.result = CaptureResult(folder: folder, summary: summary, advice: advice,
+                                                  objectsSeen: self.state.detected)
             }
             self.recorder = nil
         }
@@ -120,8 +133,13 @@ final class CaptureController: NSObject, ARSessionDelegate {
     // MARK: ARSessionDelegate (on `queue`)
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        let sample = analyzer.sample(frame)
+        var sample = analyzer.sample(frame)
+        if let result = segmentation.current {
+            // People from the segmentation, in place of a separate detector.
+            sample.peopleInView = result.personShare >= segmentation.spec.personWarnShare ? 1 : 0
+        }
         let guidance = engine.update(sample)
+        segmentation.submit(frame) { [weak self] result in self?.segmented(result, at: frame.timestamp) }
 
         if recording {
             recorder?.append(frame)
@@ -148,6 +166,26 @@ final class CaptureController: NSObject, ARSessionDelegate {
         if recording, frame.timestamp - lastCloudUpdate > 0.5 {
             lastCloudUpdate = frame.timestamp
             updateCloudNode()
+        }
+    }
+
+    /// A segmentation finished (on the segmentation queue).
+    private func segmented(_ result: SegmentationResult, at time: Double) {
+        queue.async {
+            if self.recording {
+                let dt = min(1, time - (self.lastSegmentationTime ?? time))
+                for (id, share) in result.classShares where share >= self.segmentation.spec.minRegionShare {
+                    if let info = self.segmentation.spec.info(id), info.outline {
+                        self.secondsSeen[info.label, default: 0] += dt
+                    }
+                }
+            }
+            self.lastSegmentationTime = time
+            let detected = self.secondsSeen.sorted { $0.value > $1.value }.map(\.key)
+            DispatchQueue.main.async {
+                self.state.regions = result.regions
+                self.state.detected = detected
+            }
         }
     }
 

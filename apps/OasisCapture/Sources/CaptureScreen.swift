@@ -27,6 +27,8 @@ private struct CaptureContent: View {
         ZStack {
             ARCameraView(controller: controller)
                 .ignoresSafeArea()
+            OutlineOverlay(state: state, session: controller.session, spec: controller.segmentation.spec)
+                .ignoresSafeArea()
 
             VStack(spacing: 12) {
                 HStack(alignment: .top) {
@@ -38,12 +40,21 @@ private struct CaptureContent: View {
                     }
                     .disabled(state.isRecording)
                     .opacity(state.isRecording ? 0 : 1)
+                    Button { state.showOutlines.toggle() } label: {
+                        Image(systemName: state.showOutlines ? "square.on.square.dashed" : "square.dashed")
+                            .font(.headline)
+                            .frame(width: 40, height: 40)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
                     Spacer()
                     CoverageMap(state: state)
                         .frame(width: 132, height: 132)
                 }
                 GuidanceBanner(guidance: state.guidance, isRecording: state.isRecording)
                 Spacer()
+                if state.isRecording && !state.detected.isEmpty {
+                    DetectedStrip(labels: state.detected)
+                }
                 ChecklistBar(state: state)
                 RecordControls(state: state, start: controller.startRecording, stop: controller.stopRecording)
             }
@@ -172,6 +183,25 @@ struct RecordControls: View {
                 if state.isFinishing { ProgressView() }
             }
             .frame(width: 100, alignment: .trailing)
+        }
+    }
+}
+
+/// What has been recognised so far in this recording, most seen first.
+struct DetectedStrip: View {
+    let labels: [String]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(labels.prefix(14), id: \.self) { label in
+                    Text(label)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+            }
         }
     }
 }
