@@ -118,6 +118,25 @@ final class RoomMapTests: XCTestCase {
         XCTAssertTrue(settled(builder).objects.isEmpty, "\(settled(builder).objects.map(\.label))")
     }
 
+    func testBedCalledSofaOnOneSideIsOneBoxNotTwo() {
+        let builder = RoomMapBuilder(spec: spec)
+        // The model says bed on the left half and sofa on the right half.
+        fill(builder, "bed", from: SIMD3(0, 0, 0), to: SIMD3(0.9, 0.5, 2.0))
+        fill(builder, "sofa", from: SIMD3(1.0, 0, 0), to: SIMD3(1.8, 0.5, 2.0))
+        let map = settled(builder)
+        XCTAssertEqual(map.objects.count, 1, "\(map.objects.map(\.label))")
+        XCTAssertEqual(map.objects[0].size.x, 1.8, accuracy: 0.2)
+    }
+
+    func testWallMountedThingsAreNotBoxed() {
+        let builder = RoomMapBuilder(spec: spec)
+        fill(builder, "painting", from: SIMD3(0, 1.2, 0), to: SIMD3(1.0, 1.8, 0.05))
+        fill(builder, "mirror", from: SIMD3(2, 1.0, 0), to: SIMD3(2.6, 1.8, 0.05))
+        fill(builder, "curtain", from: SIMD3(3, 0, 0), to: SIMD3(4.0, 2.2, 0.1))
+        fill(builder, "lamp", from: SIMD3(5, 0, 0), to: SIMD3(5.3, 1.5, 0.3))
+        XCTAssertEqual(settled(builder).objects.map(\.label), ["lamp"])
+    }
+
     func testBoxesTurnWithTheRoomsWalls() {
         let builder = RoomMapBuilder(spec: spec)
         // A wall running 30 degrees off the world x axis.

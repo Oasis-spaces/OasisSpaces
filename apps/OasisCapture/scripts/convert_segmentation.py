@@ -2,12 +2,13 @@
 """Build RoomSegmentation.mlpackage, the on-device model that outlines what is
 in the room while recording.
 
-SegFormer-B0 fine-tuned on ADE20K (150 indoor and outdoor classes: wall, floor,
+SegFormer-B2 fine-tuned on ADE20K (150 indoor and outdoor classes: wall, floor,
 ceiling, bed, cabinet, wardrobe, chest of drawers, sofa, rug, curtain, ...),
-3.8 M parameters, from https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512.
-The Core ML model takes a 512x512 RGB image and returns a 128x128 map of class
-ids (ImageNet normalisation and the per-pixel argmax are inside the model), so
-the phone gets classes directly.
+27 M parameters, from https://huggingface.co/nvidia/segformer-b2-finetuned-ade-512-512
+(B0, 3.8 M, was too often wrong: wallpaper as painting, a bed as a sofa).
+The Core ML model takes a 512x512 RGB image and returns a 512x512 map of class
+ids (ImageNet normalisation, upsampling and the per-pixel argmax are inside the
+model), so the phone gets classes directly.
 
 Needs Python 3.12 with torch 2.5, transformers 4.46 and coremltools 8.3:
     ~/.venvs/oasis-coreml/bin/python apps/OasisCapture/scripts/convert_segmentation.py [--check image.jpg]
@@ -24,9 +25,13 @@ import numpy as np
 import torch
 from transformers import SegformerForSemanticSegmentation
 
-MODEL_ID = "nvidia/segformer-b0-finetuned-ade-512-512"
+MODEL_ID = "nvidia/segformer-b2-finetuned-ade-512-512"
 OUT = Path(__file__).resolve().parent.parent / "Resources" / "RoomSegmentation.mlpackage"
 SIZE = 512
+# The decode head answers at 1/4 resolution; the logits are upsampled inside
+# the model before the argmax, so the class map is as fine as the input and
+# outlines are not jagged.
+OUT_SIZE = 512
 
 
 class Wrapped(torch.nn.Module):
@@ -38,6 +43,7 @@ class Wrapped(torch.nn.Module):
 
     def forward(self, image):  # image: RGB in 0...1
         logits = self.model(pixel_values=(image - self.mean) / self.std).logits
+        logits = torch.nn.functional.interpolate(logits, size=(OUT_SIZE, OUT_SIZE), mode="bilinear", align_corners=False)
         return torch.argmax(logits, dim=1).to(torch.int32)
 
 
@@ -55,7 +61,7 @@ def convert() -> dict:
         minimum_deployment_target=ct.target.iOS17,
         compute_precision=ct.precision.FLOAT16,
     )
-    mlmodel.short_description = "Room segmentation (SegFormer-B0, ADE20K): 128x128 class ids"
+    mlmodel.short_description = f"Room segmentation ({MODEL_ID.split('/')[1]}, ADE20K): {OUT_SIZE}x{OUT_SIZE} class ids"
     mlmodel.user_defined_metadata["labels"] = json.dumps(labels)
     mlmodel.user_defined_metadata["source"] = MODEL_ID
     OUT.parent.mkdir(parents=True, exist_ok=True)

@@ -34,6 +34,49 @@ public struct DetectionSpec: Codable, Sendable {
     public var labelHistoryFrames: Int = 6
     public var maxObjectMetres: Float = 4.0
     public var pointDepthMetres: [Float] = [0.3, 6.0]
+    public var buildIntervalSeconds: Double = 0.5
+    /// kin group name -> families the model confuses on one object.
+    public var kin: [String: [String]] = [:]
+    /// Families never placed as furniture boxes.
+    public var notBoxed: [String] = []
+
+    private enum CodingKeys: String, CodingKey {
+        case model, groups, minRegionShare, personWarnShare, classes, voteVoxelMetres, groupCellMetres, minVoxels,
+             confirmBuilds, graceBuilds, labelHistoryFrames, maxObjectMetres, pointDepthMetres, buildIntervalSeconds,
+             kin, notBoxed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        model = try c.decode(String.self, forKey: .model)
+        groups = try c.decode([String: Group].self, forKey: .groups)
+        minRegionShare = try c.decode(Double.self, forKey: .minRegionShare)
+        personWarnShare = try c.decode(Double.self, forKey: .personWarnShare)
+        classes = try c.decode([ClassInfo].self, forKey: .classes)
+        voteVoxelMetres = try c.decodeIfPresent(Float.self, forKey: .voteVoxelMetres) ?? 0.08
+        groupCellMetres = try c.decodeIfPresent(Float.self, forKey: .groupCellMetres) ?? 0.25
+        minVoxels = try c.decodeIfPresent(Int.self, forKey: .minVoxels) ?? 12
+        confirmBuilds = try c.decodeIfPresent(Int.self, forKey: .confirmBuilds) ?? 2
+        graceBuilds = try c.decodeIfPresent(Int.self, forKey: .graceBuilds) ?? 3
+        labelHistoryFrames = try c.decodeIfPresent(Int.self, forKey: .labelHistoryFrames) ?? 6
+        maxObjectMetres = try c.decodeIfPresent(Float.self, forKey: .maxObjectMetres) ?? 4
+        pointDepthMetres = try c.decodeIfPresent([Float].self, forKey: .pointDepthMetres) ?? [0.3, 6]
+        buildIntervalSeconds = try c.decodeIfPresent(Double.self, forKey: .buildIntervalSeconds) ?? 0.5
+        // The kin dictionary carries a comment string beside the lists.
+        if let raw = try? c.decode([String: KinValue].self, forKey: .kin) {
+            kin = raw.compactMapValues { if case .families(let f) = $0 { return f } else { return nil } }
+        }
+        notBoxed = try c.decodeIfPresent([String].self, forKey: .notBoxed) ?? []
+    }
+
+    private enum KinValue: Decodable {
+        case families([String])
+        case comment(String)
+        init(from decoder: Decoder) throws {
+            let single = try decoder.singleValueContainer()
+            if let list = try? single.decode([String].self) { self = .families(list) } else { self = .comment(try single.decode(String.self)) }
+        }
+    }
 
     public static func bundled() -> DetectionSpec {
         guard let url = Bundle.module.url(forResource: "detection-classes", withExtension: "json"),
@@ -51,6 +94,20 @@ public struct DetectionSpec: Codable, Sendable {
     /// The family a class belongs to (its own name when it has none).
     public func family(_ id: Int) -> String? {
         info(id)?.familyName
+    }
+
+    /// The kin group a family belongs to (the family itself when it has none):
+    /// what counts as "the same object" for outlines and boxes.
+    public func kinGroup(of family: String) -> String {
+        kin.first { $0.value.contains(family) }?.key ?? family
+    }
+
+    public func kinGroup(_ id: Int) -> String? {
+        family(id).map(kinGroup(of:))
+    }
+
+    public func isBoxed(family: String) -> Bool {
+        !notBoxed.contains(family)
     }
 }
 
@@ -84,10 +141,10 @@ public struct LabelMemory {
                 votes[Int(map.classes[y * map.width + x]), default: 0] += 1
             }
             votes[steadied.regions[i].classId, default: 0] += 1   // the frame itself counts too
-            // Only classes of the same family may replace the frame's own answer:
+            // Only classes of the same kin may replace the frame's own answer:
             // a chair flips to sofa, not to floor.
-            let family = spec.family(steadied.regions[i].classId)
-            let best = votes.filter { spec.family($0.key) == family }.max { $0.value < $1.value }
+            let kin = spec.kinGroup(steadied.regions[i].classId)
+            let best = votes.filter { spec.kinGroup($0.key) == kin }.max { $0.value < $1.value }
             if let best, let info = spec.info(best.key), best.key != steadied.regions[i].classId {
                 steadied.regions[i].classId = best.key
                 steadied.regions[i].label = info.label
@@ -143,14 +200,33 @@ public enum OutlineExtractor {
         let personShare = personId.flatMap { shares[$0] } ?? 0
 
         let minArea = max(1, Int(spec.minRegionShare * Double(total)))
+        // Regions are grown over kin: a bed the model half calls a sofa is one
+        // region, labelled by the class most of its pixels carry.
+        var groupOf = [Int16](repeating: -1, count: 256)
+        var groupNames: [String] = []
+        for info in spec.classes where info.outline && info.id < 256 {
+            let name = spec.kinGroup(of: info.familyName)
+            if let index = groupNames.firstIndex(of: name) {
+                groupOf[info.id] = Int16(index)
+            } else {
+                groupNames.append(name)
+                groupOf[info.id] = Int16(groupNames.count - 1)
+            }
+        }
+        func group(_ i: Int) -> Int16 {
+            let c = Int(classes[i])
+            return c >= 0 && c < 256 ? groupOf[c] : -1
+        }
+        // Simplification tolerance grows with the map (a 512-wide map may lose 5 px of wobble).
+        let epsilon = epsilon * max(1, Double(width) / 128)
         var visited = [Bool](repeating: false, count: total)
         var regions: [Region] = []
         var queue: [Int] = []
         queue.reserveCapacity(total)
 
         for start in 0..<total where !visited[start] {
-            let cls = classes[start]
-            guard let info = spec.info(Int(cls)), info.outline, (counts[cls] ?? 0) >= minArea else {
+            let g = group(start)
+            guard g >= 0 else {
                 visited[start] = true
                 continue
             }
@@ -160,26 +236,29 @@ public enum OutlineExtractor {
             visited[start] = true
             var head = 0
             var sumX = 0.0, sumY = 0.0
+            var members: [Int32: Int] = [:]
             while head < queue.count {
                 let i = queue[head]
                 head += 1
                 let x = i % width, y = i / width
                 sumX += Double(x)
                 sumY += Double(y)
+                members[classes[i], default: 0] += 1
                 for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
                 where nx >= 0 && ny >= 0 && nx < width && ny < height {
                     let j = ny * width + nx
-                    if !visited[j] && classes[j] == cls {
+                    if !visited[j] && group(j) == g {
                         visited[j] = true
                         queue.append(j)
                     }
                 }
             }
             let area = queue.count
-            guard area >= minArea else { continue }
+            guard area >= minArea, let cls = members.max(by: { $0.value < $1.value })?.key,
+                  let info = spec.info(Int(cls)) else { continue }
             // The flood started at the region's first pixel in raster order,
             // which is where boundary tracing must start.
-            let boundary = traceBoundary(start: start, width: width, height: height) { classes[$0] == cls }
+            let boundary = traceBoundary(start: start, width: width, height: height) { group($0) == g }
             let simplified = simplifyClosed(boundary.map { SIMD2(Double($0 % width), Double($0 / width)) }, epsilon: epsilon)
             regions.append(Region(
                 classId: Int(cls), label: info.label, group: info.group,

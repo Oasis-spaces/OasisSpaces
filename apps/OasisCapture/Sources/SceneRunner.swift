@@ -224,8 +224,12 @@ final class SceneRunner {
         let source = CIImage(cvPixelBuffer: buffer)
         let scale = Self.glowLongSide / max(source.extent.width, source.extent.height)
         let small = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let edges = small.applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 6.0])
-        let soft = edges.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1.2])
+        // Edges, with texture and noise cut away (the contrast step pushes faint
+        // edges to black), then thickened a touch so they read as lines.
+        let edges = small.applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 3.0])
+            .applyingFilter("CIColorControls", parameters: [kCIInputContrastKey: 3.0, kCIInputBrightnessKey: -0.35])
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: 1.0])
+        let soft = edges.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 2.0])
             .cropped(to: small.extent)
         let lit = edges.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: soft])
         // The edge brightness becomes the alpha of a class-coloured image.
@@ -245,6 +249,7 @@ final class SceneRunner {
         let w = classes.height, h = classes.width   // upright map turned to landscape
         var bytes = [UInt8](repeating: 0, count: w * h * 4)
         var colourOf: [Int: (UInt8, UInt8, UInt8)] = [:]
+        let structureIds = Set(spec.classes.filter { $0.group == "structure" }.map(\.id))
         for info in spec.classes where info.outline {
             let hex = spec.groups[info.group]?.color ?? "#FFFFFF"
             var value: UInt64 = 0
@@ -257,8 +262,11 @@ final class SceneRunner {
                 let xu = classes.width - 1 - y * classes.width / h, yu = x * classes.height / w
                 let cls = Int(classes.classes[yu * classes.width + xu])
                 guard let (r, g, b) = colourOf[cls] else { continue }
+                // Walls, floor and ceiling glow softly; things in the room glow fully.
+                let a: UInt8 = structureIds.contains(cls) ? 90 : 255
                 let i = (y * w + x) * 4
-                bytes[i] = r; bytes[i + 1] = g; bytes[i + 2] = b; bytes[i + 3] = 255
+                bytes[i] = UInt8(UInt16(r) * UInt16(a) / 255); bytes[i + 1] = UInt8(UInt16(g) * UInt16(a) / 255)
+                bytes[i + 2] = UInt8(UInt16(b) * UInt16(a) / 255); bytes[i + 3] = a
             }
         }
         let data = Data(bytes)

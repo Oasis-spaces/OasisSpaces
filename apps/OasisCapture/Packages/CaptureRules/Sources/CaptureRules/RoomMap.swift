@@ -167,7 +167,7 @@ public final class RoomMapBuilder {
     public var excludedGroups: Set<String> = ["structure", "person"]
 
     private var planes: [UUID: PlaneInfo] = [:]
-    /// voxel -> family -> class id -> hits
+    /// voxel -> kin group -> class id -> hits
     private var votes: [SIMD3<Int32>: [String: [Int: Int]]] = [:]
     private var tracked: [Tracked] = []
     private var nextID = 1
@@ -208,11 +208,13 @@ public final class RoomMapBuilder {
 
     /// A tracked point the segmentation put in class `classId` this frame.
     public func add(point: SIMD3<Float>, classId: Int) {
-        guard let info = spec.info(classId), info.outline, !excludedGroups.contains(info.group) else { return }
+        guard let info = spec.info(classId), info.outline, !excludedGroups.contains(info.group),
+              spec.isBoxed(family: info.familyName) else { return }
         let v = spec.voteVoxelMetres
         let key = SIMD3<Int32>(Int32((point.x / v).rounded(.down)), Int32((point.y / v).rounded(.down)),
                                Int32((point.z / v).rounded(.down)))
-        lock.withLock { votes[key, default: [:]][info.familyName, default: [:]][classId, default: 0] += 1 }
+        let kin = spec.kinGroup(of: info.familyName)
+        lock.withLock { votes[key, default: [:]][kin, default: [:]][classId, default: 0] += 1 }
     }
 
     public func add(points: [(SIMD3<Float>, Int)]) {
@@ -320,7 +322,7 @@ public final class RoomMapBuilder {
             // The candidate of the same family overlapping this box the most, from above.
             var bestIndex: Int?
             var bestOverlap: Float = 0
-            for (j, c) in unmatched.enumerated() where c.family == box.family {
+            for (j, c) in unmatched.enumerated() where c.family == spec.kinGroup(of: box.family) {
                 let overlap = Self.footprintOverlap(box.min, box.max, c.min, c.max)
                 if overlap > bestOverlap { bestOverlap = overlap; bestIndex = j }
             }
@@ -330,6 +332,7 @@ public final class RoomMapBuilder {
                 continue
             }
             let c = unmatched.remove(at: j)
+            tracked[i].box.family = spec.family(c.votes.max { $0.value < $1.value }?.key ?? box.classId) ?? box.family
             // Move part of the way: an object grows smoothly as more of it is seen.
             let k: Float = 0.35
             tracked[i].box.center += (c.center - box.center) * k
@@ -348,7 +351,7 @@ public final class RoomMapBuilder {
             let top = c.votes.max { $0.value < $1.value }?.key ?? 0
             guard let info = spec.info(top) else { continue }
             tracked.append(Tracked(
-                box: ObjectBox(id: "o\(nextID)", classId: top, label: info.label, group: info.group, family: c.family,
+                box: ObjectBox(id: "o\(nextID)", classId: top, label: info.label, group: info.group, family: info.familyName,
                                center: c.center, size: c.size, yaw: c.yaw, points: c.voxels),
                 votes: c.votes, seen: 1, missed: 0, shown: spec.confirmBuilds <= 1))
             nextID += 1
@@ -364,6 +367,7 @@ public final class RoomMapBuilder {
         t.box.classId = top.key
         t.box.label = info.label
         t.box.group = info.group
+        t.box.family = info.familyName
     }
 
     /// Share of the smaller footprint the two boxes share, seen from above.

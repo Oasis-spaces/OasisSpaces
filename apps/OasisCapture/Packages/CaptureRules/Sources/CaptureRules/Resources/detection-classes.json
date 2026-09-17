@@ -1238,5 +1238,30 @@
  "pointDepthMetres": [
   0.3,
   6.0
- ]
+ ],
+ "kin": {
+  "comment": "Families the model confuses on the same object (a bed called a sofa, a wardrobe called a cabinet or a counter): they are outlined and boxed together, and the box shows the most-voted class.",
+  "sitting": [
+   "bed",
+   "seating"
+  ],
+  "unit": [
+   "storage",
+   "table"
+  ],
+  "flat": [
+   "screen",
+   "picture"
+  ]
+ },
+ "notBoxed": [
+  "picture",
+  "wall",
+  "floor",
+  "door",
+  "window",
+  "curtain"
+ ],
+ "notBoxedComment": "Families that are never placed as furniture: on or part of the walls.",
+ "buildIntervalSeconds": 0.5
 }

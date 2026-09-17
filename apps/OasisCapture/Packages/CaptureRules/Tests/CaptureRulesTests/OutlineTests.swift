@@ -70,6 +70,17 @@ final class OutlineTests: XCTestCase {
         XCTAssertEqual(result.personShare, 200.0 / 4096, accuracy: 1e-9)
     }
 
+    func testKinClassesFormOneRegionWithTheMajorityLabel() {
+        var m = map(filledWith: "wall")
+        paint(&m, "bed", x: 10..<30, y: 20..<50)
+        paint(&m, "sofa", x: 30..<40, y: 20..<50)
+        let result = OutlineExtractor.extract(classes: m, width: 64, height: 64, spec: spec)
+        let sitting = result.regions.filter { ["bed", "sofa"].contains($0.label) }
+        XCTAssertEqual(sitting.count, 1, "\(result.regions.map(\.label))")
+        XCTAssertEqual(sitting[0].label, "bed")
+        XCTAssertEqual(sitting[0].share, 900.0 / 4096, accuracy: 1e-9)
+    }
+
     func testSinglePixelAndDiagonalShapesDoNotHang() {
         var m = map(filledWith: "wall", size: 16)
         for i in 0..<16 { m[i * 16 + i] = id("rug") }      // a 1-px diagonal line

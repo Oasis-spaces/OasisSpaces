@@ -191,7 +191,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
             lastCloudUpdate = frame.timestamp
             updateCloudNode()
         }
-        if frame.timestamp - lastMapBuild > 1.0 {
+        if frame.timestamp - lastMapBuild > mapBuilder.spec.buildIntervalSeconds {
             lastMapBuild = frame.timestamp
             rebuildMap()
         }
@@ -250,9 +250,11 @@ final class CaptureController: NSObject, ARSessionDelegate {
         return anchor.alignment == .vertical ? .wall : .floor
     }
 
-    /// A translucent surface with an outline, in the plane's own shape.
+    /// A faint fill in the plane's own shape, with its boundary drawn as one line
+    /// (never the triangles inside it).
     private func updatePlaneNode(_ anchor: ARPlaneAnchor, kind: PlaneInfo.Kind) {
         let color = Self.planeColor(kind)
+        let boundary = anchor.geometry.boundaryVertices
         DispatchQueue.main.async {
             let node: SCNNode
             if let existing = self.planeNodes[anchor.identifier] {
@@ -262,20 +264,13 @@ final class CaptureController: NSObject, ARSessionDelegate {
                 guard let device = MTLCreateSystemDefaultDevice(),
                       let geometry = ARSCNPlaneGeometry(device: device) else { return }
                 let fill = SCNMaterial()
-                fill.diffuse.contents = color.withAlphaComponent(kind == .floor ? 0.10 : 0.16)
+                fill.diffuse.contents = color.withAlphaComponent(kind == .floor ? 0.06 : 0.10)
                 fill.lightingModel = .constant
                 fill.isDoubleSided = true
+                fill.writesToDepthBuffer = false
                 geometry.materials = [fill]
                 node.geometry = geometry
                 let outline = SCNNode()
-                let edges = ARSCNPlaneGeometry(device: device)!
-                let line = SCNMaterial()
-                line.diffuse.contents = color
-                line.fillMode = .lines
-                line.lightingModel = .constant
-                line.isDoubleSided = true
-                edges.materials = [line]
-                outline.geometry = edges
                 outline.name = "outline"
                 node.addChildNode(outline)
                 self.mapNode.addChildNode(node)
@@ -283,7 +278,20 @@ final class CaptureController: NSObject, ARSessionDelegate {
             }
             node.simdTransform = anchor.transform
             (node.geometry as? ARSCNPlaneGeometry)?.update(from: anchor.geometry)
-            (node.childNode(withName: "outline", recursively: false)?.geometry as? ARSCNPlaneGeometry)?.update(from: anchor.geometry)
+            if let outline = node.childNode(withName: "outline", recursively: false), boundary.count >= 3 {
+                let vertices = boundary.map { SCNVector3($0.x, $0.y, $0.z) }
+                let source = SCNGeometrySource(vertices: vertices)
+                var indices: [Int32] = []
+                for i in 0..<Int32(vertices.count) { indices += [i, (i + 1) % Int32(vertices.count)] }
+                let element = SCNGeometryElement(indices: indices, primitiveType: .line)
+                let geometry = SCNGeometry(sources: [source], elements: [element])
+                let line = SCNMaterial()
+                line.diffuse.contents = color
+                line.lightingModel = .constant
+                line.writesToDepthBuffer = false
+                geometry.materials = [line]
+                outline.geometry = geometry
+            }
         }
     }
 

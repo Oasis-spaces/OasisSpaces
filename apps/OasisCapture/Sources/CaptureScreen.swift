@@ -171,7 +171,7 @@ struct RecordControls: View {
 
     var body: some View {
         HStack {
-            Text(state.isRecording ? "\(state.map.objects.count) placed" + (state.depthOK ? "" : " · no depth") : state.format)
+            Text("\(state.map.objects.count) placed" + (state.depthOK ? "" : " · no depth"))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 100, alignment: .leading)
