@@ -41,8 +41,14 @@
 	<string>public.app-category.graphics-design</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_oasisstation._tcp</string>
+	</array>
 	<key>NSHumanReadableCopyright</key>
 	<string>Oasis-spaces</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Splat Viewer receives room recordings from the Oasis Capture app on your phone over the local network.</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>

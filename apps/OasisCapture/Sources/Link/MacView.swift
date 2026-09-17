@@ -11,6 +11,35 @@ struct MacView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    AccountView(store: link.account)
+                } header: {
+                    Text("Account")
+                } footer: {
+                    Text("Sign in with the same account on your Mac and this phone, and they pair by themselves.")
+                }
+
+                if link.paired == nil, !link.macsOnMyAccount.isEmpty {
+                    Section("Your Macs") {
+                        ForEach(link.macsOnMyAccount) { station in
+                            Button {
+                                pairing = true
+                                Task {
+                                    _ = await link.pairByAccount(with: station)
+                                    pairing = false
+                                }
+                            } label: {
+                                HStack {
+                                    Label(station.name, systemImage: "laptopcomputer")
+                                    Spacer()
+                                    if pairing { ProgressView() } else { Text("Connect").foregroundStyle(.blue) }
+                                }
+                            }
+                            .foregroundStyle(.primary)
+                        }
+                    }
+                }
+
                 if let mac = link.paired {
                     Section {
                         HStack(spacing: 14) {
@@ -62,9 +91,9 @@ struct MacView: View {
                         .foregroundStyle(.primary)
                     }
                 } header: {
-                    Text(link.paired == nil ? "Pair with your Mac" : "Macs on this network")
+                    Text(link.paired == nil ? "Pair with a code" : "Macs on this network")
                 } footer: {
-                    Text("On the Mac, open Splat Viewer. Its home page shows a pairing code under Phone captures.")
+                    Text("Without an account: on the Mac, open Splat Viewer. Its home page shows a pairing code under Phone captures.")
                 }
             }
             .navigationTitle("Mac")

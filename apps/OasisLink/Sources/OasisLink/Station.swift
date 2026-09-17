@@ -24,11 +24,15 @@ public struct JobOutcome: Sendable {
 /// them one at a time, and serving results. State lives under `folder`:
 /// tokens.json, and jobs/<id>/{job.json, results.json, input/}.
 public final class Station: @unchecked Sendable {
-    public let info: StationInfo
+    public var info: StationInfo { lock.withLock { var i = baseInfo; i.owner = owner.map(AccountSession.tag); return i } }
     public let stages: [String]
     /// Called on every change, with every job, newest first (any queue).
     public var onChange: (@Sendable ([Job]) -> Void)?
 
+    private let baseInfo: StationInfo
+    /// The account the Mac is signed in to, and how to tell whose a phone's login is.
+    private var owner: String?
+    private var accountCheck: (@Sendable (String) async -> String?)?
     private let folder: URL
     private let runner: JobRunner
     private let lock = NSLock()
@@ -40,7 +44,7 @@ public final class Station: @unchecked Sendable {
 
     public init(folder: URL, info: StationInfo, stages: [String], runner: JobRunner) {
         self.folder = folder
-        self.info = info
+        self.baseInfo = info
         self.stages = stages
         self.runner = runner
         code = Station.newCode()
@@ -58,6 +62,16 @@ public final class Station: @unchecked Sendable {
     }
 
     public var pairedDevices: [String] { lock.withLock { Array(tokens.values).sorted() } }
+
+    /// Signs the station in to an account (nil signs out): phones signed in to the
+    /// same account pair without a code. `check` returns the user id a phone's
+    /// access token belongs to (AccountClient.userID).
+    public func setAccount(userID: String?, check: (@Sendable (String) async -> String?)?) {
+        lock.withLock {
+            owner = userID
+            accountCheck = check
+        }
+    }
 
     public func unpairAll() {
         lock.withLock { tokens = [:] }
@@ -101,6 +115,18 @@ public final class Station: @unchecked Sendable {
         switch (request.method, s.count) {
         case ("GET", 1) where s[0] == "info":
             return .respond(.json(info))
+
+        case ("POST", 2) where s[0] == "pair" && s[1] == "account":
+            return .asyncBody(maxBytes: 16384) { [weak self] data in
+                guard let self, let pair = try? JSONDecoder.link.decode(AccountPairRequest.self, from: data) else {
+                    return .error(400, "bad pairing request")
+                }
+                let (owner, check) = self.lock.withLock { (self.owner, self.accountCheck) }
+                guard let owner, let check else { return .error(409, "The Mac is not signed in to an account") }
+                guard let user = await check(pair.accessToken) else { return .error(401, "Sign in again on the phone") }
+                guard user == owner else { return .error(403, "This phone is signed in to a different account than the Mac") }
+                return .json(self.issueToken(device: pair.device))
+            }
 
         case ("POST", 1) where s[0] == "pair":
             return .body(maxBytes: 4096) { [weak self] data in
@@ -180,6 +206,13 @@ public final class Station: @unchecked Sendable {
         default:
             return .respond(.error(404, "unknown request"))
         }
+    }
+
+    private func issueToken(device: String) -> PairResponse {
+        let token = UUID().uuidString + UUID().uuidString
+        lock.withLock { tokens[token] = device }
+        saveTokens()
+        return PairResponse(token: token, station: info)
     }
 
     private func pair(_ request: PairRequest) -> HTTPResponse {

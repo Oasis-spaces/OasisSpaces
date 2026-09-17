@@ -25,6 +25,8 @@ final class StationService {
         }
     }
 
+    /// The account the Mac is signed in to; phones on the same account pair without a code.
+    @ObservationIgnored let account = AccountStore()
     @ObservationIgnored private var server: HTTPServer?
     @ObservationIgnored private var station: Station?
     @ObservationIgnored private let runner: PipelineRunner
@@ -48,12 +50,9 @@ final class StationService {
         }
         self.station = station
         do {
-            let host = Self.localHostName
             let server = try HTTPServer(
                 port: Link.defaultPort,
-                service: (name: Self.computerName, type: Link.serviceType,
-                          txt: ["id": Self.stationID, "name": Self.computerName, "host": host,
-                                "port": String(Link.defaultPort)])) { station.route($0) }
+                service: (name: Self.computerName, type: Link.serviceType, txt: txtRecord())) { station.route($0) }
             server.start { state in
                 Task { @MainActor in
                     switch state {
@@ -73,6 +72,21 @@ final class StationService {
         }
         refresh()
         station.resume()
+        applyAccount()
+    }
+
+    /// Tells the station whose account this is (call after signing in or out).
+    func applyAccount() {
+        let store = account
+        station?.setAccount(userID: store.session?.userID) { token in await store.userID(for: token) }
+        server?.updateTXT(txtRecord())
+    }
+
+    private func txtRecord() -> [String: String] {
+        var txt = ["id": Self.stationID, "name": Self.computerName, "host": Self.localHostName,
+                   "port": String(Link.defaultPort)]
+        if let owner = account.session?.ownerTag { txt["owner"] = owner }
+        return txt
     }
 
     func refresh() {

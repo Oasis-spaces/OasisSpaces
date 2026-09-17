@@ -28,6 +28,7 @@ final class LinkStore: ObservableObject {
     @Published private(set) var reachable = false
     @Published private(set) var lastError: String?
     @Published var upload: Upload?
+    let account = AccountStore()
 
     private let browser = StationBrowser()
     private var browsing = false
@@ -69,6 +70,32 @@ final class LinkStore: ObservableObject {
             lastError = error.localizedDescription
             return false
         }
+    }
+
+    /// Pairs with a Mac signed in to the same account, no code needed.
+    func pairByAccount(with station: DiscoveredStation) async -> Bool {
+        guard let session = await account.validSession() else {
+            lastError = "Sign in first"
+            return false
+        }
+        let client = StationClient(baseURL: station.baseURL)
+        do {
+            let response = try await client.pair(account: session, device: UIDeviceName.current)
+            Keychain.set(response.token, for: response.station.id)
+            save(PairedMac(id: response.station.id, name: response.station.name, baseURL: station.baseURL))
+            lastError = nil
+            await refresh()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Macs on this network signed in to the same account as this phone.
+    var macsOnMyAccount: [DiscoveredStation] {
+        guard let tag = account.session?.ownerTag else { return [] }
+        return discovered.filter { $0.owner == tag }
     }
 
     func unpair() {

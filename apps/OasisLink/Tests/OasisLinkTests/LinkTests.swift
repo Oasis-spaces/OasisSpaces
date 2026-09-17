@@ -157,3 +157,92 @@ private final class ProgressBox: @unchecked Sendable {
     func set(_ x: Double) { lock.withLock { v = max(v, x) } }
     var value: Double { lock.withLock { v } }
 }
+
+/// A stand-in for Supabase Auth: two users, fixed passwords.
+private func fakeAuthServer() throws -> HTTPServer {
+    let users = ["mac@example.com": ("user-1", "right"), "other@example.com": ("user-2", "right")]
+    return try HTTPServer(port: 0) { request in
+        switch (request.method, request.path) {
+        case ("POST", "/auth/v1/token"):
+            return .body(maxBytes: 4096) { data in
+                let body = (try? JSONSerialization.jsonObject(with: data) as? [String: String]) ?? [:]
+                guard request.headers["apikey"] == "anon", let email = body["email"], let user = users[email],
+                      body["password"] == user.1 else {
+                    return .json(["error": "invalid_grant", "error_description": "Invalid login credentials"], status: 400)
+                }
+                let json = "{\"access_token\":\"token-\(user.0)\",\"refresh_token\":\"r\",\"expires_in\":3600,\"user\":{\"id\":\"\(user.0)\",\"email\":\"\(email)\"}}"
+                return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: .data(Data(json.utf8)))
+            }
+        case ("GET", "/auth/v1/user"):
+            guard let token = request.bearerToken, token.hasPrefix("token-") else { return .respond(.error(401, "bad jwt")) }
+            let json = "{\"id\":\"\(token.dropFirst(6))\"}"
+            return .respond(HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: .data(Data(json.utf8))))
+        default:
+            return .respond(.error(404, "no"))
+        }
+    }
+}
+
+final class AccountTests: XCTestCase {
+    func testPhoneOnSameAccountPairsWithoutCode() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("oasisaccount-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let auth = try fakeAuthServer()
+        let authReady = expectation(description: "auth")
+        auth.start { if case .ready = $0 { authReady.fulfill() } }
+        await fulfillment(of: [authReady], timeout: 5)
+        defer { auth.stop() }
+        let accounts = AccountClient(config: AccountConfig(url: URL(string: "http://127.0.0.1:\(auth.port!)")!, anonKey: "anon"))
+
+        do {
+            _ = try await accounts.signIn(email: "mac@example.com", password: "wrong")
+            XCTFail("wrong password accepted")
+        } catch let error as AccountError {
+            XCTAssertEqual(error.message, "Invalid login credentials")
+        }
+        let macSession = try await accounts.signIn(email: "mac@example.com", password: "right")
+        XCTAssertEqual(macSession.userID, "user-1")
+
+        let station = Station(folder: folder, info: StationInfo(id: "mac", name: "Mac"), stages: ["a"],
+                              runner: NoRunner())
+        let server = try HTTPServer(port: 0) { station.route($0) }
+        let ready = expectation(description: "station")
+        server.start { if case .ready = $0 { ready.fulfill() } }
+        await fulfillment(of: [ready], timeout: 5)
+        defer { server.stop() }
+        let base = URL(string: "http://127.0.0.1:\(server.port!)")!
+
+        // Not signed in yet: account pairing is refused.
+        do {
+            _ = try await StationClient(baseURL: base).pair(account: macSession, device: "iPhone")
+            XCTFail("paired before the Mac signed in")
+        } catch let error as LinkError {
+            XCTAssertEqual(error.status, 409)
+        }
+
+        station.setAccount(userID: macSession.userID) { await accounts.userID(for: $0) }
+        let info = try await StationClient(baseURL: base).info()
+        XCTAssertEqual(info.owner, macSession.ownerTag)
+
+        let other = try await accounts.signIn(email: "other@example.com", password: "right")
+        do {
+            _ = try await StationClient(baseURL: base).pair(account: other, device: "Someone else's iPhone")
+            XCTFail("another account paired")
+        } catch let error as LinkError {
+            XCTAssertEqual(error.status, 403)
+        }
+
+        let phoneSession = try await accounts.signIn(email: "mac@example.com", password: "right")
+        let phone = StationClient(baseURL: base)
+        _ = try await phone.pair(account: phoneSession, device: "My iPhone")
+        let jobs = try await phone.jobs()
+        XCTAssertEqual(jobs.count, 0)
+        XCTAssertEqual(station.pairedDevices, ["My iPhone"])
+    }
+}
+
+private final class NoRunner: JobRunner, @unchecked Sendable {
+    func run(job: Job, inputs: URL, stage: @escaping @Sendable (Int, String?) -> Void) async -> JobOutcome {
+        JobOutcome(ok: true)
+    }
+}

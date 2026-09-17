@@ -14,10 +14,13 @@ public struct StationInfo: Codable, Sendable, Equatable {
     public var id: String
     public var name: String
     public var version: Int
-    public init(id: String, name: String, version: Int = Link.version) {
+    /// AccountSession.tag of the account the Mac is signed in to, if any.
+    public var owner: String?
+    public init(id: String, name: String, version: Int = Link.version, owner: String? = nil) {
         self.id = id
         self.name = name
         self.version = version
+        self.owner = owner
     }
 }
 

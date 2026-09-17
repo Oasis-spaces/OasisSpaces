@@ -34,6 +34,14 @@ public final class StationClient: NSObject, @unchecked Sendable {
         return response
     }
 
+    /// Pairs with a Mac signed in to the same account, without a code.
+    public func pair(account: AccountSession, device: String) async throws -> PairResponse {
+        let response: PairResponse = try await send("POST", "pair/account",
+                                                    body: AccountPairRequest(accessToken: account.accessToken, device: device))
+        token = response.token
+        return response
+    }
+
     public func jobs() async throws -> [Job] {
         try await get("jobs")
     }

@@ -10,7 +10,7 @@ let package = Package(
     platforms: [.iOS(.v17), .macOS(.v14)],
     products: [.library(name: "OasisLink", targets: ["OasisLink"])],
     targets: [
-        .target(name: "OasisLink"),
+        .target(name: "OasisLink", resources: [.process("Resources")]),
         .testTarget(name: "OasisLinkTests", dependencies: ["OasisLink"]),
     ]
 )

@@ -15,6 +15,8 @@ struct PhoneCapturesSection: View {
                 statusBadge
             }
 
+            AccountBox(station: station)
+
             HStack(alignment: .top, spacing: 16) {
                 pairingCard
                 VStack(alignment: .leading, spacing: 6) {
@@ -175,5 +177,30 @@ private struct JobRow: View {
         case .done: return job.message.map { "Done. \($0)" } ?? "Done"
         case .failed: return job.message ?? "The analysis failed"
         }
+    }
+}
+
+/// Sign in on the Mac so phones on the same account pair by themselves.
+private struct AccountBox: View {
+    let station: StationService
+    @ObservedObject var account: AccountStore
+
+    init(station: StationService) {
+        self.station = station
+        account = station.account
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            AccountView(store: account)
+            Text(account.isSignedIn
+                 ? "A phone signed in to this account pairs with this Mac without a code."
+                 : "Sign in here and on the phone with the same account, and they pair without a code.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(.background, in: RoundedRectangle(cornerRadius: 10))
+        .onChange(of: account.session) { station.applyAccount() }
     }
 }

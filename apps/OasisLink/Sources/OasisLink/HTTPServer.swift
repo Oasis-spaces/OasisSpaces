@@ -57,6 +57,8 @@ public enum RouteDecision: Sendable {
     case body(maxBytes: Int, @Sendable (Data) -> HTTPResponse)
     /// Stream the body to a file, then answer (the Bool says whether all of it arrived).
     case upload(to: URL, @Sendable (Bool) -> HTTPResponse)
+    /// Read a small body, then answer after asynchronous work (checking a login with a server).
+    case asyncBody(maxBytes: Int, @Sendable (Data) async -> HTTPResponse)
 }
 
 /// A small HTTP/1.1 server on Network.framework: one request per connection,
@@ -95,6 +97,13 @@ public final class HTTPServer: @unchecked Sendable {
 
     public func stop() {
         listener.cancel()
+    }
+
+    /// Changes what the Bonjour TXT record says (the signed-in account, say).
+    public func updateTXT(_ txt: [String: String]) {
+        guard let service = listener.service else { return }
+        listener.service = NWListener.Service(name: service.name, type: service.type, domain: service.domain,
+                                              txtRecord: NWTXTRecord(txt))
     }
 
     private func accept(_ connection: NWConnection) {
@@ -153,6 +162,19 @@ public final class HTTPServer: @unchecked Sendable {
             readBody(connection, have: rest, length: length) { [weak self] data in
                 guard let data else { connection.cancel(); return }
                 self?.send(answer(data), on: connection)
+            }
+        case .asyncBody(let maxBytes, let answer):
+            let length = Int(request.contentLength)
+            guard length <= maxBytes else {
+                send(.error(413, "body too large"), on: connection)
+                return
+            }
+            readBody(connection, have: rest, length: length) { [weak self] data in
+                guard let data else { connection.cancel(); return }
+                Task {
+                    let response = await answer(data)
+                    self?.queue.async { self?.send(response, on: connection) }
+                }
             }
         case .upload(let url, let answer):
             let length = request.contentLength
