@@ -188,8 +188,11 @@ the agent's judgement:
    with the camera placed between its neighbours. Claude ranks them, new
    views weighing most, with the video's currently published best splat shown
    beside them for context. Its pick becomes `splat.ply` unless it measures
-   clearly worse at the new views than the other (SSIM lower by 0.01 and PSNR
-   by 0.3 dB), in which case the numbers decide and the report says so
+   clearly worse than the other at the trained views and the new views alike
+   (SSIM lower by 0.01 and PSNR by 0.3 dB at both), in which case the numbers
+   decide and the report says so. New views alone are not enough: their
+   cameras are interpolated, and a slightly misplaced sharp render scores below
+   a blurry one
    (`splat-training.json` and `training-compare/` hold the evidence).
    Stage 4 runs as steps that can each run on their own
    (`--stage splat --splat-steps ...`): `train-quick`, `train-long` (saved every

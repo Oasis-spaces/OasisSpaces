@@ -318,10 +318,14 @@ Reply with a single JSON object and nothing else:
 {{"ranking": [letters best first], "best": letter, "reasons": {{letter: one sentence on what is good or bad about it}}, "confidence": "high" | "medium" | "low"}}"""
 
 
-# Claude's pick stands unless it measures clearly worse at the new views than
-# another candidate that is up for choice: lower on both of these at once.
-GUARD_NEW_SSIM = 0.01
-GUARD_NEW_PSNR = 0.3
+# Claude's pick stands unless it measures clearly worse than another candidate
+# up for choice at the trained views AND at the new views: lower on SSIM and
+# PSNR by these margins at both. The new views alone would not do: their
+# cameras are interpolated, so a slightly misplaced sharp render scores below
+# a blurry one, and on the pan room they overruled Claude's visibly sharper
+# pick (Sep 2026). At the trained views the camera is exact.
+GUARD_SSIM = 0.01
+GUARD_PSNR = 0.3
 
 
 def published_best(video: Path) -> dict | None:
@@ -342,24 +346,33 @@ def published_best(video: Path) -> dict | None:
 
 def guarded(record: dict, choosable: set[str]) -> dict:
     """Keep Claude's pick among the `choosable` labels unless another choosable
-    candidate beats it at the new views by GUARD_NEW_SSIM and GUARD_NEW_PSNR
-    both. Sets record["chosen"] (a choosable label) and, when the numbers
-    overrule, record["overruled"]."""
+    candidate beats it by GUARD_SSIM and GUARD_PSNR at the trained views and
+    at the new views alike. Sets record["chosen"] (a choosable label) and,
+    when the numbers overrule, record["overruled"]."""
+    record.pop("overruled", None)
     rows = {c["label"]: c for c in record["candidates"].values()}
     ranking = [record["candidates"][L]["label"] for L in ((record.get("claude") or {}).get("ranking") or [])
                if L in record["candidates"]]
     by_claude = next((label for label in ranking if label in choosable), None)
-    new_view = lambda label: (rows[label].get("new_ssim", rows[label]["ssim"]),
-                              rows[label].get("new_psnr", rows[label]["psnr"]))
-    by_numbers = max(choosable, key=new_view)
+    trained = lambda label: (rows[label]["ssim"], rows[label]["psnr"])
+    new = lambda label: (rows[label].get("new_ssim", rows[label]["ssim"]),
+                         rows[label].get("new_psnr", rows[label]["psnr"]))
+    by_numbers = max(choosable, key=lambda label: (new(label), trained(label)))
     chosen = by_claude or by_numbers
-    if by_claude and by_claude != by_numbers:
-        (s_pick, p_pick), (s_num, p_num) = new_view(by_claude), new_view(by_numbers)
-        if s_num - s_pick > GUARD_NEW_SSIM and p_num - p_pick > GUARD_NEW_PSNR:
-            chosen = by_numbers
-            record["overruled"] = (f"Claude picked {by_claude}, but at the new views it measures "
-                                   f"SSIM {s_pick:.3f} / {p_pick:.1f} dB against {s_num:.3f} / {p_num:.1f} dB "
-                                   f"for {by_numbers}; kept {by_numbers}")
+
+    def clearly_worse(pick, other):
+        return all(o[0] - p[0] > GUARD_SSIM and o[1] - p[1] > GUARD_PSNR
+                   for p, o in ((trained(pick), trained(other)), (new(pick), new(other))))
+
+    if by_claude:
+        beaten_by = next((other for other in choosable if other != by_claude
+                          and clearly_worse(by_claude, other)), None)
+        if beaten_by:
+            chosen = beaten_by
+            record["overruled"] = (f"Claude picked {by_claude}, but it measures clearly worse than {beaten_by} "
+                                   f"at the trained views (SSIM {trained(by_claude)[0]:.3f} vs "
+                                   f"{trained(beaten_by)[0]:.3f}) and at the new views "
+                                   f"({new(by_claude)[0]:.3f} vs {new(beaten_by)[0]:.3f}); kept {beaten_by}")
     record["chosen"] = chosen
     return record
 
