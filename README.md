@@ -276,6 +276,41 @@ was really behind the object.
 `tools/opensplat` loads its Metal shaders from `tools/default.metallib`;
 keep the two files together.
 
+## Oasis Capture (iPhone app)
+
+`apps/OasisCapture` guides someone through recording a room, entirely on the
+phone (no model calls, no network while recording). Build and install with
+`apps/OasisCapture/build.sh` (Xcode, XcodeGen, a paired iPhone on iOS 18).
+
+- **Before recording:** two tiers of tips, "for a good scan" and "for the best
+  scan", from `capture-rules.json`.
+- **While recording:** one message at a time from the rules in
+  `Packages/CaptureRules` (too fast, blur for the exposure, turning on the
+  spot, too dark, window glare, too close, plain surfaces, someone in view,
+  floor never shown, walls missed), with haptics. The rules take a
+  `FrameSample` per frame and know nothing about ARKit, so an Android app can
+  feed them from ARCore and share the same JSON specs.
+- **What the phone sees:** a 7.7 MB segmentation model (SegFormer-B0 on
+  ADE20K, built by `scripts/convert_segmentation.py`) outlines walls, floor,
+  furniture, storage, curtains, fixtures and appliances, never clothes; the
+  camera image's edges glow in the class's colour. Look-alike classes vote as
+  families, and a label memory keeps a region's label steady across frames.
+- **The room map:** Apple's Core ML Depth Anything V2 Small (48 MB, downloaded
+  by `build.sh`) gives a depth for every pixel; the tracking's feature points
+  scale it to metres each frame (`DepthScale`), and every pixel of an outlined
+  object becomes a world point. `RoomMapBuilder` votes them into 8 cm voxels,
+  groups them into boxes turned to the room's walls (from ARKit's wall planes),
+  keeps each box's identity between builds, confirms it over two builds and
+  lets it linger over three. The mini map shows floor, walls, furniture, path
+  and phone; tap it for the full floor plan. `capture.json` records the map.
+- **After recording:** a review (length, walls covered, floor shown, moments
+  to watch, what was placed), then `video.mov` (HEVC, 4K where offered),
+  `frames.jsonl` (ARKit pose and intrinsics per frame) and `capture.json`.
+- **With the Mac:** the Scans tab sends a recording to Splat Viewer on the same
+  Wi-Fi (`apps/OasisLink`: Bonjour discovery, pairing by code or by a shared
+  account, uploads in parts), follows the analysis stage by stage, and shows
+  the room renders and the splat in a MetalSplatter viewer.
+
 ## Splat Viewer (Mac app)
 
 `apps/SplatViewer` is a native macOS app (SwiftUI + Metal, macOS 15+, Apple
@@ -292,6 +327,9 @@ a `.ply`'s view-dependent colour.
   - arrows move; ⌘ + arrows turn and look up or down;
   - ⌥ + ↑↓ moves up and down; ⇧ goes faster;
   - drag to look, scroll to walk; R resets.
+- **Phone captures:** the home page pairs phones (a 6-digit code, or the same
+  account signed in on both), lists recordings they send with stage progress,
+  runs `pipeline/agent.py` on each in turn, and opens the result as a tab.
 - **Starting view:** a splat opens at the pipeline's starting camera
   (`<name>.view.json`, with the room's up direction and metre scale) when there
   is one.
