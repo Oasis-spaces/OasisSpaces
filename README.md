@@ -290,26 +290,48 @@ phone (no model calls, no network while recording). Build and install with
   floor never shown, walls missed), with haptics. The rules take a
   `FrameSample` per frame and know nothing about ARKit, so an Android app can
   feed them from ARCore and share the same JSON specs.
-- **What the phone sees:** a 7.7 MB segmentation model (SegFormer-B0 on
-  ADE20K, built by `scripts/convert_segmentation.py`) outlines walls, floor,
-  furniture, storage, curtains, fixtures and appliances, never clothes; the
-  camera image's edges glow in the class's colour. Look-alike classes vote as
-  families, and a label memory keeps a region's label steady across frames.
+- **What the phone sees:** three Core ML models run a few times a second.
+  An open-vocabulary detector (YOLOE-11m, prompted with the 71 room things in
+  `object-classes.json`: bed, sofa, wardrobe, chest of drawers, rug, curtain,
+  lamp, fridge, ... never clothes; built by `scripts/convert_objects.py`,
+  45 MB) gives one mask per thing, so each piece of furniture is one outline
+  and one box. A segmentation model (SegFormer-B2 on ADE20K, 53 MB, built by
+  `scripts/convert_segmentation.py`) keeps the walls, floor, ceiling, doors
+  and windows. The camera image's edges glow in the colour of what they
+  belong to.
 - **The room map:** Apple's Core ML Depth Anything V2 Small (48 MB, downloaded
   by `build.sh`) gives a depth for every pixel; the tracking's feature points
-  scale it to metres each frame (`DepthScale`), and every pixel of an outlined
-  object becomes a world point. `RoomMapBuilder` votes them into 8 cm voxels,
-  groups them into boxes turned to the room's walls (from ARKit's wall planes),
-  keeps each box's identity between builds, confirms it over two builds and
-  lets it linger over three. The mini map shows floor, walls, furniture, path
-  and phone; tap it for the full floor plan. `capture.json` records the map.
+  scale it to metres each frame (`DepthScale`), and every pixel of a detected
+  thing becomes a world point. `ObjectTracker` (in `CaptureRules`) matches
+  each detection to the object it overlaps from above, remembers every 5 cm
+  voxel ever seen of that object, so its box is the extent of everything seen
+  from every angle, votes its label (a bed one frame called a sofa stays a
+  bed), eases the box, shows it after two sightings and keeps it while it is
+  out of view. Boxes are turned to the room's walls (from ARKit's wall
+  planes). The mini map shows floor, walls, furniture, path and phone; tap it
+  for the full floor plan. `capture.json` records the map.
+- **Logs:** the app writes `Documents/oasis-capture.log` (model load times,
+  analysis ms per frame); read it with
+  `xcrun devicectl device copy from --domain-type appDataContainer --domain-identifier com.oasisspaces.capture --source Documents/oasis-capture.log --destination oasis-capture.log`.
 - **After recording:** a review (length, walls covered, floor shown, moments
   to watch, what was placed), then `video.mov` (HEVC, 4K where offered),
   `frames.jsonl` (ARKit pose and intrinsics per frame) and `capture.json`.
 - **With the Mac:** the Scans tab sends a recording to Splat Viewer on the same
   Wi-Fi (`apps/OasisLink`: Bonjour discovery, pairing by code or by a shared
-  account, uploads in parts), follows the analysis stage by stage, and shows
-  the room renders and the splat in a MetalSplatter viewer.
+  account), follows the analysis stage by stage, and shows the room renders
+  and the splat in a MetalSplatter viewer.
+- **Through the cloud:** signed in on both (Mac tab on the phone, Phone
+  captures on the Mac), a recording can also go through the cloud relay from
+  anywhere: `relay/` is a small FastAPI service on Render
+  (https://oasis-relay.onrender.com, free plan, so the first request after a
+  quiet spell takes up to a minute) that speaks the same job API as a Mac on
+  the local network. It stores nothing itself: rows live in the Supabase
+  project's `jobs` table and files in its `oasis` bucket, uploaded straight
+  from the phone in 40 MB parts through signed URLs, under each account's own
+  row policies. The Mac, signed in to the same account, polls for queued
+  jobs, claims one, reassembles the capture, runs the pipeline, uploads the
+  results (up to 50 MB each) and frees the capture. Tests:
+  `~/.venvs/oasis-relay/bin/python -m pytest relay/tests`.
 
 ## Splat Viewer (Mac app)
 
