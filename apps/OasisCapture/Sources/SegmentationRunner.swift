@@ -45,11 +45,14 @@ final class SegmentationRunner {
 
     /// Starts a run on this frame if the previous one finished and the interval
     /// passed. `done` gets the result on the segmentation queue.
-    func submit(_ frame: ARFrame, done: @escaping (SegmentationResult) -> Void) {
+    func submit(_ frame: ARFrame, done: @escaping (SegmentationResult, [SIMD3<Float>], ARCamera) -> Void) {
         guard let request, !busy, frame.timestamp - lastRun >= interval else { return }
         busy = true
         lastRun = frame.timestamp
         let buffer = frame.capturedImage
+        // The tracked points of this very frame: labelled once the class map is back.
+        let points = frame.rawFeaturePoints?.points ?? []
+        let camera = frame.camera
         queue.async { [weak self] in
             guard let self else { return }
             defer { self.busy = false }
@@ -74,7 +77,7 @@ final class SegmentationRunner {
             self.lock.lock()
             self.latest = result
             self.lock.unlock()
-            done(result)
+            done(result, points, camera)
         }
     }
 }

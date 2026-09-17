@@ -1,5 +1,6 @@
 import ARKit
 import SceneKit
+import SwiftUI
 import UIKit
 import CaptureRules
 
@@ -22,6 +23,7 @@ final class CaptureState: ObservableObject {
     @Published var regions: [Region] = []
     @Published var showOutlines = true
     @Published var detected: [String] = []
+    @Published var map = RoomMap()
 }
 
 struct CaptureResult: Identifiable {
@@ -31,6 +33,7 @@ struct CaptureResult: Identifiable {
     let advice: [Rule]
     /// Recognised classes, most seen first.
     var objectsSeen: [String] = []
+    var map = RoomMap()
 }
 
 /// Runs the AR session: every frame goes through the rules (before and during
@@ -42,6 +45,9 @@ final class CaptureController: NSObject, ARSessionDelegate {
     let config = RuleConfig.bundled()
     /// The scan's points, drawn in the camera view.
     let cloudNode = SCNNode()
+    /// Detected planes and furniture boxes, drawn in the camera view.
+    let mapNode = SCNNode()
+    let mapBuilder: RoomMapBuilder
 
     private let queue = DispatchQueue(label: "capture.frames", qos: .userInteractive)
     private var engine: RuleEngine
@@ -61,8 +67,13 @@ final class CaptureController: NSObject, ARSessionDelegate {
     private var formatName = ""
     private let haptics = UINotificationFeedbackGenerator()
 
+    private var planeNodes: [UUID: SCNNode] = [:]
+    private var lastMapBuild: Double = 0
+    private var latestMap = RoomMap()
+
     override init() {
         engine = RuleEngine(config: RuleConfig.bundled())
+        mapBuilder = RoomMapBuilder(spec: DetectionSpec.bundled())
         super.init()
         session.delegate = self
         session.delegateQueue = queue
@@ -99,6 +110,9 @@ final class CaptureController: NSObject, ARSessionDelegate {
                 return
             }
             self.engine.startRecording()
+            self.mapBuilder.reset()
+            for (id, node) in self.planeNodes { _ = id; DispatchQueue.main.async { node.removeFromParentNode() } }
+            self.planeNodes = [:]
             self.secondsSeen = [:]
             self.lastSegmentationTime = nil
             self.cloud.reset()
@@ -121,10 +135,10 @@ final class CaptureController: NSObject, ARSessionDelegate {
                 self.state.isFinishing = true
             }
             recorder.finish(summary: summary, advice: advice, config: self.config, format: self.formatName,
-                            objectsSeen: self.secondsSeen) { folder in
+                            objectsSeen: self.secondsSeen, map: self.mapBuilder.build()) { folder in
                 self.state.isFinishing = false
                 self.state.result = CaptureResult(folder: folder, summary: summary, advice: advice,
-                                                  objectsSeen: self.state.detected)
+                                                  objectsSeen: self.state.detected, map: self.latestMap)
             }
             self.recorder = nil
         }
@@ -139,7 +153,9 @@ final class CaptureController: NSObject, ARSessionDelegate {
             sample.peopleInView = result.personShare >= segmentation.spec.personWarnShare ? 1 : 0
         }
         let guidance = engine.update(sample)
-        segmentation.submit(frame) { [weak self] result in self?.segmented(result, at: frame.timestamp) }
+        segmentation.submit(frame) { [weak self] result, points, camera in
+            self?.segmented(result, at: frame.timestamp, points: points, camera: camera)
+        }
 
         if recording {
             recorder?.append(frame)
@@ -167,10 +183,153 @@ final class CaptureController: NSObject, ARSessionDelegate {
             lastCloudUpdate = frame.timestamp
             updateCloudNode()
         }
+        if frame.timestamp - lastMapBuild > 1.0 {
+            lastMapBuild = frame.timestamp
+            rebuildMap()
+        }
     }
 
-    /// A segmentation finished (on the segmentation queue).
-    private func segmented(_ result: SegmentationResult, at time: Double) {
+    // MARK: Planes (walls, floor) from the tracking
+
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        for case let plane as ARPlaneAnchor in anchors { planeChanged(plane) }
+    }
+
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        for case let plane as ARPlaneAnchor in anchors { planeChanged(plane) }
+    }
+
+    func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        for case let plane as ARPlaneAnchor in anchors {
+            mapBuilder.remove(plane: plane.identifier)
+            let node = planeNodes.removeValue(forKey: plane.identifier)
+            DispatchQueue.main.async { node?.removeFromParentNode() }
+        }
+    }
+
+    private func planeChanged(_ anchor: ARPlaneAnchor) {
+        let t = anchor.transform
+        let rotation = simd_float3x3(SIMD3(t.columns.0.x, t.columns.0.y, t.columns.0.z),
+                                     SIMD3(t.columns.1.x, t.columns.1.y, t.columns.1.z),
+                                     SIMD3(t.columns.2.x, t.columns.2.y, t.columns.2.z))
+        let extent = anchor.planeExtent
+        // The extent is turned about the anchor's y by rotationOnYAxis.
+        let turn = simd_quatf(angle: extent.rotationOnYAxis, axis: SIMD3(0, 1, 0))
+        let xAxis = rotation * turn.act(SIMD3(1, 0, 0))
+        let zAxis = rotation * turn.act(SIMD3(0, 0, 1))
+        let c = t * SIMD4(anchor.center, 1)
+        let info = PlaneInfo(id: anchor.identifier, kind: Self.kind(of: anchor), vertical: anchor.alignment == .vertical,
+                             center: SIMD3(c.x, c.y, c.z), xAxis: simd_normalize(xAxis), zAxis: simd_normalize(zAxis),
+                             extent: SIMD2(extent.width, extent.height))
+        mapBuilder.update(plane: info)
+        updatePlaneNode(anchor, kind: info.kind)
+    }
+
+    private static func kind(of anchor: ARPlaneAnchor) -> PlaneInfo.Kind {
+        if ARPlaneAnchor.isClassificationSupported {
+            switch anchor.classification {
+            case .wall: return .wall
+            case .floor: return .floor
+            case .ceiling: return .ceiling
+            case .table: return .table
+            case .seat: return .seat
+            case .door: return .door
+            case .window: return .window
+            case .none(_): break
+            @unknown default: break
+            }
+        }
+        return anchor.alignment == .vertical ? .wall : .floor
+    }
+
+    /// A translucent surface with an outline, in the plane's own shape.
+    private func updatePlaneNode(_ anchor: ARPlaneAnchor, kind: PlaneInfo.Kind) {
+        let color = Self.planeColor(kind)
+        DispatchQueue.main.async {
+            let node: SCNNode
+            if let existing = self.planeNodes[anchor.identifier] {
+                node = existing
+            } else {
+                node = SCNNode()
+                guard let device = MTLCreateSystemDefaultDevice(),
+                      let geometry = ARSCNPlaneGeometry(device: device) else { return }
+                let fill = SCNMaterial()
+                fill.diffuse.contents = color.withAlphaComponent(kind == .floor ? 0.10 : 0.16)
+                fill.lightingModel = .constant
+                fill.isDoubleSided = true
+                geometry.materials = [fill]
+                node.geometry = geometry
+                let outline = SCNNode()
+                let edges = ARSCNPlaneGeometry(device: device)!
+                let line = SCNMaterial()
+                line.diffuse.contents = color
+                line.fillMode = .lines
+                line.lightingModel = .constant
+                line.isDoubleSided = true
+                edges.materials = [line]
+                outline.geometry = edges
+                outline.name = "outline"
+                node.addChildNode(outline)
+                self.mapNode.addChildNode(node)
+                self.planeNodes[anchor.identifier] = node
+            }
+            node.simdTransform = anchor.transform
+            (node.geometry as? ARSCNPlaneGeometry)?.update(from: anchor.geometry)
+            (node.childNode(withName: "outline", recursively: false)?.geometry as? ARSCNPlaneGeometry)?.update(from: anchor.geometry)
+        }
+    }
+
+    private static func planeColor(_ kind: PlaneInfo.Kind) -> UIColor {
+        switch kind {
+        case .floor: return UIColor(red: 0.56, green: 0.64, blue: 0.72, alpha: 1)
+        case .wall, .ceiling: return UIColor(red: 0.56, green: 0.64, blue: 0.72, alpha: 1)
+        case .door: return .systemGreen
+        case .window: return .systemCyan
+        case .table, .seat: return .systemOrange
+        case .unknown: return .white
+        }
+    }
+
+    /// Furniture boxes as wireframes; the map for the screen.
+    private func rebuildMap() {
+        let map = mapBuilder.build()
+        guard map != latestMap else { return }
+        latestMap = map
+        let spec = mapBuilder.spec
+        DispatchQueue.main.async {
+            self.state.map = map
+            for child in self.mapNode.childNodes where child.name == "box" { child.removeFromParentNode() }
+            for object in map.objects {
+                let size = object.size
+                let box = SCNBox(width: CGFloat(size.x), height: CGFloat(size.y), length: CGFloat(size.z), chamferRadius: 0)
+                let material = SCNMaterial()
+                material.diffuse.contents = UIColor(Color(hex: spec.groups[object.group]?.color ?? "#FFFFFF"))
+                material.fillMode = .lines
+                material.lightingModel = .constant
+                material.isDoubleSided = true
+                box.materials = [material]
+                let node = SCNNode(geometry: box)
+                node.name = "box"
+                node.simdPosition = object.center
+                self.mapNode.addChildNode(node)
+            }
+        }
+    }
+
+    /// A segmentation finished (on the segmentation queue): label the frame's
+    /// tracked points with it for the room map, and count what was seen.
+    private func segmented(_ result: SegmentationResult, at time: Double, points: [SIMD3<Float>], camera: ARCamera) {
+        let size = camera.imageResolution
+        var labelled: [(SIMD3<Float>, Int)] = []
+        labelled.reserveCapacity(points.count)
+        for p in points {
+            let q = camera.projectPoint(p, orientation: .landscapeRight, viewportSize: size)
+            guard q.x >= 0, q.y >= 0, q.x < size.width, q.y < size.height else { continue }
+            // Sensor (landscape) coordinates to the upright class map: the model saw the image rotated.
+            let xs = Double(q.x / size.width), ys = Double(q.y / size.height)
+            if let cls = result.classAt(x: 1 - ys, y: xs) { labelled.append((p, cls)) }
+        }
+        mapBuilder.add(points: labelled)
         queue.async {
             if self.recording {
                 let dt = min(1, time - (self.lastSegmentationTime ?? time))

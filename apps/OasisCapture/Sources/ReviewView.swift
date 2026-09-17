@@ -51,7 +51,20 @@ struct ReviewView: View {
                     }
                 }
 
-                if !result.objectsSeen.isEmpty {
+                if !result.map.objects.isEmpty || !result.map.walls.isEmpty {
+                    Section("Placed in the room") {
+                        let walls = result.map.walls.count
+                        if walls > 0 { Text("\(walls) wall\(walls == 1 ? "" : "s")" + (result.map.floors.isEmpty ? "" : ", the floor")) }
+                        ForEach(result.map.objects) { object in
+                            HStack {
+                                Text(object.label.capitalized)
+                                Spacer()
+                                Text(String(format: "%.1f × %.1f × %.1f m", object.size.x, object.size.z, object.size.y))
+                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } else if !result.objectsSeen.isEmpty {
                     Section("Recognised in the room") {
                         Text(result.objectsSeen.joined(separator: ", "))
                     }

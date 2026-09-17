@@ -111,7 +111,7 @@ final class Recorder {
 
     /// Finishes the video and writes capture.json. Calls back on the main queue.
     func finish(summary: CaptureSummary, advice: [Rule], config: RuleConfig, format: String,
-                objectsSeen: [String: Double], completion: @escaping (URL?) -> Void) {
+                objectsSeen: [String: Double], map: RoomMap, completion: @escaping (URL?) -> Void) {
         try? poses?.close()
         poses = nil
         let write = { [folder, framesWritten, framesDropped] in
@@ -131,6 +131,20 @@ final class Recorder {
                 "advice": advice.map { ["rule": $0.rawValue, "message": config.message($0)] },
                 // What the on-device segmentation saw, and for how many seconds.
                 "objectsSeen": objectsSeen.mapValues { ($0 * 10).rounded() / 10 },
+                // Walls, floor and furniture as the phone placed them (world space, metres, y up).
+                "roomMap": [
+                    "planes": map.planes.map { plane in [
+                        "kind": plane.kind.rawValue, "vertical": plane.vertical,
+                        "center": [plane.center.x, plane.center.y, plane.center.z],
+                        "xAxis": [plane.xAxis.x, plane.xAxis.y, plane.xAxis.z],
+                        "zAxis": [plane.zAxis.x, plane.zAxis.y, plane.zAxis.z],
+                        "extent": [plane.extent.x, plane.extent.y]] as [String: Any] },
+                    "objects": map.objects.map { object in [
+                        "label": object.label, "group": object.group, "classId": object.classId,
+                        "min": [object.min.x, object.min.y, object.min.z],
+                        "max": [object.max.x, object.max.y, object.max.z],
+                        "voxels": object.points] as [String: Any] },
+                ] as [String: Any],
             ]
             if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
                 try? data.write(to: folder.appendingPathComponent("capture.json"))

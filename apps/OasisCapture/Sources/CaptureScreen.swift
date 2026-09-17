@@ -22,6 +22,7 @@ private struct CaptureContent: View {
     let controller: CaptureController
     @ObservedObject var state: CaptureState
     @Environment(\.dismiss) private var dismiss
+    @State private var showingMap = false
 
     var body: some View {
         ZStack {
@@ -47,8 +48,11 @@ private struct CaptureContent: View {
                             .background(.ultraThinMaterial, in: Circle())
                     }
                     Spacer()
-                    CoverageMap(state: state)
-                        .frame(width: 132, height: 132)
+                    Button { showingMap = true } label: {
+                        CoverageMap(state: state, spec: controller.segmentation.spec)
+                            .frame(width: 140, height: 140)
+                    }
+                    .buttonStyle(.plain)
                 }
                 GuidanceBanner(guidance: state.guidance, isRecording: state.isRecording)
                 Spacer()
@@ -67,6 +71,9 @@ private struct CaptureContent: View {
         .sheet(item: $state.result) { result in
             ReviewView(result: result, config: controller.config)
         }
+        .sheet(isPresented: $showingMap) {
+            RoomMapSheet(state: state, spec: controller.segmentation.spec)
+        }
     }
 }
 
@@ -78,6 +85,7 @@ struct ARCameraView: UIViewRepresentable {
         view.session = controller.session
         view.automaticallyUpdatesLighting = false
         view.scene.rootNode.addChildNode(controller.cloudNode)
+        view.scene.rootNode.addChildNode(controller.mapNode)
         return view
     }
 

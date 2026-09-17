@@ -56,6 +56,16 @@ public struct SegmentationResult: Sendable {
     public var personShare: Double
     /// Share of the image per class id, for every class present.
     public var classShares: [Int: Double]
+    /// The class map itself (row-major, upright), to label 3D points with.
+    public var classes: [Int32]
+    public var width: Int
+    public var height: Int
+
+    /// The class at a point of the upright image, 0...1 coordinates.
+    public func classAt(x: Double, y: Double) -> Int? {
+        guard x >= 0, y >= 0, x < 1, y < 1 else { return nil }
+        return Int(classes[Int(y * Double(height)) * width + Int(x * Double(width))])
+    }
 }
 
 public enum OutlineExtractor {
@@ -118,7 +128,7 @@ public enum OutlineExtractor {
         }
         regions.sort { $0.share > $1.share }
         return SegmentationResult(regions: Array(regions.prefix(maxRegions)), personShare: personShare,
-                                  classShares: shares)
+                                  classShares: shares, classes: classes, width: width, height: height)
     }
 
     /// Moore-neighbour tracing of a region's outer boundary, clockwise (y down).
