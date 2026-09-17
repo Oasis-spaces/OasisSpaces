@@ -66,14 +66,9 @@ final class SegmentationRunner {
             var classes = [Int32](repeating: 0, count: width * height)
             let pointer = array.dataPointer.bindMemory(to: Int32.self, capacity: width * height)
             classes.withUnsafeMutableBufferPointer { $0.baseAddress!.update(from: pointer, count: width * height) }
-            var result = OutlineExtractor.extract(classes: classes, width: width, height: height, spec: self.spec)
-            // Upright (portrait) coordinates back to the sensor image's own:
-            // x_sensor = y_upright, y_sensor = 1 - x_upright.
-            for i in result.regions.indices {
-                result.regions[i].outline = result.regions[i].outline.map { SIMD2($0.y, 1 - $0.x) }
-                let c = result.regions[i].centroid
-                result.regions[i].centroid = SIMD2(c.y, 1 - c.x)
-            }
+            // Regions and the class map are upright (portrait); CaptureController
+            // steadies the labels and converts to sensor coordinates for the overlay.
+            let result = OutlineExtractor.extract(classes: classes, width: width, height: height, spec: self.spec)
             self.lock.lock()
             self.latest = result
             self.lock.unlock()

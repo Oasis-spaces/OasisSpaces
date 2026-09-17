@@ -68,12 +68,16 @@ final class CaptureController: NSObject, ARSessionDelegate {
     private let haptics = UINotificationFeedbackGenerator()
 
     private var planeNodes: [UUID: SCNNode] = [:]
+    private var boxNodes: [String: SCNNode] = [:]
     private var lastMapBuild: Double = 0
     private var latestMap = RoomMap()
+    private var labelMemory: LabelMemory
 
     override init() {
         engine = RuleEngine(config: RuleConfig.bundled())
-        mapBuilder = RoomMapBuilder(spec: DetectionSpec.bundled())
+        let spec = DetectionSpec.bundled()
+        mapBuilder = RoomMapBuilder(spec: spec)
+        labelMemory = LabelMemory(spec: spec)
         super.init()
         session.delegate = self
         session.delegateQueue = queue
@@ -111,6 +115,10 @@ final class CaptureController: NSObject, ARSessionDelegate {
             }
             self.engine.startRecording()
             self.mapBuilder.reset()
+            self.labelMemory.reset()
+            let boxes = Array(self.boxNodes.values)
+            self.boxNodes = [:]
+            DispatchQueue.main.async { boxes.forEach { $0.removeFromParentNode() } }
             for (id, node) in self.planeNodes { _ = id; DispatchQueue.main.async { node.removeFromParentNode() } }
             self.planeNodes = [:]
             self.secondsSeen = [:]
@@ -290,7 +298,9 @@ final class CaptureController: NSObject, ARSessionDelegate {
         }
     }
 
-    /// Furniture boxes as wireframes; the map for the screen.
+    /// Furniture boxes as wireframes; the map for the screen. Nodes are kept
+    /// by object identity and moved, so a box eases to its new size instead of
+    /// being torn down and rebuilt.
     private func rebuildMap() {
         let map = mapBuilder.build()
         guard map != latestMap else { return }
@@ -298,36 +308,67 @@ final class CaptureController: NSObject, ARSessionDelegate {
         let spec = mapBuilder.spec
         DispatchQueue.main.async {
             self.state.map = map
-            for child in self.mapNode.childNodes where child.name == "box" { child.removeFromParentNode() }
+            let ids = Set(map.objects.map(\.id))
+            for (id, node) in self.boxNodes where !ids.contains(id) {
+                node.removeFromParentNode()
+                self.boxNodes[id] = nil
+            }
             for object in map.objects {
                 let size = object.size
-                let box = SCNBox(width: CGFloat(size.x), height: CGFloat(size.y), length: CGFloat(size.z), chamferRadius: 0)
-                let material = SCNMaterial()
-                material.diffuse.contents = UIColor(Color(hex: spec.groups[object.group]?.color ?? "#FFFFFF"))
-                material.fillMode = .lines
-                material.lightingModel = .constant
-                material.isDoubleSided = true
-                box.materials = [material]
-                let node = SCNNode(geometry: box)
-                node.name = "box"
-                node.simdPosition = object.center
-                self.mapNode.addChildNode(node)
+                let color = UIColor(Color(hex: spec.groups[object.group]?.color ?? "#FFFFFF"))
+                if let node = self.boxNodes[object.id], let box = node.geometry as? SCNBox {
+                    SCNTransaction.begin()
+                    SCNTransaction.animationDuration = 0.6
+                    box.width = CGFloat(size.x)
+                    box.height = CGFloat(size.y)
+                    box.length = CGFloat(size.z)
+                    node.simdPosition = object.center
+                    box.firstMaterial?.diffuse.contents = color
+                    SCNTransaction.commit()
+                } else {
+                    let box = SCNBox(width: CGFloat(size.x), height: CGFloat(size.y), length: CGFloat(size.z), chamferRadius: 0)
+                    let material = SCNMaterial()
+                    material.diffuse.contents = color
+                    material.fillMode = .lines
+                    material.lightingModel = .constant
+                    material.isDoubleSided = true
+                    box.materials = [material]
+                    let node = SCNNode(geometry: box)
+                    node.name = "box"
+                    node.simdPosition = object.center
+                    self.mapNode.addChildNode(node)
+                    self.boxNodes[object.id] = node
+                }
             }
         }
     }
 
     /// A segmentation finished (on the segmentation queue): label the frame's
     /// tracked points with it for the room map, and count what was seen.
-    private func segmented(_ result: SegmentationResult, at time: Double, points: [SIMD3<Float>], camera: ARCamera) {
+    private func segmented(_ raw: SegmentationResult, at time: Double, points: [SIMD3<Float>], camera: ARCamera) {
+        let result = labelMemory.steady(raw)
         let size = camera.imageResolution
+        let spec = mapBuilder.spec
+        let near = spec.pointDepthMetres.first ?? 0.3, far = spec.pointDepthMetres.last ?? 6
+        let toCamera = camera.transform.inverse
         var labelled: [(SIMD3<Float>, Int)] = []
         labelled.reserveCapacity(points.count)
         for p in points {
+            // Only points at a sensible distance: far ones are imprecise, near ones are the phone's own hand.
+            let local = toCamera * SIMD4(p, 1)
+            guard -local.z >= near, -local.z <= far else { continue }
             let q = camera.projectPoint(p, orientation: .landscapeRight, viewportSize: size)
             guard q.x >= 0, q.y >= 0, q.x < size.width, q.y < size.height else { continue }
             // Sensor (landscape) coordinates to the upright class map: the model saw the image rotated.
-            let xs = Double(q.x / size.width), ys = Double(q.y / size.height)
-            if let cls = result.classAt(x: 1 - ys, y: xs) { labelled.append((p, cls)) }
+            let x = 1 - Double(q.y / size.height), y = Double(q.x / size.width)
+            // Only points well inside a region count: the map is coarse, and a point
+            // on an object's edge is as likely to be the wall behind it.
+            guard let cls = result.classAt(x: x, y: y) else { continue }
+            let step = 2.5 / Double(result.width)
+            let inside = [(step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step)].allSatisfy { dx, dy in
+                result.classAt(x: x + dx, y: y + dy) == cls
+            }
+            if inside { labelled.append((p, cls)) }
         }
         mapBuilder.add(points: labelled)
         queue.async {
@@ -341,8 +382,15 @@ final class CaptureController: NSObject, ARSessionDelegate {
             }
             self.lastSegmentationTime = time
             let detected = self.secondsSeen.sorted { $0.value > $1.value }.map(\.key)
+            var shown = result
+            // Regions come out upright; the overlay wants the sensor image's own coordinates.
+            for i in shown.regions.indices {
+                shown.regions[i].outline = shown.regions[i].outline.map { SIMD2($0.y, 1 - $0.x) }
+                let c = shown.regions[i].centroid
+                shown.regions[i].centroid = SIMD2(c.y, 1 - c.x)
+            }
             DispatchQueue.main.async {
-                self.state.regions = result.regions
+                self.state.regions = shown.regions
                 self.state.detected = detected
             }
         }

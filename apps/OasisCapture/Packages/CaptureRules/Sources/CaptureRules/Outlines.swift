@@ -13,6 +13,9 @@ public struct DetectionSpec: Codable, Sendable {
         public var label: String
         public var group: String
         public var outline: Bool
+        /// Look-alikes the model flips between share a family (sofa and armchair).
+        public var family: String?
+        public var familyName: String { family ?? name }
     }
 
     public var model: String
@@ -22,6 +25,15 @@ public struct DetectionSpec: Codable, Sendable {
     /// A person covering this share of the image triggers the warning.
     public var personWarnShare: Double
     public var classes: [ClassInfo]
+    // Room map tuning (see RoomMapBuilder).
+    public var voteVoxelMetres: Float = 0.08
+    public var groupCellMetres: Float = 0.25
+    public var minVoxels: Int = 12
+    public var confirmBuilds: Int = 2
+    public var graceBuilds: Int = 3
+    public var labelHistoryFrames: Int = 6
+    public var maxObjectMetres: Float = 4.0
+    public var pointDepthMetres: [Float] = [0.3, 6.0]
 
     public static func bundled() -> DetectionSpec {
         guard let url = Bundle.module.url(forResource: "detection-classes", withExtension: "json"),
@@ -34,6 +46,55 @@ public struct DetectionSpec: Codable, Sendable {
 
     public func info(_ id: Int) -> ClassInfo? {
         id >= 0 && id < classes.count && classes[id].id == id ? classes[id] : classes.first { $0.id == id }
+    }
+
+    /// The family a class belongs to (its own name when it has none).
+    public func family(_ id: Int) -> String? {
+        info(id)?.familyName
+    }
+}
+
+/// Remembers what recent frames called each place on screen, so a label does
+/// not flip between look-alikes from one frame to the next: a region takes the
+/// class most seen at its centre over the last few frames.
+public struct LabelMemory {
+    private var maps: [(classes: [Int32], width: Int, height: Int)] = []
+    private let depth: Int
+    private let spec: DetectionSpec
+
+    public init(spec: DetectionSpec) {
+        self.spec = spec
+        depth = max(1, spec.labelHistoryFrames)
+    }
+
+    public mutating func reset() { maps.removeAll() }
+
+    /// Adds the newest result and returns it with steadied labels (upright coordinates).
+    public mutating func steady(_ result: SegmentationResult) -> SegmentationResult {
+        maps.append((result.classes, result.width, result.height))
+        if maps.count > depth { maps.removeFirst() }
+        guard maps.count > 1 else { return result }
+        var steadied = result
+        for i in steadied.regions.indices {
+            let c = steadied.regions[i].centroid
+            var votes: [Int: Int] = [:]
+            for map in maps {
+                let x = Int(c.x * Double(map.width)), y = Int(c.y * Double(map.height))
+                guard x >= 0, y >= 0, x < map.width, y < map.height else { continue }
+                votes[Int(map.classes[y * map.width + x]), default: 0] += 1
+            }
+            votes[steadied.regions[i].classId, default: 0] += 1   // the frame itself counts too
+            // Only classes of the same family may replace the frame's own answer:
+            // a chair flips to sofa, not to floor.
+            let family = spec.family(steadied.regions[i].classId)
+            let best = votes.filter { spec.family($0.key) == family }.max { $0.value < $1.value }
+            if let best, let info = spec.info(best.key), best.key != steadied.regions[i].classId {
+                steadied.regions[i].classId = best.key
+                steadied.regions[i].label = info.label
+                steadied.regions[i].group = info.group
+            }
+        }
+        return steadied
     }
 }
 

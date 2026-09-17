@@ -49,6 +49,7 @@ public struct ObjectBox: Identifiable, Sendable, Equatable {
     public var classId: Int
     public var label: String
     public var group: String
+    public var family: String
     public var min: SIMD3<Float>
     public var max: SIMD3<Float>
     public var points: Int
@@ -99,24 +100,36 @@ public struct RoomMap: Sendable, Equatable {
 }
 
 /// Builds the room map: keeps the tracking's planes, and turns tracked points
-/// labelled by the segmentation into furniture boxes. Points are binned into
-/// voxels so a wardrobe seen for a minute does not weigh more than one seen
-/// for a second; a box needs enough voxels to be more than a stray label.
+/// labelled by the segmentation into furniture boxes.
+///
+/// Stability is the whole design. Points vote per voxel, and votes are counted
+/// by family, so a sofa the model sometimes calls an armchair still lands in
+/// one object; a voxel needs a clear majority. Voxels are grouped on a coarse
+/// top-down grid into candidate boxes, then matched to the boxes of the last
+/// build: a match keeps its identity and its extent moves only part of the way
+/// towards the new measurement, a candidate must be seen in confirmBuilds
+/// builds in a row before it shows, and a box unseen for up to graceBuilds
+/// builds stays put instead of blinking. A box's label is its family's
+/// most-voted member, kept until another member leads by a clear margin.
 public final class RoomMapBuilder {
     public let spec: DetectionSpec
-    /// Voxel size for labelled points, metres.
-    public var voxel: Float = 0.08
-    /// Cell size for grouping voxels into one object, metres.
-    public var cell: Float = 0.25
-    /// Voxels an object needs before it is placed.
-    public var minVoxels = 12
     /// Classes never boxed: walls, floor and ceiling come from planes.
     public var excludedGroups: Set<String> = ["structure", "person"]
 
     private var planes: [UUID: PlaneInfo] = [:]
-    /// voxel key -> class id -> hits
-    private var votes: [SIMD3<Int32>: [Int: Int]] = [:]
+    /// voxel -> family -> class id -> hits
+    private var votes: [SIMD3<Int32>: [String: [Int: Int]]] = [:]
+    private var tracked: [Tracked] = []
+    private var nextID = 1
     private let lock = NSLock()
+
+    private struct Tracked {
+        var box: ObjectBox
+        var votes: [Int: Int]       // member class -> hits, for the label
+        var seen: Int               // consecutive builds it was matched
+        var missed: Int             // consecutive builds it was not
+        var shown: Bool
+    }
 
     public init(spec: DetectionSpec) {
         self.spec = spec
@@ -126,7 +139,13 @@ public final class RoomMapBuilder {
         lock.withLock {
             planes = [:]
             votes = [:]
+            tracked = []
         }
+    }
+
+    /// Drops the votes but keeps the placed boxes (tests; a new room segment).
+    public func forgetVotes() {
+        lock.withLock { votes = [:] }
     }
 
     public func update(plane: PlaneInfo) {
@@ -140,43 +159,64 @@ public final class RoomMapBuilder {
     /// A tracked point the segmentation put in class `classId` this frame.
     public func add(point: SIMD3<Float>, classId: Int) {
         guard let info = spec.info(classId), info.outline, !excludedGroups.contains(info.group) else { return }
-        let key = SIMD3<Int32>(Int32((point.x / voxel).rounded(.down)), Int32((point.y / voxel).rounded(.down)),
-                               Int32((point.z / voxel).rounded(.down)))
-        lock.withLock { votes[key, default: [:]][classId, default: 0] += 1 }
+        let v = spec.voteVoxelMetres
+        let key = SIMD3<Int32>(Int32((point.x / v).rounded(.down)), Int32((point.y / v).rounded(.down)),
+                               Int32((point.z / v).rounded(.down)))
+        lock.withLock { votes[key, default: [:]][info.familyName, default: [:]][classId, default: 0] += 1 }
     }
 
     public func add(points: [(SIMD3<Float>, Int)]) {
         for (p, c) in points { add(point: p, classId: c) }
     }
 
-    /// The map as it stands: planes, and one box per connected group of
-    /// voxels that agree on a class.
+    /// The map as it stands. Call about once a second: each call is one "build".
     public func build() -> RoomMap {
-        let (planes, votes) = lock.withLock { (Array(self.planes.values), self.votes) }
-        var map = RoomMap()
-        map.planes = planes.sorted { $0.id.uuidString < $1.id.uuidString }
-
-        // Each voxel takes its majority class.
-        var byClass: [Int: [SIMD3<Int32>]] = [:]
-        for (key, counts) in votes {
-            guard let best = counts.max(by: { $0.value < $1.value }), best.value >= 2 else { continue }
-            byClass[best.key, default: []].append(key)
+        lock.withLock {
+            var map = RoomMap()
+            map.planes = planes.values.sorted { $0.id.uuidString < $1.id.uuidString }
+            let candidates = candidateBoxes()
+            track(candidates)
+            map.objects = tracked.filter(\.shown).map(\.box).sorted { $0.points > $1.points }
+            return map
         }
-        let scale = voxel / cell
-        for (classId, voxels) in byClass {
-            guard voxels.count >= minVoxels, let info = spec.info(classId) else { continue }
+    }
+
+    // MARK: Candidates from the voxel votes
+
+    private struct Candidate {
+        var family: String
+        var votes: [Int: Int]
+        var min: SIMD3<Float>
+        var max: SIMD3<Float>
+        var voxels: Int
+    }
+
+    private func candidateBoxes() -> [Candidate] {
+        let v = spec.voteVoxelMetres
+        // Each voxel takes its majority family, if that majority is clear.
+        var byFamily: [String: [(SIMD3<Int32>, [Int: Int])]] = [:]
+        for (key, families) in votes {
+            let totals = families.mapValues { $0.values.reduce(0, +) }
+            guard let best = totals.max(by: { $0.value < $1.value }), best.value >= 3,
+                  Double(best.value) >= 0.6 * Double(totals.values.reduce(0, +)) else { continue }
+            byFamily[best.key, default: []].append((key, families[best.key] ?? [:]))
+        }
+        let scale = v / spec.groupCellMetres
+        var candidates: [Candidate] = []
+        for (family, voxels) in byFamily where voxels.count >= spec.minVoxels {
             // Group on a coarse top-down grid, 8-connected, ignoring height so a
             // tall wardrobe seen in pieces stays one object.
-            var cells: [SIMD2<Int32>: [SIMD3<Int32>]] = [:]
-            for v in voxels {
-                let c = SIMD2<Int32>(Int32((Float(v.x) * scale).rounded(.down)), Int32((Float(v.z) * scale).rounded(.down)))
-                cells[c, default: []].append(v)
+            var cells: [SIMD2<Int32>: [(SIMD3<Int32>, [Int: Int])]] = [:]
+            for entry in voxels {
+                let c = SIMD2<Int32>(Int32((Float(entry.0.x) * scale).rounded(.down)),
+                                     Int32((Float(entry.0.z) * scale).rounded(.down)))
+                cells[c, default: []].append(entry)
             }
             var seen = Set<SIMD2<Int32>>()
             for start in cells.keys.sorted(by: { ($0.x, $0.y) < ($1.x, $1.y) }) where !seen.contains(start) {
                 var queue = [start]
                 seen.insert(start)
-                var members: [SIMD3<Int32>] = []
+                var members: [(SIMD3<Int32>, [Int: Int])] = []
                 var head = 0
                 while head < queue.count {
                     let c = queue[head]
@@ -192,28 +232,88 @@ public final class RoomMapBuilder {
                         }
                     }
                 }
-                guard members.count >= minVoxels else { continue }
+                guard members.count >= spec.minVoxels else { continue }
                 var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude), hi = -lo
-                for v in members {
-                    let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z)) * voxel
+                var memberVotes: [Int: Int] = [:]
+                for (key, counts) in members {
+                    let p = SIMD3<Float>(Float(key.x), Float(key.y), Float(key.z)) * v
                     lo = simd_min(lo, p)
-                    hi = simd_max(hi, p + SIMD3(repeating: voxel))
+                    hi = simd_max(hi, p + SIMD3(repeating: v))
+                    for (cls, n) in counts { memberVotes[cls, default: 0] += n }
                 }
-                let anchor = members.min { ($0.x, $0.z, $0.y) < ($1.x, $1.z, $1.y) }!
-                map.objects.append(ObjectBox(id: "\(classId)@\(anchor.x),\(anchor.y),\(anchor.z)", classId: classId,
-                                             label: info.label, group: info.group, min: lo, max: hi,
-                                             points: members.count))
+                let size = hi - lo
+                // Bigger than any piece of furniture: mislabelled wall or floor points.
+                guard size.x <= spec.maxObjectMetres, size.y <= spec.maxObjectMetres, size.z <= spec.maxObjectMetres else { continue }
+                candidates.append(Candidate(family: family, votes: memberVotes, min: lo, max: hi, voxels: members.count))
             }
         }
-        map.objects.sort { $0.points > $1.points }
-        return map
+        return candidates
+    }
+
+    // MARK: Matching candidates to the boxes already placed
+
+    private func track(_ candidates: [Candidate]) {
+        var unmatched = candidates
+        for i in tracked.indices {
+            let box = tracked[i].box
+            // The candidate of the same family overlapping this box the most, from above.
+            var bestIndex: Int?
+            var bestOverlap: Float = 0
+            for (j, c) in unmatched.enumerated() where c.family == box.family {
+                let overlap = Self.footprintOverlap(box.min, box.max, c.min, c.max)
+                if overlap > bestOverlap { bestOverlap = overlap; bestIndex = j }
+            }
+            guard let j = bestIndex, bestOverlap > 0.3 else {
+                tracked[i].seen = 0
+                tracked[i].missed += 1
+                continue
+            }
+            let c = unmatched.remove(at: j)
+            // Move part of the way: an object grows smoothly as more of it is seen.
+            let k: Float = 0.35
+            tracked[i].box.min += (c.min - box.min) * k
+            tracked[i].box.max += (c.max - box.max) * k
+            tracked[i].box.points = c.voxels
+            tracked[i].votes = c.votes
+            tracked[i].seen += 1
+            tracked[i].missed = 0
+            if tracked[i].seen >= spec.confirmBuilds { tracked[i].shown = true }
+            relabel(&tracked[i])
+        }
+        // Forget boxes that stayed unseen too long.
+        tracked.removeAll { $0.missed > spec.graceBuilds }
+        for c in unmatched {
+            let top = c.votes.max { $0.value < $1.value }?.key ?? 0
+            guard let info = spec.info(top) else { continue }
+            tracked.append(Tracked(
+                box: ObjectBox(id: "o\(nextID)", classId: top, label: info.label, group: info.group, family: c.family,
+                               min: c.min, max: c.max, points: c.voxels),
+                votes: c.votes, seen: 1, missed: 0, shown: spec.confirmBuilds <= 1))
+            nextID += 1
+        }
+    }
+
+    /// Another member of the family takes the label only with a clear lead.
+    private func relabel(_ t: inout Tracked) {
+        guard let top = t.votes.max(by: { $0.value < $1.value }) else { return }
+        let current = t.votes[t.box.classId] ?? 0
+        guard top.key != t.box.classId, Double(top.value) > 1.25 * Double(current) + 2,
+              let info = spec.info(top.key) else { return }
+        t.box.classId = top.key
+        t.box.label = info.label
+        t.box.group = info.group
+    }
+
+    /// Share of the smaller footprint the two boxes share, seen from above.
+    static func footprintOverlap(_ aMin: SIMD3<Float>, _ aMax: SIMD3<Float>, _ bMin: SIMD3<Float>, _ bMax: SIMD3<Float>) -> Float {
+        let w = Swift.max(0, Swift.min(aMax.x, bMax.x) - Swift.max(aMin.x, bMin.x))
+        let d = Swift.max(0, Swift.min(aMax.z, bMax.z) - Swift.max(aMin.z, bMin.z))
+        let areaA = (aMax.x - aMin.x) * (aMax.z - aMin.z), areaB = (bMax.x - bMin.x) * (bMax.z - bMin.z)
+        let smaller = Swift.max(1e-6, Swift.min(areaA, areaB))
+        return w * d / smaller
     }
 }
 
 private func < (a: (Int32, Int32), b: (Int32, Int32)) -> Bool {
     a.0 != b.0 ? a.0 < b.0 : a.1 < b.1
-}
-
-private func < (a: (Int32, Int32, Int32), b: (Int32, Int32, Int32)) -> Bool {
-    a.0 != b.0 ? a.0 < b.0 : a.1 != b.1 ? a.1 < b.1 : a.2 < b.2
 }
