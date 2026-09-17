@@ -21,6 +21,10 @@ if [ ! -f Resources/RoomDepth.mlpackage/Data/com.apple.CoreML/weights/weight.bin
     curl -sL -o "$D/Data/com.apple.CoreML/model.mlmodel" "$B/Data/com.apple.CoreML/model.mlmodel"
     curl -sL -o "$D/Data/com.apple.CoreML/weights/weight.bin" "$B/Data/com.apple.CoreML/weights/weight.bin"
 fi
+# The object detector (YOLOE prompted with object-classes.json) is generated too (see scripts/convert_objects.py).
+if [ ! -d Resources/RoomObjects.mlpackage ]; then
+    ~/.venvs/oasis-coreml/bin/python scripts/convert_objects.py
+fi
 xcodegen generate --quiet
 
 # The first paired iPhone that is connected: CoreDevice id for devicectl, UDID for xcodebuild.

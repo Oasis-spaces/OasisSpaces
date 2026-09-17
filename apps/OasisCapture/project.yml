@@ -25,6 +25,7 @@ targets:
       - path: Sources
       - path: Resources/RoomSegmentation.mlpackage
       - path: Resources/RoomDepth.mlpackage
+      - path: Resources/RoomObjects.mlpackage
     dependencies:
       - package: CaptureRules
       - package: OasisLink

@@ -79,9 +79,8 @@ final class CaptureController: NSObject, ARSessionDelegate {
 
     override init() {
         engine = RuleEngine(config: RuleConfig.bundled())
-        let spec = DetectionSpec.bundled()
-        mapBuilder = RoomMapBuilder(spec: spec)
-        labelMemory = LabelMemory(spec: spec)
+        mapBuilder = RoomMapBuilder(spec: ObjectSpec.bundled())
+        labelMemory = LabelMemory(spec: DetectionSpec.bundled())
         super.init()
         session.delegate = self
         session.delegateQueue = queue
@@ -198,7 +197,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
             lastCloudUpdate = frame.timestamp
             updateCloudNode()
         }
-        if frame.timestamp - lastMapBuild > mapBuilder.spec.buildIntervalSeconds {
+        if frame.timestamp - lastMapBuild > scene.spec.buildIntervalSeconds {
             lastMapBuild = frame.timestamp
             rebuildMap()
         }
@@ -320,7 +319,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
         let map = mapBuilder.build()
         guard map != latestMap else { return }
         latestMap = map
-        let spec = mapBuilder.spec
+        let spec = scene.spec
         DispatchQueue.main.async {
             self.state.map = map
             let ids = Set(map.objects.map(\.id))
@@ -367,35 +366,49 @@ final class CaptureController: NSObject, ARSessionDelegate {
     private var glowWanted = true
     private var modelsReported = false
 
-    /// A frame was analysed (on the scene queue): its depth points go into the
-    /// room map, its regions are steadied for the overlay, and what was seen
-    /// is counted.
+    /// A frame was analysed (on the scene queue): its detected things go into
+    /// the room (and come back with their tracked identity and label), its
+    /// surfaces are steadied for the overlay, and what was seen is counted.
     private func understood(_ understanding: FrameUnderstanding) {
-        let result = labelMemory.steady(understanding.segmentation)
+        let surfaces = labelMemory.steady(understanding.segmentation)
         let time = understanding.time
-        mapBuilder.add(points: understanding.labelledPoints)
+        let objectSpec = mapBuilder.spec
+        let observations = understanding.instances.map {
+            ObjectObservation(classIndex: $0.classIndex, confidence: $0.confidence, points: $0.points)
+        }
+        let matches = mapBuilder.observe(observations, camera: understanding.camera)
+        // Detected things, labelled by the tracker where it knows them (so the
+        // label on screen is the object's settled label, not this frame's guess).
+        var regions: [Region] = []
+        for (i, instance) in understanding.instances.enumerated() {
+            guard let info = objectSpec.info(instance.classIndex), instance.outline.count >= 3 else { continue }
+            let match = matches[i]
+            regions.append(Region(classId: instance.classIndex, label: match?.label ?? info.label,
+                                  group: match?.group ?? info.group, share: instance.share, centroid: instance.centroid,
+                                  outline: instance.outline, objectId: match?.objectID))
+        }
+        // The surfaces: walls, floor, ceiling, doors and windows (things come from the detector).
+        regions += surfaces.regions.filter { $0.group == "structure" }
         let depthOK = (understanding.depthFit?.error ?? 1) < 0.2
         let glow = understanding.glow
         queue.async {
             if self.recording {
                 let dt = min(1, time - (self.lastSegmentationTime ?? time))
-                for (id, share) in result.classShares where share >= self.scene.spec.minRegionShare {
-                    if let info = self.scene.spec.info(id), info.outline {
-                        self.secondsSeen[info.label, default: 0] += dt
-                    }
-                }
+                var seen = Set<String>()
+                for region in regions where region.share >= self.scene.spec.minRegionShare { seen.insert(region.label) }
+                for label in seen { self.secondsSeen[label, default: 0] += dt }
             }
             self.lastSegmentationTime = time
             let detected = self.secondsSeen.sorted { $0.value > $1.value }.map(\.key)
-            var shown = result
+            var shown = regions
             // Regions come out upright; the overlay wants the sensor image's own coordinates.
-            for i in shown.regions.indices {
-                shown.regions[i].outline = shown.regions[i].outline.map { SIMD2($0.y, 1 - $0.x) }
-                let c = shown.regions[i].centroid
-                shown.regions[i].centroid = SIMD2(c.y, 1 - c.x)
+            for i in shown.indices {
+                shown[i].outline = shown[i].outline.map { SIMD2($0.y, 1 - $0.x) }
+                let c = shown[i].centroid
+                shown[i].centroid = SIMD2(c.y, 1 - c.x)
             }
             DispatchQueue.main.async {
-                self.state.regions = shown.regions
+                self.state.regions = shown
                 self.state.detected = detected
                 self.state.depthOK = depthOK
                 if let glow { self.state.glow = glow }

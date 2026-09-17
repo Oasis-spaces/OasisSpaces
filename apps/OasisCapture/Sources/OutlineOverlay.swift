@@ -19,8 +19,10 @@ struct OutlineOverlay: View {
                     let n = CGPoint(x: p.x, y: p.y).applying(transform)
                     return CGPoint(x: n.x * size.width, y: n.y * size.height)
                 }
-                // Placed furniture: a label above each box that is in view.
-                for object in state.map.objects {
+                // Placed furniture: a label above each box that is in view and not
+                // outlined right now (its outline carries the label then).
+                let outlined = Set(state.regions.compactMap(\.objectId))
+                for object in state.map.objects where !outlined.contains(object.id) {
                     let top = object.center + SIMD3(0, object.size.y / 2 + 0.05, 0)
                     let p = frame.camera.projectPoint(top, orientation: .portrait, viewportSize: size)
                     let local = frame.camera.transform.inverse * SIMD4(top, 1)

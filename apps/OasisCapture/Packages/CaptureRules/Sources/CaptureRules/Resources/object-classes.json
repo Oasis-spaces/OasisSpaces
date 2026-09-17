@@ -1,0 +1,620 @@
+{
+ "comment": "Classes of the on-device object detector (YOLOE-11m segmentation, prompted with these names; the class index is the row's position). Each detection is one whole thing with its own mask, which is what makes one box per piece of furniture. label: shown on screen. group: colour (see detection-classes.json). family: look-alikes that vote together on one object. boxed: placed as a box in the room map (wall-mounted and small things are outlined only). Clothes are not in the list on purpose.",
+ "model": "yoloe-11m-seg",
+ "inputSize": [
+  480,
+  640
+ ],
+ "confidence": 0.25,
+ "iou": 0.55,
+ "maskThreshold": 0.5,
+ "minShare": 0.002,
+ "kin": {
+  "comment": "Families the detector confuses on one object: they match one tracked object, whose label is the most-voted class with hysteresis.",
+  "sitting": [
+   "bed",
+   "seating"
+  ],
+  "unit": [
+   "storage",
+   "table",
+   "counter"
+  ],
+  "flat": [
+   "screen",
+   "picture",
+   "mirror"
+  ],
+  "cooking": [
+   "cooker",
+   "microwave",
+   "washer"
+  ]
+ },
+ "tracker": {
+  "voxelMetres": 0.05,
+  "confirmObservations": 2,
+  "matchOverlap": 0.25,
+  "mergeOverlap": 0.6,
+  "easing": 0.35,
+  "trimShare": 0.01,
+  "minPoints": 25,
+  "staleObservations": 6,
+  "maxSizeMetres": 4.0,
+  "depthMetres": [
+   0.3,
+   6.0
+  ],
+  "forgetObservations": 24
+ },
+ "classes": [
+  {
+   "id": 0,
+   "prompt": "bed",
+   "label": "bed",
+   "group": "furniture",
+   "family": "bed",
+   "boxed": true
+  },
+  {
+   "id": 1,
+   "prompt": "mattress",
+   "label": "mattress",
+   "group": "furniture",
+   "family": "bed",
+   "boxed": true
+  },
+  {
+   "id": 2,
+   "prompt": "crib",
+   "label": "crib",
+   "group": "furniture",
+   "family": "bed",
+   "boxed": true
+  },
+  {
+   "id": 3,
+   "prompt": "sofa",
+   "label": "sofa",
+   "group": "furniture",
+   "family": "seating",
+   "boxed": true
+  },
+  {
+   "id": 4,
+   "prompt": "armchair",
+   "label": "armchair",
+   "group": "furniture",
+   "family": "seating",
+   "boxed": true
+  },
+  {
+   "id": 5,
+   "prompt": "chair",
+   "label": "chair",
+   "group": "furniture",
+   "family": "seating",
+   "boxed": true
+  },
+  {
+   "id": 6,
+   "prompt": "stool",
+   "label": "stool",
+   "group": "furniture",
+   "family": "seating",
+   "boxed": true
+  },
+  {
+   "id": 7,
+   "prompt": "bench",
+   "label": "bench",
+   "group": "furniture",
+   "family": "seating",
+   "boxed": true
+  },
+  {
+   "id": 8,
+   "prompt": "ottoman",
+   "label": "ottoman",
+   "group": "furniture",
+   "family": "seating",
+   "boxed": true
+  },
+  {
+   "id": 9,
+   "prompt": "bean bag",
+   "label": "beanbag",
+   "group": "furniture",
+   "family": "seating",
+   "boxed": true
+  },
+  {
+   "id": 10,
+   "prompt": "table",
+   "label": "table",
+   "group": "furniture",
+   "family": "table",
+   "boxed": true
+  },
+  {
+   "id": 11,
+   "prompt": "coffee table",
+   "label": "coffee table",
+   "group": "furniture",
+   "family": "table",
+   "boxed": true
+  },
+  {
+   "id": 12,
+   "prompt": "dining table",
+   "label": "dining table",
+   "group": "furniture",
+   "family": "table",
+   "boxed": true
+  },
+  {
+   "id": 13,
+   "prompt": "desk",
+   "label": "desk",
+   "group": "furniture",
+   "family": "table",
+   "boxed": true
+  },
+  {
+   "id": 14,
+   "prompt": "nightstand",
+   "label": "nightstand",
+   "group": "furniture",
+   "family": "table",
+   "boxed": true
+  },
+  {
+   "id": 15,
+   "prompt": "wardrobe",
+   "label": "wardrobe",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 16,
+   "prompt": "cabinet",
+   "label": "cabinet",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 17,
+   "prompt": "cupboard",
+   "label": "cupboard",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 18,
+   "prompt": "dresser",
+   "label": "dresser",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 19,
+   "prompt": "chest of drawers",
+   "label": "chest of drawers",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 20,
+   "prompt": "bookshelf",
+   "label": "bookshelf",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 21,
+   "prompt": "shelf",
+   "label": "shelf",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 22,
+   "prompt": "tv stand",
+   "label": "TV stand",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 23,
+   "prompt": "shoe rack",
+   "label": "shoe rack",
+   "group": "storage",
+   "family": "storage",
+   "boxed": true
+  },
+  {
+   "id": 24,
+   "prompt": "kitchen counter",
+   "label": "counter",
+   "group": "storage",
+   "family": "counter",
+   "boxed": true
+  },
+  {
+   "id": 25,
+   "prompt": "television",
+   "label": "TV",
+   "group": "appliance",
+   "family": "screen",
+   "boxed": true
+  },
+  {
+   "id": 26,
+   "prompt": "computer monitor",
+   "label": "monitor",
+   "group": "appliance",
+   "family": "screen",
+   "boxed": true
+  },
+  {
+   "id": 27,
+   "prompt": "laptop",
+   "label": "laptop",
+   "group": "appliance",
+   "family": "screen",
+   "boxed": false
+  },
+  {
+   "id": 28,
+   "prompt": "refrigerator",
+   "label": "fridge",
+   "group": "appliance",
+   "family": "fridge",
+   "boxed": true
+  },
+  {
+   "id": 29,
+   "prompt": "washing machine",
+   "label": "washing machine",
+   "group": "appliance",
+   "family": "washer",
+   "boxed": true
+  },
+  {
+   "id": 30,
+   "prompt": "dishwasher",
+   "label": "dishwasher",
+   "group": "appliance",
+   "family": "washer",
+   "boxed": true
+  },
+  {
+   "id": 31,
+   "prompt": "oven",
+   "label": "oven",
+   "group": "appliance",
+   "family": "cooker",
+   "boxed": true
+  },
+  {
+   "id": 32,
+   "prompt": "stove",
+   "label": "stove",
+   "group": "appliance",
+   "family": "cooker",
+   "boxed": true
+  },
+  {
+   "id": 33,
+   "prompt": "microwave",
+   "label": "microwave",
+   "group": "appliance",
+   "family": "microwave",
+   "boxed": false
+  },
+  {
+   "id": 34,
+   "prompt": "air conditioner",
+   "label": "air conditioner",
+   "group": "appliance",
+   "family": "ac",
+   "boxed": false
+  },
+  {
+   "id": 35,
+   "prompt": "fan",
+   "label": "fan",
+   "group": "appliance",
+   "family": "fan",
+   "boxed": true
+  },
+  {
+   "id": 36,
+   "prompt": "speaker",
+   "label": "speaker",
+   "group": "appliance",
+   "family": "speaker",
+   "boxed": false
+  },
+  {
+   "id": 37,
+   "prompt": "printer",
+   "label": "printer",
+   "group": "appliance",
+   "family": "printer",
+   "boxed": false
+  },
+  {
+   "id": 38,
+   "prompt": "radiator",
+   "label": "radiator",
+   "group": "appliance",
+   "family": "radiator",
+   "boxed": false
+  },
+  {
+   "id": 39,
+   "prompt": "heater",
+   "label": "heater",
+   "group": "appliance",
+   "family": "heater",
+   "boxed": true
+  },
+  {
+   "id": 40,
+   "prompt": "lamp",
+   "label": "lamp",
+   "group": "fixture",
+   "family": "lamp",
+   "boxed": true
+  },
+  {
+   "id": 41,
+   "prompt": "ceiling light",
+   "label": "ceiling light",
+   "group": "fixture",
+   "family": "light",
+   "boxed": false
+  },
+  {
+   "id": 42,
+   "prompt": "mirror",
+   "label": "mirror",
+   "group": "fixture",
+   "family": "mirror",
+   "boxed": false
+  },
+  {
+   "id": 43,
+   "prompt": "painting",
+   "label": "painting",
+   "group": "fixture",
+   "family": "picture",
+   "boxed": false
+  },
+  {
+   "id": 44,
+   "prompt": "picture frame",
+   "label": "picture",
+   "group": "fixture",
+   "family": "picture",
+   "boxed": false
+  },
+  {
+   "id": 45,
+   "prompt": "clock",
+   "label": "clock",
+   "group": "fixture",
+   "family": "clock",
+   "boxed": false
+  },
+  {
+   "id": 46,
+   "prompt": "plant",
+   "label": "plant",
+   "group": "fixture",
+   "family": "plant",
+   "boxed": true
+  },
+  {
+   "id": 47,
+   "prompt": "vase",
+   "label": "vase",
+   "group": "fixture",
+   "family": "vase",
+   "boxed": false
+  },
+  {
+   "id": 48,
+   "prompt": "toilet",
+   "label": "toilet",
+   "group": "fixture",
+   "family": "bathroom",
+   "boxed": true
+  },
+  {
+   "id": 49,
+   "prompt": "bathtub",
+   "label": "bathtub",
+   "group": "fixture",
+   "family": "bathroom",
+   "boxed": true
+  },
+  {
+   "id": 50,
+   "prompt": "sink",
+   "label": "sink",
+   "group": "fixture",
+   "family": "sink",
+   "boxed": true
+  },
+  {
+   "id": 51,
+   "prompt": "shower",
+   "label": "shower",
+   "group": "fixture",
+   "family": "bathroom",
+   "boxed": true
+  },
+  {
+   "id": 52,
+   "prompt": "door",
+   "label": "door",
+   "group": "structure",
+   "family": "door",
+   "boxed": false
+  },
+  {
+   "id": 53,
+   "prompt": "window",
+   "label": "window",
+   "group": "structure",
+   "family": "window",
+   "boxed": false
+  },
+  {
+   "id": 54,
+   "prompt": "curtain",
+   "label": "curtain",
+   "group": "soft",
+   "family": "curtain",
+   "boxed": false
+  },
+  {
+   "id": 55,
+   "prompt": "window blind",
+   "label": "blind",
+   "group": "soft",
+   "family": "curtain",
+   "boxed": false
+  },
+  {
+   "id": 56,
+   "prompt": "rug",
+   "label": "rug",
+   "group": "soft",
+   "family": "rug",
+   "boxed": true
+  },
+  {
+   "id": 57,
+   "prompt": "cushion",
+   "label": "cushion",
+   "group": "soft",
+   "family": "cushion",
+   "boxed": false
+  },
+  {
+   "id": 58,
+   "prompt": "pillow",
+   "label": "pillow",
+   "group": "soft",
+   "family": "cushion",
+   "boxed": false
+  },
+  {
+   "id": 59,
+   "prompt": "blanket",
+   "label": "blanket",
+   "group": "soft",
+   "family": "blanket",
+   "boxed": false
+  },
+  {
+   "id": 60,
+   "prompt": "towel",
+   "label": "towel",
+   "group": "soft",
+   "family": "towel",
+   "boxed": false
+  },
+  {
+   "id": 61,
+   "prompt": "box",
+   "label": "box",
+   "group": "furniture",
+   "family": "box",
+   "boxed": true
+  },
+  {
+   "id": 62,
+   "prompt": "basket",
+   "label": "basket",
+   "group": "furniture",
+   "family": "basket",
+   "boxed": true
+  },
+  {
+   "id": 63,
+   "prompt": "bag",
+   "label": "bag",
+   "group": "furniture",
+   "family": "bag",
+   "boxed": false
+  },
+  {
+   "id": 64,
+   "prompt": "suitcase",
+   "label": "suitcase",
+   "group": "furniture",
+   "family": "suitcase",
+   "boxed": true
+  },
+  {
+   "id": 65,
+   "prompt": "trash can",
+   "label": "bin",
+   "group": "furniture",
+   "family": "bin",
+   "boxed": true
+  },
+  {
+   "id": 66,
+   "prompt": "bicycle",
+   "label": "bicycle",
+   "group": "furniture",
+   "family": "bicycle",
+   "boxed": true
+  },
+  {
+   "id": 67,
+   "prompt": "guitar",
+   "label": "guitar",
+   "group": "fixture",
+   "family": "instrument",
+   "boxed": false
+  },
+  {
+   "id": 68,
+   "prompt": "piano",
+   "label": "piano",
+   "group": "furniture",
+   "family": "instrument",
+   "boxed": true
+  },
+  {
+   "id": 69,
+   "prompt": "ladder",
+   "label": "ladder",
+   "group": "furniture",
+   "family": "ladder",
+   "boxed": true
+  },
+  {
+   "id": 70,
+   "prompt": "person",
+   "label": "person",
+   "group": "person",
+   "family": "person",
+   "boxed": false
+  }
+ ]
+}

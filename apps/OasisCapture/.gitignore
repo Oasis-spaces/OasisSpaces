@@ -3,3 +3,4 @@ build/
 .build/
 Resources/RoomSegmentation.mlpackage/
 Resources/RoomDepth.mlpackage/
+Resources/RoomObjects.mlpackage

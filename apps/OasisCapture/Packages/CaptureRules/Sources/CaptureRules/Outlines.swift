@@ -166,6 +166,14 @@ public struct Region: Sendable {
     public var centroid: SIMD2<Double>
     /// Closed polygon around it, same coordinates.
     public var outline: [SIMD2<Double>]
+    /// The tracked object this is, when it is one the tracker knows.
+    public var objectId: String? = nil
+
+    public init(classId: Int, label: String, group: String, share: Double, centroid: SIMD2<Double>,
+                outline: [SIMD2<Double>], objectId: String? = nil) {
+        self.classId = classId; self.label = label; self.group = group; self.share = share
+        self.centroid = centroid; self.outline = outline; self.objectId = objectId
+    }
 }
 
 public struct SegmentationResult: Sendable {
