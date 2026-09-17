@@ -276,22 +276,28 @@ def compare(video: Path, candidates: list[dict], out_dir: Path, log=print):
             row.update({f"new_{k}": round(float(np.mean(v)), 3) for k, v in kinds["new"].items()})
         summary[label] = row
 
+    sheets = draw_sheets(candidates, shots, renders, out_dir, "compare")
+    return summary, sheets, [{"view": shot["key"], "new": shot["new"]} for shot in shots], (shots, renders)
+
+
+def draw_sheets(order: list[dict], shots: list[dict], renders: dict, out_dir: Path, stem: str) -> list[Path]:
+    """One sheet per view: the photo, then the candidates in `order` lettered A, B, ..."""
     font = ImageFont.load_default(size=16)
     sheets = []
     out_dir.mkdir(parents=True, exist_ok=True)
     for n, shot in enumerate(shots):
-        sheet = Image.new("RGB", ((len(candidates) + 1) * (TILE_W + 8), TILE_H + 26), "white")
+        sheet = Image.new("RGB", ((len(order) + 1) * (TILE_W + 8), TILE_H + 26), "white")
         draw = ImageDraw.Draw(sheet)
         sheet.paste(Image.fromarray(shot["photo"]), (0, 26))
         draw.text((4, 4), "NEW VIEW (not trained on)" if shot["new"] else "trained view",
                   fill="black", font=font)
-        for k, c in enumerate(candidates, 1):
+        for k, c in enumerate(order, 1):
             sheet.paste(Image.fromarray(renders[(c["label"], n)]), (k * (TILE_W + 8), 26))
             draw.text((k * (TILE_W + 8) + 4, 4), LETTERS[k - 1], fill="black", font=font)
-        path = out_dir / f"compare-{n + 1}.png"
+        path = out_dir / f"{stem}-{n + 1}.png"
         sheet.save(path)
         sheets.append(path)
-    return summary, sheets, [{"view": shot["key"], "new": shot["new"]} for shot in shots]
+    return sheets
 
 
 PROMPT = """You are the final quality judge for 3D room reconstructions (Gaussian splats) made from one phone video.
@@ -377,26 +383,82 @@ def guarded(record: dict, choosable: set[str]) -> dict:
     return record
 
 
+# Claude's ranking of near-equal splats changed between identical asks (Sep
+# 2026: the same three splats came back C>B>A "high", then B>A>C "medium").
+# So it is asked JUDGE_VOTES times, the candidates in a different order each
+# time (no splat always sits in the A column), and the rankings are added up.
+JUDGE_VOTES = 3
+
+
+def vote_orders(count: int, votes: int) -> list[list[int]]:
+    """Candidate orders for the votes: as given, reversed, then rotations,
+    repeated from the start when there are fewer orders than votes (two
+    candidates: a third vote breaks a split)."""
+    base = list(range(count))
+    unique = []
+    for order in [base, base[::-1]] + [base[k:] + base[:k] for k in range(1, count)]:
+        if order not in unique:
+            unique.append(order)
+    return [unique[n % len(unique)] for n in range(votes)]
+
+
 def judge(video: Path, candidates: list[dict], out_dir: Path, log=print, advisor=None) -> dict:
-    """Compare `candidates` ({label, space, ply}) with sheets in `out_dir`;
-    Claude ranks them, the measurements decide without Claude. Returns the
-    record: candidates by letter with their measurements, Claude's verdict,
-    and the best label."""
-    summary, sheets, views = compare(video, candidates, out_dir, log)
+    """Compare `candidates` ({label, space, ply}) with sheets in `out_dir`.
+    Claude ranks them JUDGE_VOTES times in shuffled orders and the rankings
+    are combined (Borda count); the measurements decide without Claude.
+    Returns the record: candidates by letter with their measurements, Claude's
+    combined verdict with every vote, and the best label."""
+    summary, sheets, views, (shots, renders) = compare(video, candidates, out_dir, log)
     letters = {LETTERS[k]: c["label"] for k, c in enumerate(candidates)}
+    to_letter = {label: letter for letter, label in letters.items()}
     by_numbers = max(summary, key=lambda label: (summary[label].get("new_ssim", summary[label]["ssim"]),
                                                  summary[label]["ssim"]))
-    verdict = None
+    votes = []
     if len(candidates) > 1:
         if advisor is None:
             from advisor import Advisor
 
             advisor = Advisor()
-        if advisor.available:
-            verdict = advisor.ask_json(PROMPT.format(count=len(candidates),
-                                                     letters=", ".join(letters)), sheets,
-                                       max_tokens=2000)
-    decided = bool(verdict and verdict.get("best") in letters)
+        for n, order in enumerate(vote_orders(len(candidates), JUDGE_VOTES)):
+            if not advisor.available:
+                break
+            shown = [candidates[i] for i in order]
+            vote_sheets = (sheets if order == list(range(len(candidates)))
+                           else draw_sheets(shown, shots, renders, out_dir / "votes", f"vote{n + 1}"))
+            vote_letters = {LETTERS[k]: c["label"] for k, c in enumerate(shown)}
+            answer = advisor.ask_json(PROMPT.format(count=len(shown), letters=", ".join(vote_letters)),
+                                      vote_sheets, max_tokens=2000)
+            if not answer or answer.get("best") not in vote_letters:
+                continue
+            ranking = [vote_letters[L] for L in answer.get("ranking") or [] if L in vote_letters]
+            if answer["best"] in vote_letters and vote_letters[answer["best"]] not in ranking[:1]:
+                ranking = [vote_letters[answer["best"]]] + [l for l in ranking if l != vote_letters[answer["best"]]]
+            votes.append({"order": [c["label"] for c in shown], "ranking": ranking,
+                          "best": vote_letters[answer["best"]], "confidence": answer.get("confidence"),
+                          "reasons": {vote_letters[L]: why for L, why in (answer.get("reasons") or {}).items()
+                                      if L in vote_letters}})
+            log(f"  vote {n + 1}: best {vote_letters[answer['best']]} ({answer.get('confidence')})")
+
+    verdict = None
+    if votes:
+        points = {label: 0 for label in letters.values()}
+        for vote in votes:
+            for position, label in enumerate(vote["ranking"]):
+                points[label] += len(letters) - 1 - position
+        ranked = sorted(points, key=lambda label: (-points[label], -summary[label].get("new_ssim", summary[label]["ssim"])))
+        best = ranked[0]
+        agreeing = sum(1 for vote in votes if vote["best"] == best)
+        reasons = next((vote["reasons"] for vote in votes if vote["best"] == best), votes[0]["reasons"])
+        verdict = {
+            "ranking": [to_letter[label] for label in ranked], "best": to_letter[best],
+            "reasons": {to_letter[label]: why for label, why in reasons.items() if label in to_letter},
+            "confidence": ("high" if agreeing == len(votes) and len(votes) > 1
+                           else "medium" if agreeing * 2 > len(votes) else "low"),
+            "agreement": f"{agreeing} of {len(votes)} votes put {to_letter[best]} first",
+            "points": {to_letter[label]: value for label, value in points.items()},
+            "votes": votes,
+        }
+    decided = verdict is not None
     return {
         "video": str(video), "views_compared": views,
         "candidates": {letter: {"label": label, "splat": str(next(c["ply"] for c in candidates
@@ -458,7 +520,8 @@ def main() -> None:
             print(f"  {letter} {c['label']}: trained views SSIM {c['ssim']:.3f}, PSNR {c['psnr']:.1f} dB, "
                   f"gaps {c['gaps']:.1%}{new}")
         if record["claude"]:
-            print("  Claude ranking:", record["claude"].get("ranking"), "-", record["claude"].get("confidence"))
+            print("  Claude ranking:", record["claude"].get("ranking"), "-", record["claude"].get("confidence"),
+                  f"({record['claude'].get('agreement')})")
             for letter, why in (record["claude"].get("reasons") or {}).items():
                 print(f"    {letter}: {why}")
 

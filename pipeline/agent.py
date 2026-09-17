@@ -1125,7 +1125,8 @@ class Agent:
                                        "overruled": record.get("overruled")},
                     f"kept {record['chosen']}"
                     + (f" ({record['overruled']})" if record.get("overruled") else
-                       f" (decided by {record['decided_by']})")
+                       f" (decided by {record['decided_by']}"
+                       + (f"; {verdict['agreement']}" if verdict.get("agreement") else "") + ")")
                     + (f"; best of all shown: {record['best']}" if len(shown) > len(trained) else ""))
         return next(t for t in trained if t["label"] == record["chosen"])
 
@@ -1189,7 +1190,9 @@ class Agent:
                                    "candidates": record["candidates"]},
                         f"best splat of {self.source.name}: {record['best']}")
         self.decide("splat", "accept", f"published {record['best']} as the best splat of "
-                    f"{self.source.name} (decided by {record['decided_by']})",
+                    f"{self.source.name} (decided by {record['decided_by']}"
+                    + (f"; {record['claude']['agreement']}" if (record.get("claude") or {}).get("agreement") else "")
+                    + ")",
                     {"best_splat": record["best"]})
 
     def fill_surfaces(self) -> None:
