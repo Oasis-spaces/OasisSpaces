@@ -278,3 +278,49 @@ final class CloudModelTests: XCTestCase {
         XCTAssertEqual(config?.url.host, "oasis-relay.onrender.com")
     }
 }
+
+final class PacedUploadTests: XCTestCase {
+    /// A body fed at a fixed pace arrives whole, and no faster than asked.
+    func testPacedPutDeliversEveryByteAtThePace() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("paced-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let target = folder.appendingPathComponent("received.bin")
+        let server = try HTTPServer(port: 0) { request in
+            guard request.method == "PUT" else { return .respond(.error(404, "no")) }
+            return .upload(to: target) { complete in complete ? .json(["ok": "yes"]) : .error(400, "short") }
+        }
+        let ready = expectation(description: "listening")
+        server.start { state in if case .ready = state { ready.fulfill() } }
+        await fulfillment(of: [ready], timeout: 5)
+        defer { server.stop() }
+        let port = try XCTUnwrap(server.port)
+        let client = StationClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
+
+        var payload = Data(count: 300_000)
+        payload.withUnsafeMutableBytes { raw in
+            for i in 0..<raw.count { raw[i] = UInt8(truncatingIfNeeded: i &* 31 &+ i / 7) }
+        }
+        let last = Box(0.0)
+        let began = Date()
+        try await client.put(payload, to: URL(string: "http://127.0.0.1:\(port)/anything")!, bytesPerSecond: 200_000) { last.set($0) }
+        let took = Date().timeIntervalSince(began)
+        XCTAssertEqual(try Data(contentsOf: target), payload)
+        XCTAssertEqual(last.value, 1, accuracy: 1e-9)
+        XCTAssertGreaterThan(took, 1.2, "300 KB at 200 KB/s cannot take less than about 1.5 s")
+        XCTAssertLessThan(took, 6)
+
+        // The ordinary route (full speed first) delivers the same bytes.
+        try? FileManager.default.removeItem(at: target)
+        try await client.put(payload, to: URL(string: "http://127.0.0.1:\(port)/anything")!) { _ in }
+        XCTAssertEqual(try Data(contentsOf: target), payload)
+    }
+}
+
+private final class Box<T>: @unchecked Sendable {
+    private var stored: T
+    private let lock = NSLock()
+    init(_ value: T) { stored = value }
+    func set(_ value: T) { lock.withLock { stored = value } }
+    var value: T { lock.withLock { stored } }
+}

@@ -157,11 +157,44 @@ public final class StationClient: NSObject, @unchecked Sendable {
     }
 
     /// PUTs bytes to a signed storage URL (no token: the URL carries its own).
+    ///
+    /// Sent at full speed first. Some networks corrupt an upload that leaves
+    /// fast (the connection dies with a TLS error a few tens of kilobytes in,
+    /// every time, while downloads are fine); the same bytes fed slowly arrive
+    /// intact. So a connection-level failure is answered with one more try at
+    /// `Self.pacedBytesPerSecond`.
     public func put(_ data: Data, to signed: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        do {
+            var request = URLRequest(url: signed)
+            request.httpMethod = "PUT"
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            let (body, response) = try await session.upload(for: request, from: data, delegate: UploadProgress(progress))
+            try check(response, body)
+        } catch let error as URLError where error.code != .cancelled && error.code != .notConnectedToInternet {
+            try await put(data, to: signed, bytesPerSecond: Self.pacedBytesPerSecond, progress: progress)
+        }
+    }
+
+    /// The pace of the second try of an upload, bytes a second.
+    public static let pacedBytesPerSecond = 150_000
+
+    /// PUTs bytes no faster than `bytesPerSecond`: the body is a stream this
+    /// side fills a little at a time, so the connection cannot send ahead of it.
+    public func put(_ data: Data, to signed: URL, bytesPerSecond: Int,
+                    progress: @escaping @Sendable (Double) -> Void) async throws {
         var request = URLRequest(url: signed)
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        let (body, response) = try await session.upload(for: request, from: data, delegate: UploadProgress(progress))
+        request.setValue(String(data.count), forHTTPHeaderField: "Content-Length")
+        var input: InputStream?
+        var output: OutputStream?
+        Stream.getBoundStreams(withBufferSize: 8192, inputStream: &input, outputStream: &output)
+        guard let input, let output else { throw LinkError(status: 0, message: "could not open the upload stream") }
+        request.httpBodyStream = input
+        let feeder = PacedFeeder(data: data, output: output, bytesPerSecond: max(1_000, bytesPerSecond), progress: progress)
+        feeder.start()
+        defer { feeder.cancel() }
+        let (body, response) = try await session.data(for: request)
         try check(response, body)
     }
 
@@ -220,6 +253,49 @@ public final class StationClient: NSObject, @unchecked Sendable {
             let fields = data.flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
             let message = fields?["error"] ?? fields?["detail"]
             throw LinkError(status: http.statusCode, message: message ?? "The server answered \(http.statusCode)")
+        }
+    }
+}
+
+/// Writes a body into a bound stream at a fixed pace, on its own thread (a
+/// write to a full stream blocks, which a Swift task must not do).
+private final class PacedFeeder: @unchecked Sendable {
+    private let data: Data
+    private let output: OutputStream
+    private let bytesPerSecond: Int
+    private let progress: @Sendable (Double) -> Void
+    private let lock = NSLock()
+    private var cancelled = false
+
+    init(data: Data, output: OutputStream, bytesPerSecond: Int, progress: @escaping @Sendable (Double) -> Void) {
+        self.data = data
+        self.output = output
+        self.bytesPerSecond = bytesPerSecond
+        self.progress = progress
+    }
+
+    func cancel() {
+        lock.withLock { cancelled = true }
+    }
+
+    func start() {
+        Thread.detachNewThread { [self] in
+            output.open()
+            defer { output.close() }
+            let piece = 2_000
+            let pause = Double(piece) / Double(bytesPerSecond)
+            var offset = 0
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+                while offset < data.count {
+                    if lock.withLock({ cancelled }) { return }
+                    let wrote = output.write(base + offset, maxLength: min(piece, data.count - offset))
+                    if wrote <= 0 { return }   // the request ended (or failed) before the body did
+                    offset += wrote
+                    progress(Double(offset) / Double(data.count))
+                    Thread.sleep(forTimeInterval: pause * Double(wrote) / Double(piece))
+                }
+            }
         }
     }
 }
