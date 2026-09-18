@@ -101,9 +101,10 @@ FILL_MIN_BLOBS = 500    # smaller fills are not worth a review (and are not kept
 SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2), "spirula": (15000, 4)}   # steps, image downscale
 # Spirula Studio is a plug-in trainer (pipeline/splat_spirula.py): normal and
 # depth supervision, exposure correction, MCMC densification, on Apple Silicon
-# too. Off unless --spirula on: on the walkthrough it lost to the quick splat
-# (new-view SSIM 0.711 vs 0.721, Claude 1 of 3 votes; with depth supervision
-# 0.707 and 0 of 3), and it adds about 45 minutes on an 8 GB Mac.
+# too. Off unless --spirula on: on the walkthrough its default recipe lost to
+# the quick splat (new-view SSIM 0.711 vs 0.721, Claude 1 of 3 votes), and it
+# adds about 45 minutes on an 8 GB Mac. Its depth supervision has not been
+# tested on its own (see README).
 SPLAT_LABELS = {"quick": "quick ({steps} steps, 1/{downscale} resolution)",
                 "long": "long ({steps} steps, 1/{downscale} resolution)",
                 "spirula": "Spirula ({steps} steps, 1/{downscale} resolution, normals + exposure)"}

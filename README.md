@@ -201,11 +201,15 @@ the agent's judgement:
    densification, on Apple Silicon too. Install by unzipping a release from
    https://github.com/harry7557558/spirula-studio/releases into
    `tools/spirula-studio/` (or set `SPIRULA`). It is off by default: on the
-   walkthrough it lost to the quick splat (SSIM at unseen views 0.711 vs
-   0.721, one of three Claude votes; with its depth supervision on, 0.707 and
-   none), and it adds about 45 minutes on an 8 GB Mac (14 for its depth and
+   walkthrough its default recipe lost to the quick splat (SSIM at unseen
+   views 0.711 vs 0.721, one of three Claude votes), and it adds about 45
+   minutes on an 8 GB Mac (14 for its depth and
    normal maps, 32 for 15,000 steps at quarter resolution with 300k splats).
    Half resolution with 600k splats ran that Mac out of memory and disk.
+   Its depth supervision is untested in isolation: the one run with it on
+   (weight 0.1, a guess ten times its normal weight) also had floater
+   suppression `mild`, a preset that adds depth- and colour-distortion
+   regularisers, so its 0.707 and no votes say nothing about depth alone.
    `tools/compare_splats.py` judges any splat files of a space the same way.
    Stage 4 runs as steps that can each run on their own
    (`--stage splat --splat-steps ...`): `train-quick`, `train-long` (saved every
