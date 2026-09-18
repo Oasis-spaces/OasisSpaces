@@ -194,6 +194,19 @@ the agent's judgement:
    cameras are interpolated, and a slightly misplaced sharp render scores below
    a blurry one
    (`splat-training.json` and `training-compare/` hold the evidence).
+   With `--spirula on`, a third candidate comes from **Spirula Studio**
+   (`pipeline/splat_spirula.py`; a GPL-3.0 program run separately, like
+   COLMAP): the same cameras, frames and seed, trained with its normal
+   supervision, per-photo exposure and lens correction, and MCMC
+   densification, on Apple Silicon too. Install by unzipping a release from
+   https://github.com/harry7557558/spirula-studio/releases into
+   `tools/spirula-studio/` (or set `SPIRULA`). It is off by default: on the
+   walkthrough it lost to the quick splat (SSIM at unseen views 0.711 vs
+   0.721, one of three Claude votes; with its depth supervision on, 0.707 and
+   none), and it adds about 45 minutes on an 8 GB Mac (14 for its depth and
+   normal maps, 32 for 15,000 steps at quarter resolution with 300k splats).
+   Half resolution with 600k splats ran that Mac out of memory and disk.
+   `tools/compare_splats.py` judges any splat files of a space the same way.
    Stage 4 runs as steps that can each run on their own
    (`--stage splat --splat-steps ...`): `train-quick`, `train-long` (saved every
    10,000 steps as `splat-long_<step>.ply` and resumed from the newest save),

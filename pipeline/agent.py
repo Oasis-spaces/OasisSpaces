@@ -98,12 +98,20 @@ FILL_MIN_BLOBS = 500    # smaller fills are not worth a review (and are not kept
 # The long run (about 40 minutes on a Colab T4, 2.5 hours on an 8 GB Mac) is
 # off unless --long-splat on: on both test videos it scored worse than the
 # quick run at the views it did not train on.
-SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2)}   # steps, image downscale
+SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2), "spirula": (15000, 4)}   # steps, image downscale
+# Spirula Studio is a plug-in trainer (pipeline/splat_spirula.py): normal and
+# depth supervision, exposure correction, MCMC densification, on Apple Silicon
+# too. Off unless --spirula on: on the walkthrough it lost to the quick splat
+# (new-view SSIM 0.711 vs 0.721, Claude 1 of 3 votes; with depth supervision
+# 0.707 and 0 of 3), and it adds about 45 minutes on an 8 GB Mac.
+SPLAT_LABELS = {"quick": "quick ({steps} steps, 1/{downscale} resolution)",
+                "long": "long ({steps} steps, 1/{downscale} resolution)",
+                "spirula": "Spirula ({steps} steps, 1/{downscale} resolution, normals + exposure)"}
 # Stage 4 in steps that can each run on their own (a Colab session can die at
 # any time): every step keeps its results in the space, and the next one
 # picks them up. The long training also saves every LONG_CHECKPOINT_STEPS and
 # resumes from the newest save.
-SPLAT_STEPS = ["train-quick", "train-long", "choose-training", "fill", "choose-best"]
+SPLAT_STEPS = ["train-quick", "train-long", "train-spirula", "choose-training", "fill", "choose-best"]
 LONG_CHECKPOINT_STEPS = 10000
 # OpenSplat keeps every training image on the GPU as 32-bit floats; past this
 # it reads them from memory each step instead, so an 8 GB Mac is not swamped.
@@ -226,7 +234,8 @@ class Agent:
     def __init__(self, source: Path, name: str, fps: float, do_splat: bool,
                  allow_retry: bool = True, use_claude: bool = True,
                  long_splat: bool | None = None, trained_elsewhere: bool = False,
-                 retrain: bool = False, splat_steps: list[str] | None = None):
+                 retrain: bool = False, splat_steps: list[str] | None = None,
+                 spirula: bool | None = None):
         self.source = source
         self.name = name
         self.fps = fps
@@ -235,6 +244,9 @@ class Agent:
         # The long run measured worse than the quick one on both test videos
         # (Sep 2026), so it only runs when asked for.
         self.long_splat = bool(long_splat)
+        from splat_spirula import find_binary
+        self.spirula_requested = bool(spirula)
+        self.spirula = self.spirula_requested and find_binary() is not None
         self.trained_elsewhere = trained_elsewhere
         self.retrain = retrain
         self.splat_steps = splat_steps or list(SPLAT_STEPS)
@@ -970,6 +982,7 @@ class Agent:
         """Stage 4, one step after another (SPLAT_STEPS): only the steps in
         self.splat_steps run, each picking up what the earlier ones left."""
         steps = {"train-quick": self.train_quick, "train-long": self.train_long,
+                 "train-spirula": self.train_spirula,
                  "choose-training": self.pick_training, "fill": self.fill_step,
                  "choose-best": self.best_step}
         for name in SPLAT_STEPS:
@@ -991,7 +1004,7 @@ class Agent:
         dense = self.space / "cloud-dense.ply"
         if not out.exists() or (dense.exists() and out.stat().st_mtime < dense.stat().st_mtime):
             return None
-        return {"label": f"{run_name} ({steps} steps, 1/{downscale} resolution)",
+        return {"label": SPLAT_LABELS[run_name].format(steps=steps, downscale=downscale),
                 "space": self.space, "ply": out}
 
     def seed(self) -> bool:
@@ -1057,10 +1070,38 @@ class Agent:
                     "the long training failed; the quick splat stays (see the log)")
         return True  # a failed long run leaves the quick splat to carry on with
 
+    def train_spirula(self) -> bool:
+        """Spirula Studio's training of the same cameras and seed
+        (pipeline/splat_spirula.py); a failure leaves the other splats to carry on."""
+        from splat_spirula import DEFAULTS, find_binary
+
+        if self.trained_elsewhere or not self.spirula:
+            self.decide("splat", "skip", "no Spirula training here"
+                        + ("" if self.trained_elsewhere else
+                           " (--spirula on to train it)" if not self.spirula_requested else
+                           " (Spirula Studio is not installed; see pipeline/splat_spirula.py)"))
+            return True
+        if not self.retrain and self.trained_splat("spirula"):
+            self.decide("splat", "reuse", "splat-spirula.ply is already trained from this dense cloud")
+            return True
+        if not self.seed():
+            return False
+        steps, downscale = SPLAT_RUNS["spirula"]
+        ok, _ = self.run([sys.executable, str(ROOT / "pipeline/splat_spirula.py"), str(self.space),
+                          "--iters", str(steps), "--divisor", str(downscale),
+                          "--cap", str(DEFAULTS["cap"]), "--depth-weight", str(DEFAULTS["depth_weight"]),
+                          "--floaters", DEFAULTS["floaters"]],
+                         "splat", f"Spirula: {steps} steps at 1/{downscale} resolution")
+        ok = ok and (self.space / "splat-spirula.ply").exists()
+        self.decide("splat", "accept" if ok else "warn",
+                    "trained the Spirula splat" if ok else
+                    "the Spirula training failed; the other splats stay (see the log)")
+        return True
+
     def pick_training(self) -> bool:
         """Claude chooses between the trained splats; the choice becomes
         splat.ply, exported for the viewer with Claude's opening view."""
-        trained = [t for t in (self.trained_splat("quick"), self.trained_splat("long")) if t]
+        trained = [t for t in (self.trained_splat(run) for run in SPLAT_RUNS) if t]
         if not trained:
             self.decide("splat", "stop", "no splat trained from this dense cloud: run train-quick first")
             return False
@@ -1638,6 +1679,10 @@ def main() -> int:
     parser.add_argument("--retrain", action="store_true",
                         help="train the splats again even if ones trained from the current "
                              "dense cloud are already in the space")
+    parser.add_argument("--spirula", choices=["on", "off"], default="off",
+                        help="also train with Spirula Studio and let Claude judge it; off by "
+                             "default, as it lost to the quick splat on the walkthrough and adds "
+                             "about 45 minutes on an 8 GB Mac")
     parser.add_argument("--long-splat", choices=["on", "off"], default="off",
                         help="also train a long splat (30,000 steps at half resolution) for Claude "
                              "to choose from; off by default, as it scored worse on both test videos")
@@ -1650,7 +1695,8 @@ def main() -> int:
                   allow_retry=not args.no_retry, use_claude=not args.no_claude,
                   long_splat=args.long_splat == "on",
                   trained_elsewhere=args.trained_elsewhere, retrain=args.retrain,
-                  splat_steps=args.splat_steps)
+                  splat_steps=args.splat_steps,
+                  spirula=args.spirula == "on")
     if args.stage:
         stages = [args.stage]
     else:

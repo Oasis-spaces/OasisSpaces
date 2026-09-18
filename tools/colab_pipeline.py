@@ -56,7 +56,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # its own job on the VM with its results fetched before the next starts. The
 # last step, choosing the best splat of the video, runs here after the fetch,
 # where every earlier splat of the video is.
-STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "choose-training", "fill"]
+STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "train-spirula", "choose-training", "fill"]
 SPLAT_STEPS = STEPS[3:]
 # The notebook install cells each step needs. OpenSplat links OpenCV, which the
 # COLMAP cell installs, so training needs that cell too.
@@ -66,6 +66,7 @@ NEEDS = {
     "shapes": ["install-python", "install-blender"],
     "train-quick": ["install-colmap", "install-python", "install-opensplat"],
     "train-long": ["install-colmap", "install-python", "install-opensplat"],
+    "train-spirula": ["install-python"],   # skipped on the VM: no Spirula there
     "choose-training": ["install-python"],
     "fill": ["install-python"],
 }
