@@ -453,6 +453,17 @@ scripts/make_sample.py    synthetic demo room
 spaces/<name>/            one folder per captured space
 ```
 
+## Note: pushing from this network
+
+On the Mac this was developed on, uploads sent at full speed are corrupted
+once they pass about 30 KB (`git push` ends in "bad record MAC" or "the remote
+end hung up"), while downloads are fine. Sent at about 170 KB/s they arrive
+intact, so pushes go through a small local proxy that paces the outgoing
+bytes:
+
+    python3 tools/paced_proxy.py &
+    https_proxy=http://127.0.0.1:8899 git push origin main
+
 ## Note: numpy on Python 3.14
 
 numpy older than 2.3 silently corrupts array arithmetic on Python 3.14
