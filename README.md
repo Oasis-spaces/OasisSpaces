@@ -314,8 +314,10 @@ phone (no model calls, no network while recording). Build and install with
   45 MB) gives one mask per thing, so each piece of furniture is one outline
   and one box. A segmentation model (SegFormer-B2 on ADE20K, 53 MB, built by
   `scripts/convert_segmentation.py`) keeps the walls, floor, ceiling, doors
-  and windows. The camera image's edges glow in the colour of what they
-  belong to.
+  and windows. Each thing gets a neon outline and a label, nothing filled
+  in; the outline's vertices are world points (`OutlineLift`), drawn through
+  the live camera thirty times a second, so an outline stays on its thing
+  while the phone turns instead of hanging where it was last analysed.
 - **The room map:** Apple's Core ML Depth Anything V2 Small (48 MB, downloaded
   by `build.sh`) gives a depth for every pixel; the tracking's feature points
   scale it to metres each frame (`DepthScale`), and every pixel of a detected
