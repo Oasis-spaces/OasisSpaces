@@ -1,5 +1,4 @@
 import ARKit
-import CoreImage
 import CoreML
 import Vision
 import CaptureRules
@@ -14,6 +13,9 @@ struct InstanceRegion {
     var share: Double
     /// World points behind the mask (empty without depth).
     var points: [SIMD3<Float>]
+    /// The outline and centre in the room, for drawing through the live camera.
+    var worldOutline: [SIMD3<Float>]
+    var worldCentroid: SIMD3<Float>
 }
 
 /// What one analysed frame tells us.
@@ -27,8 +29,6 @@ struct FrameUnderstanding {
     var instances: [InstanceRegion]
     /// The camera that took the frame.
     var camera: PinholeCamera
-    /// Glowing edges tinted by what they belong to, in the sensor image's own orientation.
-    var glow: CGImage?
 }
 
 /// Runs the three models on camera frames a few times a second, one frame at
@@ -59,7 +59,6 @@ final class SceneRunner {
     private var depth: VNCoreMLRequest?
     private var detector: VNCoreMLRequest?
     private let queue = DispatchQueue(label: "capture.scene", qos: .userInitiated)
-    private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private var busy = false
     private var lastRun: Double = -1
     private var latest: SegmentationResult?
@@ -133,7 +132,7 @@ final class SceneRunner {
 
     /// Analyses this frame if the previous run finished and the interval has
     /// passed. `done` gets the result on the scene queue.
-    func submit(_ frame: ARFrame, glow wantGlow: Bool, done: @escaping (FrameUnderstanding) -> Void) {
+    func submit(_ frame: ARFrame, done: @escaping (FrameUnderstanding) -> Void) {
         let (segmentation, depthRequest, detector) = lock.withLock { (self.segmentation, self.depth, self.detector) }
         guard let segmentation, !busy, frame.timestamp - lastRun >= interval else { return }
         busy = true
@@ -171,7 +170,7 @@ final class SceneRunner {
             // 3. Depth, on the sensor image as it is (landscape, like the model was trained).
             let pinhole = Self.pinhole(camera)
             var understanding = FrameUnderstanding(time: time, segmentation: result, depthFit: nil,
-                                                   instances: [], camera: pinhole, glow: nil)
+                                                   instances: [], camera: pinhole)
             var depthValues: DepthValues?
             if let depthRequest,
                (try? VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .up).perform([depthRequest])) != nil,
@@ -182,10 +181,13 @@ final class SceneRunner {
                 if let fit, fit.error < 0.2 { depthValues = values.scaled(fit) }
             }
             understanding.instances = instances.map { self.region($0, depth: depthValues, pinhole: pinhole) }
-
-            // 4. The glow.
-            if wantGlow {
-                understanding.glow = self.glowImage(buffer, classes: result, instances: instances)
+            // The surfaces' outlines go into the room too, so they follow the camera like the things do.
+            for i in understanding.segmentation.regions.indices {
+                let region = understanding.segmentation.regions[i]
+                let lifted = OutlineLift.lift(outline: region.outline, centroid: region.centroid, inset: 0.03,
+                                              camera: pinhole) { x, y in depthValues?.metres(x: x, y: y) }
+                understanding.segmentation.regions[i].worldOutline = lifted.outline
+                understanding.segmentation.regions[i].worldCentroid = lifted.centroid
             }
             let took = Date().timeIntervalSince(began)
             self.analysisSeconds = self.analysisSeconds == 0 ? took : self.analysisSeconds * 0.9 + took * 0.1
@@ -273,8 +275,15 @@ final class SceneRunner {
                 y += step
             }
         }
+        // Where the thing is, for a vertex the depth map cannot answer: the middle of its own points.
+        let distances = points.compactMap { pinhole.project($0)?.depth }.sorted()
+        let typical = distances.isEmpty ? Float(2.5) : distances[distances.count / 2]
+        let lifted = OutlineLift.lift(outline: outline, centroid: centroid, camera: pinhole, fallback: typical) { x, y in
+            depth?.metres(x: x, y: y)
+        }
         return InstanceRegion(classIndex: instance.classIndex, confidence: instance.confidence, outline: outline,
-                              centroid: centroid, share: Double(instance.share), points: points)
+                              centroid: centroid, share: Double(instance.share), points: points,
+                              worldOutline: lifted.outline, worldCentroid: lifted.centroid)
     }
 
     // MARK: Depth
@@ -353,89 +362,5 @@ final class SceneRunner {
             metres.append(z)
         }
         return DepthScale.fit(predicted: predicted, metres: metres)
-    }
-
-    // MARK: Glow
-
-    private static let glowLongSide: CGFloat = 512
-
-    /// Edges of the camera image, lit in the colour of what they belong to:
-    /// what the eye reads as "the phone sees this".
-    private func glowImage(_ buffer: CVPixelBuffer, classes: SegmentationResult, instances: [Instance]) -> CGImage? {
-        let source = CIImage(cvPixelBuffer: buffer)
-        let scale = Self.glowLongSide / max(source.extent.width, source.extent.height)
-        let small = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        // Edges, with texture and noise cut away (the contrast step pushes faint
-        // edges to black), then thickened a touch so they read as lines.
-        let edges = small.applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 3.0])
-            .applyingFilter("CIColorControls", parameters: [kCIInputContrastKey: 3.0, kCIInputBrightnessKey: -0.35])
-            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: 1.0])
-        let soft = edges.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 2.0])
-            .cropped(to: small.extent)
-        let lit = edges.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: soft])
-        // The edge brightness becomes the alpha of a class-coloured image.
-        guard let colours = colourImage(classes, instances: instances) else { return nil }
-        let tint = CIImage(cgImage: colours).samplingNearest()
-            .transformed(by: CGAffineTransform(scaleX: small.extent.width / CGFloat(colours.width),
-                                               y: small.extent.height / CGFloat(colours.height)))
-        let clear = CIImage(color: .clear).cropped(to: small.extent)
-        let out = tint.applyingFilter("CIBlendWithMask", parameters: [kCIInputMaskImageKey: lit,
-                                                                       kCIInputBackgroundImageKey: clear])
-        return ciContext.createCGImage(out, from: small.extent)
-    }
-
-    private lazy var groupColours: [String: (UInt8, UInt8, UInt8)] = {
-        var out: [String: (UInt8, UInt8, UInt8)] = [:]
-        for (name, group) in spec.groups {
-            var value: UInt64 = 0
-            Scanner(string: group.color.trimmingCharacters(in: CharacterSet(charactersIn: "#"))).scanHexInt64(&value)
-            out[name] = (UInt8((value >> 16) & 0xFF), UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF))
-        }
-        return out
-    }()
-
-    /// A landscape RGBA image in the sensor's orientation: each pixel the
-    /// colour of the thing there (full for detected things, soft for walls,
-    /// floor and ceiling, clear elsewhere).
-    private func colourImage(_ classes: SegmentationResult, instances: [Instance]) -> CGImage? {
-        let w = classes.height, h = classes.width   // upright map turned to landscape
-        var bytes = [UInt8](repeating: 0, count: w * h * 4)
-        var surfaceColour: [Int: (UInt8, UInt8, UInt8)] = [:]
-        for info in spec.classes where info.outline && info.group == "structure" {
-            surfaceColour[info.id] = groupColours[info.group] ?? (255, 255, 255)
-        }
-        let things = instances.compactMap { instance -> (Instance, (UInt8, UInt8, UInt8))? in
-            guard let info = objects.info(instance.classIndex) else { return nil }
-            return (instance, groupColours[info.group] ?? (255, 255, 255))
-        }
-        for y in 0..<h {
-            for x in 0..<w {
-                // Sensor pixel (x, y) shows upright pixel (1 - y', x').
-                let xu = classes.width - 1 - y * classes.width / h, yu = x * classes.height / w
-                var colour: (UInt8, UInt8, UInt8)?
-                var a: UInt8 = 0
-                // Detected things on top (smallest last, so a pillow shows on its sofa).
-                for (instance, c) in things.reversed()
-                where instance.inside(x: xu * instance.maskWidth / classes.width, y: yu * instance.maskHeight / classes.height) {
-                    colour = c
-                    a = 255
-                    break
-                }
-                if colour == nil {
-                    let cls = Int(classes.classes[yu * classes.width + xu])
-                    if let c = surfaceColour[cls] { colour = c; a = 90 }
-                }
-                guard let (r, g, b) = colour else { continue }
-                let i = (y * w + x) * 4
-                bytes[i] = UInt8(UInt16(r) * UInt16(a) / 255); bytes[i + 1] = UInt8(UInt16(g) * UInt16(a) / 255)
-                bytes[i + 2] = UInt8(UInt16(b) * UInt16(a) / 255); bytes[i + 3] = a
-            }
-        }
-        let data = Data(bytes)
-        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
-        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
-                       space: CGColorSpaceCreateDeviceRGB(),
-                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 }

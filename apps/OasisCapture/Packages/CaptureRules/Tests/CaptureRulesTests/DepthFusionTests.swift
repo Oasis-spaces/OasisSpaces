@@ -43,4 +43,42 @@ final class DepthFusionTests: XCTestCase {
         XCTAssertEqual(simd_distance(ahead, SIMD3(1, 1.4, 2) + forward), 0, accuracy: 1e-4)
         XCTAssertNil(camera.project(SIMD3(1, 1.4, 2) - forward * 2), "behind the camera")
     }
+
+    func testLiftedOutlineComesBackToItsPixelsAndFollowsATurn() {
+        // A camera at eye height looking along -z; landscape sensor 1920x1440.
+        var transform = matrix_identity_float4x4
+        transform.columns.3 = SIMD4(0, 1.4, 0, 1)
+        let camera = PinholeCamera(fx: 1500, fy: 1500, cx: 960, cy: 720, width: 1920, height: 1440, transform: transform)
+        // A square in the upright image; everything 2 m away, except one vertex with no depth.
+        let outline: [SIMD2<Double>] = [SIMD2(0.4, 0.4), SIMD2(0.6, 0.4), SIMD2(0.6, 0.6), SIMD2(0.4, 0.6)]
+        var asked = 0
+        let lifted = OutlineLift.lift(outline: outline, centroid: SIMD2(0.5, 0.5), camera: camera) { _, _ in
+            asked += 1
+            return asked == 2 ? nil : 2.0
+        }
+        XCTAssertEqual(lifted.outline.count, 4)
+        for (p, w) in zip(outline, lifted.outline) {
+            // Back through the same camera: the vertex's own pixel (upright (x, y) is sensor (y, 1 - x)).
+            let back = camera.project(w)!
+            XCTAssertEqual(back.u / 1920, Float(p.y), accuracy: 1e-4)
+            XCTAssertEqual(back.v / 1440, Float(1 - p.x), accuracy: 1e-4)
+            XCTAssertEqual(back.depth, 2.0, accuracy: 1e-4, "the vertex without depth took the others' median")
+        }
+        XCTAssertEqual(lifted.centroid.z, -2.0, accuracy: 1e-4)
+        XCTAssertEqual(lifted.centroid.y, 1.4, accuracy: 1e-4)
+        // The phone turns 20 degrees to the left: the outline moves right in the image, all of it, and stays in view.
+        var turned = simd_float4x4(simd_quatf(angle: 20 * .pi / 180, axis: SIMD3(0, 1, 0)))
+        turned.columns.3 = SIMD4(0, 1.4, 0, 1)
+        let after = PinholeCamera(fx: 1500, fy: 1500, cx: 960, cy: 720, width: 1920, height: 1440, transform: turned)
+        for (p, w) in zip(outline, lifted.outline) {
+            let seen = after.project(w)!
+            XCTAssertGreaterThan(seen.u / 1920, Float(p.y) + 0.2, "a fixed thing slides across the image when the phone turns")
+        }
+        // No depth anywhere: the fallback distance, still the right direction.
+        let blind = OutlineLift.lift(outline: outline, centroid: SIMD2(0.5, 0.5), camera: camera, fallback: 3) { _, _ in nil }
+        XCTAssertEqual(camera.project(blind.outline[0])!.depth, 3, accuracy: 1e-4)
+        // Depth outside the range is not believed.
+        let far = OutlineLift.lift(outline: outline, centroid: SIMD2(0.5, 0.5), camera: camera, fallback: 3) { _, _ in 40 }
+        XCTAssertEqual(camera.project(far.outline[0])!.depth, 3, accuracy: 1e-4)
+    }
 }

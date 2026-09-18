@@ -2,65 +2,88 @@ import SwiftUI
 import ARKit
 import CaptureRules
 
-/// Outlines and labels of what the segmentation found, drawn over the camera view.
+/// Outlines and labels of what the phone recognises, drawn over the camera view.
+///
+/// Every outline lives in the room (its vertices are world points), and is
+/// drawn through the camera as it is right now, thirty times a second: when
+/// the phone turns, the outline stays on the thing and leaves the screen with
+/// it, instead of hanging where the thing was when the frame was analysed.
+/// Outlines only: a glowing line around each thing, nothing filled in.
 struct OutlineOverlay: View {
     @ObservedObject var state: CaptureState
     let session: ARSession
     let spec: DetectionSpec
+    /// Outlines from a frame older than this are not drawn (the analysis stalled, or the view is new).
+    static let staleSeconds: Double = 1.5
 
     var body: some View {
         GeometryReader { geometry in
-            Canvas { context, size in
-                guard state.showOutlines, !state.regions.isEmpty,
-                      let frame = session.currentFrame else { return }
-                // Image coordinates (sensor space, normalised) to this view's.
-                let transform = frame.displayTransform(for: .portrait, viewportSize: size)
-                func toView(_ p: SIMD2<Double>) -> CGPoint {
-                    let n = CGPoint(x: p.x, y: p.y).applying(transform)
-                    return CGPoint(x: n.x * size.width, y: n.y * size.height)
-                }
-                // Placed furniture: a label above each box that is in view and not
-                // outlined right now (its outline carries the label then).
-                let outlined = Set(state.regions.compactMap(\.objectId))
-                for object in state.map.objects where !outlined.contains(object.id) {
-                    let top = object.center + SIMD3(0, object.size.y / 2 + 0.05, 0)
-                    let p = frame.camera.projectPoint(top, orientation: .portrait, viewportSize: size)
-                    let local = frame.camera.transform.inverse * SIMD4(top, 1)
-                    guard local.z < -0.3, p.x > -40, p.y > -20, p.x < size.width + 40, p.y < size.height + 20 else { continue }
-                    let color = Color(hex: spec.groups[object.group]?.color ?? "#FFFFFF")
-                    let text = context.resolve(Text(object.label).font(.caption2.weight(.bold)).foregroundColor(.white))
-                    let textSize = text.measure(in: size)
-                    let box = CGRect(x: p.x - textSize.width / 2 - 5, y: p.y - textSize.height / 2 - 2,
-                                     width: textSize.width + 10, height: textSize.height + 4)
-                    context.fill(Path(roundedRect: box, cornerRadius: 5), with: .color(color.opacity(0.9)))
-                    context.draw(text, at: p)
-                }
-                for region in state.regions {
-                    guard region.outline.count >= 3 else { continue }
-                    let color = Color(hex: spec.groups[region.group]?.color ?? "#FFFFFF")
-                    var path = Path()
-                    path.move(to: toView(region.outline[0]))
-                    for p in region.outline.dropFirst() { path.addLine(to: toView(p)) }
-                    path.closeSubpath()
-                    let big = region.group == "structure"
-                    context.fill(path, with: .color(color.opacity(big ? 0.06 : 0.14)))
-                    context.stroke(path, with: .color(color.opacity(0.95)),
-                                   style: StrokeStyle(lineWidth: big ? 1.5 : 2.5, lineJoin: .round))
-                    // Label at the centre of anything large enough to read.
-                    if region.share > 0.015 {
-                        let centre = toView(region.centroid)
-                        let text = context.resolve(Text(region.label).font(.caption.weight(.bold)).foregroundColor(.white))
-                        let textSize = text.measure(in: size)
-                        let box = CGRect(x: centre.x - textSize.width / 2 - 6, y: centre.y - textSize.height / 2 - 3,
-                                         width: textSize.width + 12, height: textSize.height + 6)
-                        context.fill(Path(roundedRect: box, cornerRadius: 6), with: .color(color.opacity(0.85)))
-                        context.draw(text, at: centre)
+            TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
+                Canvas { context, size in
+                    guard state.showOutlines, let frame = session.currentFrame else { return }
+                    let camera = frame.camera
+                    let toCamera = camera.transform.inverse
+                    /// A world point on this screen, nil when it is behind the camera.
+                    func onScreen(_ p: SIMD3<Float>) -> CGPoint? {
+                        guard (toCamera * SIMD4(p, 1)).z < -0.05 else { return nil }
+                        return camera.projectPoint(p, orientation: .portrait, viewportSize: size)
+                    }
+                    let bounds = CGRect(origin: .zero, size: size).insetBy(dx: -40, dy: -20)
+
+                    // Placed furniture: a label above each box that is in view and not
+                    // outlined right now (its outline carries the label then).
+                    let fresh = frame.timestamp - state.regionsTime < Self.staleSeconds
+                    let regions = fresh ? state.regions : []
+                    let outlined = Set(regions.compactMap(\.objectId))
+                    for object in state.map.objects where !outlined.contains(object.id) {
+                        let top = object.center + SIMD3(0, object.size.y / 2 + 0.05, 0)
+                        guard (toCamera * SIMD4(top, 1)).z < -0.3, let p = onScreen(top), bounds.contains(p) else { continue }
+                        label(object.label, at: p, color: color(object.group), small: true, in: &context, size: size)
+                    }
+
+                    for region in regions {
+                        // All of the outline must be in front of the camera; a thing half behind it is not drawn.
+                        let points = region.worldOutline.compactMap(onScreen)
+                        guard points.count >= 3, points.count == region.worldOutline.count else { continue }
+                        var path = Path()
+                        path.move(to: points[0])
+                        for p in points.dropFirst() { path.addLine(to: p) }
+                        path.closeSubpath()
+                        guard path.boundingRect.intersects(CGRect(origin: .zero, size: size)) else { continue }
+                        let tint = color(region.group)
+                        let surface = region.group == "structure"
+                        // A neon line: a wide faint halo, a tighter glow, the bright line itself.
+                        let width: CGFloat = surface ? 1.5 : 2.5
+                        if !surface {
+                            context.stroke(path, with: .color(tint.opacity(0.16)), style: StrokeStyle(lineWidth: width + 7, lineJoin: .round))
+                            context.stroke(path, with: .color(tint.opacity(0.32)), style: StrokeStyle(lineWidth: width + 3, lineJoin: .round))
+                        }
+                        context.stroke(path, with: .color(tint.opacity(surface ? 0.7 : 1)), style: StrokeStyle(lineWidth: width, lineJoin: .round))
+                        // A label at the centre of anything large enough to read.
+                        if region.share > 0.015, let c = region.worldCentroid, let centre = onScreen(c), bounds.contains(centre) {
+                            label(region.label, at: centre, color: tint, small: false, in: &context, size: size)
+                        }
                     }
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .allowsHitTesting(false)
+    }
+
+    private func color(_ group: String) -> Color {
+        Color(hex: spec.groups[group]?.color ?? "#FFFFFF")
+    }
+
+    private func label(_ string: String, at point: CGPoint, color: Color, small: Bool,
+                       in context: inout GraphicsContext, size: CGSize) {
+        let text = context.resolve(Text(string).font(small ? .caption2.weight(.bold) : .caption.weight(.bold)).foregroundColor(.white))
+        let textSize = text.measure(in: size)
+        let pad: CGFloat = small ? 5 : 6
+        let box = CGRect(x: point.x - textSize.width / 2 - pad, y: point.y - textSize.height / 2 - pad / 2,
+                         width: textSize.width + 2 * pad, height: textSize.height + pad)
+        context.fill(Path(roundedRect: box, cornerRadius: pad), with: .color(color.opacity(0.88)))
+        context.draw(text, at: point)
     }
 }
 

@@ -28,8 +28,6 @@ private struct CaptureContent: View {
         ZStack {
             ARCameraView(controller: controller)
                 .ignoresSafeArea()
-            GlowOverlay(state: state, session: controller.session)
-                .ignoresSafeArea()
             OutlineOverlay(state: state, session: controller.session, spec: controller.scene.spec)
                 .ignoresSafeArea()
 

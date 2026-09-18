@@ -95,3 +95,38 @@ public struct PinholeCamera: Sendable {
         return (fx * c.x / z + cx, -fy * c.y / z + cy, z)
     }
 }
+
+/// Puts a 2D outline into the room: every vertex becomes the world point at
+/// the depth seen there, so the outline can be drawn from wherever the camera
+/// is now. Only a turn of the phone needs no depth at all (any depth projects
+/// back to the same place); a step sideways shifts the outline by the error
+/// in depth, which is why real depth is used where there is any.
+public enum OutlineLift {
+    /// `outline` and `centroid` are upright (portrait) normalised image
+    /// coordinates, x right and y down; the camera's image is the landscape
+    /// sensor image, which shows upright (x, y) at sensor (y, 1 - x).
+    /// `depthAt` answers metres at a sensor-normalised position, nil where it
+    /// has none. Depth is read a little inside the outline (`inset` of the way
+    /// to the centre: the very edge of a mask is as likely to be what is
+    /// behind it), kept within `range`, and a vertex without depth takes the
+    /// median of the others, or `fallback` when none has any.
+    public static func lift(outline: [SIMD2<Double>], centroid: SIMD2<Double>, inset: Double = 0.08,
+                            camera: PinholeCamera, fallback: Float = 2.5, range: ClosedRange<Float> = 0.2...12,
+                            depthAt: (Float, Float) -> Float?) -> (outline: [SIMD3<Float>], centroid: SIMD3<Float>) {
+        func sensor(_ p: SIMD2<Double>) -> (Float, Float) { (Float(p.y), Float(1 - p.x)) }
+        func depth(_ p: SIMD2<Double>) -> Float? {
+            let (xs, ys) = sensor(p)
+            guard let z = depthAt(xs, ys), z.isFinite, range.contains(z) else { return nil }
+            return z
+        }
+        let depths = outline.map { depth($0 + (centroid - $0) * inset) }
+        let known = depths.compactMap { $0 }.sorted()
+        let typical = known.isEmpty ? fallback : known[known.count / 2]
+        func world(_ p: SIMD2<Double>, _ z: Float) -> SIMD3<Float> {
+            let (xs, ys) = sensor(p)
+            return camera.worldPoint(u: xs * Float(camera.width), v: ys * Float(camera.height), depth: z)
+        }
+        let lifted = zip(outline, depths).map { world($0, $1 ?? typical) }
+        return (lifted, world(centroid, depth(centroid) ?? typical))
+    }
+}

@@ -168,11 +168,18 @@ public struct Region: Sendable {
     public var outline: [SIMD2<Double>]
     /// The tracked object this is, when it is one the tracker knows.
     public var objectId: String? = nil
+    /// The outline's vertices and the centre as world points (see OutlineLift):
+    /// drawn through the live camera, the outline stays on the thing while the
+    /// phone turns, instead of hanging where the thing was when it was analysed.
+    public var worldOutline: [SIMD3<Float>] = []
+    public var worldCentroid: SIMD3<Float>? = nil
 
     public init(classId: Int, label: String, group: String, share: Double, centroid: SIMD2<Double>,
-                outline: [SIMD2<Double>], objectId: String? = nil) {
+                outline: [SIMD2<Double>], objectId: String? = nil,
+                worldOutline: [SIMD3<Float>] = [], worldCentroid: SIMD3<Float>? = nil) {
         self.classId = classId; self.label = label; self.group = group; self.share = share
         self.centroid = centroid; self.outline = outline; self.objectId = objectId
+        self.worldOutline = worldOutline; self.worldCentroid = worldCentroid
     }
 }
 

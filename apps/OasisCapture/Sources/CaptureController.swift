@@ -21,10 +21,11 @@ final class CaptureState: ObservableObject {
     @Published var format = ""
     @Published var result: CaptureResult?
     @Published var regions: [Region] = []
+    /// When the frame those regions came from was taken (the AR session's clock).
+    @Published var regionsTime: Double = 0
     @Published var showOutlines = true
     @Published var detected: [String] = []
     @Published var map = RoomMap()
-    @Published var glow: CGImage?
     @Published var depthOK = false
     /// The detector models are loaded (the first launch compiles them, which takes a while).
     @Published var modelsReady = false
@@ -169,7 +170,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
             modelsReported = true
             DispatchQueue.main.async { self.state.modelsReady = true }
         }
-        scene.submit(frame, glow: wantGlow) { [weak self] understanding in self?.understood(understanding) }
+        scene.submit(frame) { [weak self] understanding in self?.understood(understanding) }
 
         if recording {
             recorder?.append(frame)
@@ -256,8 +257,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
         return anchor.alignment == .vertical ? .wall : .floor
     }
 
-    /// A faint fill in the plane's own shape, with its boundary drawn as one line
-    /// (never the triangles inside it).
+    /// The plane's boundary drawn as one line: no fill, no triangles.
     private func updatePlaneNode(_ anchor: ARPlaneAnchor, kind: PlaneInfo.Kind) {
         let color = Self.planeColor(kind)
         let boundary = anchor.geometry.boundaryVertices
@@ -267,15 +267,6 @@ final class CaptureController: NSObject, ARSessionDelegate {
                 node = existing
             } else {
                 node = SCNNode()
-                guard let device = MTLCreateSystemDefaultDevice(),
-                      let geometry = ARSCNPlaneGeometry(device: device) else { return }
-                let fill = SCNMaterial()
-                fill.diffuse.contents = color.withAlphaComponent(kind == .floor ? 0.06 : 0.10)
-                fill.lightingModel = .constant
-                fill.isDoubleSided = true
-                fill.writesToDepthBuffer = false
-                geometry.materials = [fill]
-                node.geometry = geometry
                 let outline = SCNNode()
                 outline.name = "outline"
                 node.addChildNode(outline)
@@ -283,7 +274,6 @@ final class CaptureController: NSObject, ARSessionDelegate {
                 self.planeNodes[anchor.identifier] = node
             }
             node.simdTransform = anchor.transform
-            (node.geometry as? ARSCNPlaneGeometry)?.update(from: anchor.geometry)
             if let outline = node.childNode(withName: "outline", recursively: false), boundary.count >= 3 {
                 let vertices = boundary.map { SCNVector3($0.x, $0.y, $0.z) }
                 let source = SCNGeometrySource(vertices: vertices)
@@ -361,9 +351,6 @@ final class CaptureController: NSObject, ARSessionDelegate {
         }
     }
 
-    /// Whether to render the glow: only while the outlines are shown.
-    private var wantGlow: Bool { glowWanted }
-    private var glowWanted = true
     private var modelsReported = false
 
     /// A frame was analysed (on the scene queue): its detected things go into
@@ -385,12 +372,12 @@ final class CaptureController: NSObject, ARSessionDelegate {
             let match = matches[i]
             regions.append(Region(classId: instance.classIndex, label: match?.label ?? info.label,
                                   group: match?.group ?? info.group, share: instance.share, centroid: instance.centroid,
-                                  outline: instance.outline, objectId: match?.objectID))
+                                  outline: instance.outline, objectId: match?.objectID,
+                                  worldOutline: instance.worldOutline, worldCentroid: instance.worldCentroid))
         }
         // The surfaces: walls, floor, ceiling, doors and windows (things come from the detector).
         regions += surfaces.regions.filter { $0.group == "structure" }
         let depthOK = (understanding.depthFit?.error ?? 1) < 0.2
-        let glow = understanding.glow
         queue.async {
             if self.recording {
                 let dt = min(1, time - (self.lastSegmentationTime ?? time))
@@ -400,19 +387,12 @@ final class CaptureController: NSObject, ARSessionDelegate {
             }
             self.lastSegmentationTime = time
             let detected = self.secondsSeen.sorted { $0.value > $1.value }.map(\.key)
-            var shown = regions
-            // Regions come out upright; the overlay wants the sensor image's own coordinates.
-            for i in shown.indices {
-                shown[i].outline = shown[i].outline.map { SIMD2($0.y, 1 - $0.x) }
-                let c = shown[i].centroid
-                shown[i].centroid = SIMD2(c.y, 1 - c.x)
-            }
             DispatchQueue.main.async {
-                self.state.regions = shown
+                // The overlay draws the regions' world outlines through the live camera.
+                self.state.regions = regions
+                self.state.regionsTime = time
                 self.state.detected = detected
                 self.state.depthOK = depthOK
-                if let glow { self.state.glow = glow }
-                self.glowWanted = self.state.showOutlines
             }
         }
     }
