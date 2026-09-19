@@ -94,11 +94,14 @@ public struct Job: Codable, Sendable, Identifiable, Equatable {
     public var parts: [String: Int] = [:]
     /// The Mac that took it (cloud jobs).
     public var station: String? = nil
+    /// Where the Mac serves this room's scene (the viewer page with the scene
+    /// in its query), relative to the station's address; nil when there is none.
+    public var scene: String? = nil
 
     public init(id: String, name: String, createdAt: Date, capturedAt: Date, status: JobStatus,
                 stages: [String], stageIndex: Int = 0, message: String? = nil,
                 filesExpected: [String], filesReceived: [String] = [], results: [ResultFile] = [],
-                cloud: Bool = false, parts: [String: Int] = [:], station: String? = nil) {
+                cloud: Bool = false, parts: [String: Int] = [:], station: String? = nil, scene: String? = nil) {
         self.id = id
         self.name = name
         self.createdAt = createdAt
@@ -113,11 +116,12 @@ public struct Job: Codable, Sendable, Identifiable, Equatable {
         self.cloud = cloud
         self.parts = parts
         self.station = station
+        self.scene = scene
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, createdAt, capturedAt, status, stages, stageIndex, message, filesExpected, filesReceived,
-             results, cloud, parts, station
+             results, cloud, parts, station, scene
     }
 
     public init(from decoder: Decoder) throws {
@@ -136,6 +140,7 @@ public struct Job: Codable, Sendable, Identifiable, Equatable {
         cloud = try c.decodeIfPresent(Bool.self, forKey: .cloud) ?? false
         parts = try c.decodeIfPresent([String: Int].self, forKey: .parts) ?? [:]
         station = try c.decodeIfPresent(String.self, forKey: .station)
+        scene = try c.decodeIfPresent(String.self, forKey: .scene)
     }
 
     /// 0...1 over the pipeline's stages.

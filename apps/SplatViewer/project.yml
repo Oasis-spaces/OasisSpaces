@@ -41,6 +41,8 @@ targets:
         NSHumanReadableCopyright: Oasis-spaces
         NSLocalNetworkUsageDescription: Splat Viewer receives room recordings from the Oasis Capture app on your phone over the local network.
         NSBonjourServices: [_oasisstation._tcp]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         CFBundleDocumentTypes:
           - CFBundleTypeName: Gaussian splat
             CFBundleTypeRole: Viewer

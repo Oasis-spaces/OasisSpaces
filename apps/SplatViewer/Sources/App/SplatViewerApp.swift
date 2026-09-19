@@ -20,6 +20,12 @@ struct SplatViewerApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1280, height: 820)
         .commands { SplatCommands(library: Library.shared) }
+
+        // A room's mixed scene, in its own window (several rooms can be open).
+        WindowGroup("Room", id: "room", for: URL.self) { $address in
+            if let address { RoomSceneView(address: address) }
+        }
+        .defaultSize(width: 1180, height: 780)
     }
 }
 

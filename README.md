@@ -297,13 +297,9 @@ keep the two files together.
 
 A splat of a phone video is soft where the room is plain, and cannot be
 edited: move the bed and there is a hole, because the floor under it was never
-filmed. `tools/mixed_scene.py` turns a processed space into a scene that can:
-
-```bash
-python3 tools/mixed_scene.py spaces/<name>      # a few minutes; writes spaces/<name>/scene/
-python3 -m http.server 8734                      # then open:
-# http://localhost:8734/scene-viewer/index.html?scene=../spaces/<name>/scene/scene.json
-```
+filmed. Stage 4's last step, `scene`, turns the space into a scene that can
+(`tools/mixed_scene.py`; on its own: `python3 tools/mixed_scene.py spaces/<name> [--claude]`,
+a few minutes), written to `spaces/<name>/scene/`:
 
 - **`shell.glb`**: the floor, walls and ceiling stage 3 measured, as flat
   meshes textured with the video's own frames. Every frame is projected onto
@@ -318,18 +314,48 @@ python3 -m http.server 8734                      # then open:
   paint it stands against with it; soft Gaussians that no measured surface
   supports are dropped as haze; the Gaussians that were walls and floor are
   dropped, because the shell replaces them.
+- **`models/*.glb`**: a clean stand-in for every piece: simple furniture of
+  its kind (bed, sofa, armchair, chair, table, desk, wardrobe, box) at the
+  measured size, in the scan's own colours, its back to the wall it stands
+  against. The viewer shows either the scan or the model.
+- **Claude's review** (`review-surfaces.png`, `review-pieces.png`,
+  `review.json`): Claude sees every texture beside what was actually filmed,
+  and every piece beside a frame of the real thing, and decides per surface
+  (keep the texture, keep only its filmed part, or paint it plain) and per
+  piece (show the scan, show the clean model, or drop it). On the walkthrough
+  it kept the doorway wall with its curtain and noticeboard, painted the
+  smeared walls plain and swapped a desk whose scan was "a floating fragment"
+  for its model.
 - **`scene.json`**: each piece's label, box and anchor in metres, y up, the
   room's centre on the floor as origin, what stands on what (pillows move with
-  the bed), and where the person stood while filming.
+  the bed), which of scan and model shows first, and where the person stood.
 
-`scene-viewer/` draws both together (three.js and
-[Spark](https://sparkjs.dev), MIT, loaded from their CDNs): click a piece to
-select it, drag it across the floor, Q and E turn it, H hides it, "Put back"
-returns it to where it was filmed, "Save layout" downloads the arrangement.
-Walls face inwards only, so from above you look into the room. Known limits:
-a piece only has the sides that were filmed, its lighting and shadows are
-baked in, and a texture continued behind furniture is a plausible guess.
-Tests: `python3 tools/tests/test_mixed_scene.py`.
+`scene-viewer/` draws mesh and splats together (three.js 0.180 and
+[Spark](https://sparkjs.dev) 2.2, both MIT, vendored in `scene-viewer/vendor`
+so it needs no internet): click a piece to select it, drag it across the
+floor, Q and E turn it, M swaps scan and model, H hides it, "Put back" returns
+it to where it was filmed, "Save layout" downloads the arrangement. Walls face
+inwards only, so from above you look into the room.
+
+- **In a browser:** `python3 -m http.server 8734`, then
+  `http://localhost:8734/scene-viewer/index.html?scene=../spaces/<name>/scene/scene.json`.
+- **In Splat Viewer (Mac):** the home page lists every room with a scene
+  ("Rooms"), and an analysed phone capture has "Open room"; each opens in its
+  own window. The app's phone-link server hands the viewer and the scene's
+  files to the window (`/viewer/...`, and `/scenes/<key>/...` under an
+  unguessable key, because a web view cannot send the pairing token with every
+  file it fetches).
+- **In Oasis Capture (phone):** an analysed capture has "Open the room", shown
+  by the paired Mac over the same Wi-Fi (not for captures sent through the
+  cloud: the Mac serves rooms on the local network only).
+
+Known limits: a piece only has the sides that were filmed, its lighting and
+shadows are baked in; a texture continued behind furniture is a plausible
+guess; furniture standing close to a wall can print onto the wall's texture
+(Claude's review paints such walls plain); the clean models are simple
+furniture, not reconstructions (a generated model per object, such as SAM 3D
+Objects on a GPU, would drop into `models/` the same way).
+Tests: `python3 tools/tests/test_mixed_scene.py`, and `swift test` in `apps/OasisLink`.
 
 ## Oasis Capture (iPhone app)
 

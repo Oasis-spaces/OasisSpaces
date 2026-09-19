@@ -63,7 +63,7 @@ STAGES = ["reconstruct", "densify", "shapes", "splat"]
 # belongs to, so re-running a later stage keeps the earlier stages' judgements.
 JUDGEMENT_STAGE = {"objects": "densify", "structure": "shapes", "blender": "shapes",
                    "start view": "splat", "fill": "splat", "choose": "splat",
-                   "splat training": "splat"}
+                   "splat training": "splat", "scene": "splat"}
 
 # Tools that live in different places per machine: set BLENDER / OPENSPLAT to
 # override (the Colab notebook installs both under /opt and /content).
@@ -112,7 +112,7 @@ SPLAT_LABELS = {"quick": "quick ({steps} steps, 1/{downscale} resolution)",
 # any time): every step keeps its results in the space, and the next one
 # picks them up. The long training also saves every LONG_CHECKPOINT_STEPS and
 # resumes from the newest save.
-SPLAT_STEPS = ["train-quick", "train-long", "train-spirula", "choose-training", "fill", "choose-best"]
+SPLAT_STEPS = ["train-quick", "train-long", "train-spirula", "choose-training", "fill", "choose-best", "scene"]
 LONG_CHECKPOINT_STEPS = 10000
 # OpenSplat keeps every training image on the GPU as 32-bit floats; past this
 # it reads them from memory each step instead, so an 8 GB Mac is not swamped.
@@ -985,7 +985,7 @@ class Agent:
         steps = {"train-quick": self.train_quick, "train-long": self.train_long,
                  "train-spirula": self.train_spirula,
                  "choose-training": self.pick_training, "fill": self.fill_step,
-                 "choose-best": self.best_step}
+                 "choose-best": self.best_step, "scene": self.scene_step}
         for name in SPLAT_STEPS:
             if name not in self.splat_steps:
                 continue
@@ -1132,6 +1132,42 @@ class Agent:
         if (self.space / "splat.ply").exists():
             self.safe(self.choose_best)
         return True
+
+    def scene_step(self) -> bool:
+        """The room as a mixed scene (tools/mixed_scene.py): its surfaces as
+        textured meshes, the scanned furniture as movable pieces, a clean model
+        beside each. Claude looks at every texture against what was filmed and
+        every piece against a frame of the real thing, and decides what to keep,
+        what to paint plain and which pieces to show as models. An extra: it
+        never ends the run."""
+        if (self.space / "splat.ply").exists() and (self.space / "shapes.json").exists():
+            self.safe(self.build_scene)
+        return True
+
+    def build_scene(self) -> None:
+        from mixed_scene import build, claude_review
+        from surface_fill import LAMA_PATH
+
+        if not LAMA_PATH.exists():
+            print(f"    no scene: the inpainting weights are not at {LAMA_PATH}")
+            return
+        seen = {}
+        ask = claude_review(self.advisor, self.room_frames(2), log=lambda text: print("   " + text))
+
+        def review(*sheets):
+            seen["verdict"] = ask(*sheets)
+            return seen["verdict"]
+
+        out = build(self.space, 0.005, "splat.ply", log=lambda text: print("   " + text),
+                    review=review if self.advisor.available else None)
+        verdict = seen.get("verdict")
+        if verdict:
+            changed = [f"{name}: {v.get('use')}" for name, v in (verdict.get("surfaces") or {}).items() if v.get("use") != "keep"]
+            changed += [f"{ident}: {v.get('use')}" for ident, v in (verdict.get("pieces") or {}).items() if v.get("use") != "scan"]
+            self.judged("scene", {"surfaces": verdict.get("surfaces"), "pieces": verdict.get("pieces"),
+                                  "summary": verdict.get("summary")},
+                        f"{verdict.get('summary', '')}" + (f" ({'; '.join(changed)})" if changed else ""))
+        print(f"    scene: {out / 'scene.json'}")
 
     def image_cache_gb(self, downscale: int) -> float:
         """What OpenSplat's GPU copy of the training images would take."""

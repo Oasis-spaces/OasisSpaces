@@ -324,3 +324,73 @@ private final class Box<T>: @unchecked Sendable {
     func set(_ value: T) { lock.withLock { stored = value } }
     var value: T { lock.withLock { stored } }
 }
+
+final class SceneServingTests: XCTestCase {
+    /// A runner whose job comes with a scene folder.
+    private final class SceneRunner: JobRunner, @unchecked Sendable {
+        let scene: URL
+        init(scene: URL) { self.scene = scene }
+        func run(job: Job, inputs: URL, stage: @escaping @Sendable (Int, String?) -> Void) async -> JobOutcome {
+            JobOutcome(ok: true, message: "done", results: [], scene: scene)
+        }
+    }
+
+    func testTheMacServesTheViewerAndEachRoomsSceneByKey() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("scenes-\(UUID().uuidString)")
+        let viewer = root.appendingPathComponent("scene-viewer"), scene = root.appendingPathComponent("space/scene")
+        try FileManager.default.createDirectory(at: viewer.appendingPathComponent("vendor"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: scene.appendingPathComponent("pieces"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("<html>viewer</html>".utf8).write(to: viewer.appendingPathComponent("index.html"))
+        try Data("export const x = 1".utf8).write(to: viewer.appendingPathComponent("vendor/lib.js"))
+        try Data(#"{"space":"test"}"#.utf8).write(to: scene.appendingPathComponent("scene.json"))
+        try Data([1, 2, 3, 4]).write(to: scene.appendingPathComponent("pieces/B1.splat"))
+        try Data("secret".utf8).write(to: root.appendingPathComponent("space/secret.txt"))
+
+        let station = Station(folder: root.appendingPathComponent("station"), info: StationInfo(id: "mac", name: "Mac"),
+                              stages: ["a"], runner: SceneRunner(scene: scene))
+        station.viewerFolder = viewer
+        let server = try HTTPServer(port: 0) { station.route($0) }
+        let ready = expectation(description: "listening")
+        server.start { state in if case .ready = state { ready.fulfill() } }
+        await fulfillment(of: [ready], timeout: 5)
+        defer { server.stop() }
+        let base = "http://127.0.0.1:\(server.port!)"
+        func get(_ path: String) async throws -> (Int, String?, Data) {
+            let (data, response) = try await URLSession.shared.data(from: URL(string: base + path)!)
+            let http = response as! HTTPURLResponse
+            return (http.statusCode, http.value(forHTTPHeaderField: "Content-Type"), data)
+        }
+
+        // The viewer needs no pairing (a web view cannot send a token with every file), and scripts come typed as scripts.
+        var (status, type, data) = try await get("/viewer/index.html")
+        XCTAssertEqual(status, 200); XCTAssertEqual(type, "text/html; charset=utf-8"); XCTAssertEqual(String(decoding: data, as: UTF8.self), "<html>viewer</html>")
+        (status, type, _) = try await get("/viewer/vendor/lib.js")
+        XCTAssertEqual(status, 200); XCTAssertEqual(type, "text/javascript; charset=utf-8")
+
+        // A scene is reachable only by its key; the same folder keeps its key; nothing above the folder is served.
+        let address = station.registerScene(scene)
+        XCTAssertEqual(station.registerScene(scene), address)
+        XCTAssertTrue(address.hasPrefix("/viewer/index.html?scene=/scenes/"))
+        let scenePath = String(address.split(separator: "=")[1])                     // /scenes/<key>/scene.json
+        (status, type, data) = try await get(scenePath)
+        XCTAssertEqual(status, 200); XCTAssertEqual(type, "application/json"); XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"space":"test"}"#)
+        let folderPath = scenePath.replacingOccurrences(of: "/scene.json", with: "")
+        (status, _, data) = try await get(folderPath + "/pieces/B1.splat")
+        XCTAssertEqual(status, 200); XCTAssertEqual([UInt8](data), [1, 2, 3, 4])
+        (status, _, _) = try await get("/scenes/notakey/scene.json")
+        XCTAssertEqual(status, 404)
+        (status, _, _) = try await get(folderPath + "/%2E%2E/secret.txt")
+        XCTAssertNotEqual(status, 200)
+        (status, _, _) = try await get(folderPath + "/pieces")
+        XCTAssertEqual(status, 404, "a folder is not a file")
+        // Jobs still need the pairing token.
+        (status, _, _) = try await get("/jobs")
+        XCTAssertEqual(status, 401)
+
+        // A station restarted from the same folder still serves the scene.
+        let again = Station(folder: root.appendingPathComponent("station"), info: StationInfo(id: "mac", name: "Mac"),
+                            stages: ["a"], runner: SceneRunner(scene: scene))
+        XCTAssertEqual(again.registerScene(scene), address)
+    }
+}

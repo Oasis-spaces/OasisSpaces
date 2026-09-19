@@ -30,12 +30,16 @@ controls.minDistance = 0.3;
 controls.maxDistance = 14;
 
 scene.add(new SparkRenderer({ renderer }));
-// The textures already hold the room's own light; the scene's light only has to
-// show them as they are, with a little sheen on the floor from the environment.
-scene.add(new THREE.AmbientLight(0xffffff, 2.7));
+// The shell's textures already hold the room's own light, so the shell is drawn as it is
+// (unlit). The lights are for the clean models: soft light from above, a key light for
+// shape, and a room environment for the sheen of wood and metal.
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8d8a80, 1.9));
+const key = new THREE.DirectionalLight(0xfff4e6, 1.3);
+key.position.set(2.5, 5, 3);
+scene.add(key);
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.12;
+scene.environmentIntensity = 0.35;
 
 const pieces = new Map();   // id -> {info, group, proxy, row, home: {position, rotation}}
 let manifest = null;
@@ -52,11 +56,14 @@ async function load() {
   document.getElementById("subtitle").textContent =
     `${manifest.room.width.toFixed(2)} × ${manifest.room.depth.toFixed(2)} m, ${manifest.room.height.toFixed(2)} m high`;
   document.title = `${manifest.space} · Oasis scene`;
+  if (manifest.summary) document.getElementById("summary").textContent = manifest.summary;
 
   const shell = await new GLTFLoader().loadAsync(new URL(manifest.shell, sceneURL).href);
   shell.scene.traverse((node) => {
     if (node.isMesh) {
-      node.material.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      const map = node.material.map;
+      map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      node.material = new THREE.MeshBasicMaterial({ map, side: THREE.FrontSide });
       node.userData.shell = true;
     }
   });
@@ -80,6 +87,15 @@ function addPiece(info) {
   group.position.fromArray(info.anchor);
   const splat = new SplatMesh({ url: new URL(info.file, sceneURL).href });
   group.add(splat);
+  // The clean stand-in, beside the scan: one of the two shows.
+  const model = new THREE.Group();
+  if (info.model) {
+    new GLTFLoader().loadAsync(new URL(info.model, sceneURL).href).then((gltf) => model.add(gltf.scene));
+    group.add(model);
+  }
+  const showing = info.show === "model" && info.model ? "model" : "scan";
+  splat.visible = showing === "scan";
+  model.visible = showing === "model";
   const min = new THREE.Vector3().fromArray(info.box.min), max = new THREE.Vector3().fromArray(info.box.max);
   const size = max.clone().sub(min);
   let proxy = null;
@@ -96,13 +112,12 @@ function addPiece(info) {
   row.className = "row";
   row.innerHTML = `<input type="checkbox" checked><span class="name"></span><span class="count"></span>`;
   row.querySelector(".name").textContent = info.label;
-  row.querySelector(".count").textContent = `${(size.x).toFixed(1)}×${(size.z).toFixed(1)} m`;
-  if (!info.movable) row.querySelector(".count").textContent = "";
+  row.querySelector(".count").textContent = info.movable ? (showing === "model" ? "model" : "scan") : "";
   const box = row.querySelector("input");
   box.addEventListener("change", () => { group.visible = box.checked; if (!box.checked && selected === info.id) select(null); });
   row.addEventListener("click", (event) => { if (event.target !== box && info.movable && group.visible) { event.preventDefault(); select(info.id); } });
   document.getElementById(info.movable ? "furniture" : "fixed").append(row);
-  pieces.set(info.id, { info, group, proxy, row, size });
+  pieces.set(info.id, { info, group, proxy, row, size, splat, model, showing });
 }
 
 // ---------------------------------------------------------------- selection
@@ -115,6 +130,10 @@ function select(id) {
   document.getElementById("sel-title").textContent = piece.info.label;
   document.getElementById("sel-size").textContent =
     `${piece.size.x.toFixed(2)} × ${piece.size.z.toFixed(2)} × ${piece.size.y.toFixed(2)} m`;
+  const swap = document.getElementById("swap");
+  swap.hidden = !piece.info.model;
+  swap.textContent = piece.showing === "scan" ? "Show clean model" : "Show the scan";
+  swap.title = piece.info.why || "";
   bar.hidden = false;
   outline.geometry.dispose();
   outline.geometry = new THREE.EdgesGeometry(piece.proxy.geometry);
@@ -187,6 +206,16 @@ renderer.domElement.addEventListener("pointermove", (event) => {
   piece.group.position.copy(target);
 });
 
+function showAs(id, what) {
+  const piece = pieces.get(id);
+  if (!piece || !piece.info.model) return;
+  piece.showing = what;
+  piece.splat.visible = what === "scan";
+  piece.model.visible = what === "model";
+  piece.row.querySelector(".count").textContent = what;
+  if (selected === id) document.getElementById("swap").textContent = what === "scan" ? "Show clean model" : "Show the scan";
+}
+
 function turn(degrees) {
   if (selected) pieces.get(selected).group.rotation.y += THREE.MathUtils.degToRad(degrees);
 }
@@ -206,6 +235,10 @@ function putBack(id) {
 document.getElementById("turn-left").onclick = () => turn(15);
 document.getElementById("turn-right").onclick = () => turn(-15);
 document.getElementById("hide").onclick = hideSelected;
+document.getElementById("swap").onclick = () => selected && showAs(selected, pieces.get(selected).showing === "scan" ? "model" : "scan");
+document.getElementById("all-models").onclick = () => { for (const p of pieces.values()) showAs(p.info.id, "model"); };
+document.getElementById("all-scans").onclick = () => { for (const p of pieces.values()) showAs(p.info.id, "scan"); };
+document.getElementById("menu").onclick = () => document.getElementById("panel").classList.toggle("open");
 document.getElementById("put-back").onclick = () => selected && putBack(selected);
 document.getElementById("reset").onclick = () => {
   for (const piece of pieces.values()) {
@@ -217,7 +250,7 @@ document.getElementById("reset").onclick = () => {
 document.getElementById("export").onclick = () => {
   const layout = { space: manifest.space, pieces: [...pieces.values()].filter((p) => p.info.movable).map((p) => {
     const position = p.group.getWorldPosition(new THREE.Vector3());
-    return { id: p.info.id, label: p.info.label, hidden: !p.group.visible,
+    return { id: p.info.id, label: p.info.label, hidden: !p.group.visible, show: p.showing,
              position: position.toArray().map((v) => +v.toFixed(3)),
              turnDegrees: +THREE.MathUtils.radToDeg(p.group.rotation.y).toFixed(1) };
   }) };
@@ -230,6 +263,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "q" || event.key === "Q") turn(15);
   if (event.key === "e" || event.key === "E") turn(-15);
   if (event.key === "h" || event.key === "H" || event.key === "Delete" || event.key === "Backspace") hideSelected();
+  if (event.key === "m" || event.key === "M") selected && showAs(selected, pieces.get(selected).showing === "scan" ? "model" : "scan");
   if (event.key === "Escape") select(null);
 });
 
@@ -284,4 +318,5 @@ renderer.setAnimationLoop(() => {
   renderer.render(scene, camera);
 });
 
+window.oasisScene = { pieces, scene, camera };   // for checks from outside (the apps, tests)
 load().catch((error) => { status.textContent = `Could not load the scene: ${error.message}`; console.error(error); });

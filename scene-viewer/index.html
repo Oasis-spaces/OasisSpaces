@@ -37,14 +37,23 @@
   #hint { position: fixed; bottom: 18px; right: 18px; color: var(--dim); font-size: 12px; text-align: right; pointer-events: none; }
   #status { position: fixed; inset: 0; display: grid; place-items: center; background: #101012; color: var(--dim); transition: opacity 0.4s; }
   #status.done { opacity: 0; pointer-events: none; }
-  @media (max-width: 640px) { #panel { width: 200px; font-size: 13px; } #hint { display: none; } }
+  #menu { display: none; position: fixed; top: max(14px, env(safe-area-inset-top)); left: 14px; width: 42px; height: 42px; font-size: 18px;
+    background: var(--panel); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); border-radius: 12px; z-index: 3; }
+  @media (max-width: 640px) {
+    #menu { display: block; }
+    #panel { display: none; top: calc(max(14px, env(safe-area-inset-top)) + 50px); left: 14px; width: min(300px, calc(100vw - 28px)); max-height: 60vh; z-index: 2; }
+    #panel.open { display: block; }
+    #hint { display: none; }
+    #selection { flex-wrap: wrap; justify-content: center; width: calc(100vw - 24px); bottom: max(14px, env(safe-area-inset-bottom)); }
+    #selection .size { display: none; }
+  }
 </style>
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.2.0/spark.module.js"
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/",
+    "@sparkjsdev/spark": "./vendor/spark/spark.module.js"
   }
 }
 </script>
@@ -61,18 +70,23 @@
   <div class="buttons">
     <button id="view-top">From above</button>
     <button id="view-inside">From inside</button>
+    <button id="all-scans">All as scanned</button>
+    <button id="all-models">All as models</button>
     <button id="reset">Reset layout</button>
     <button id="export">Save layout</button>
   </div>
+  <div class="sub" id="summary" style="margin: 10px 2px 0"></div>
 </aside>
+<button id="menu" title="Pieces and views">☰</button>
 <div id="selection" hidden>
   <span class="title" id="sel-title"></span><span class="size" id="sel-size"></span>
   <button id="turn-left" title="Turn left (Q)">⟲ 15°</button>
   <button id="turn-right" title="Turn right (E)">⟳ 15°</button>
+  <button id="swap" title="">Show clean model</button>
   <button id="hide" title="Hide (H)">Hide</button>
   <button id="put-back" title="Back to where it was filmed">Put back</button>
 </div>
-<div id="hint">Click a piece to select it · drag it across the floor · Q / E turn · H hide · Esc deselect</div>
+<div id="hint">Click a piece to select it · drag it across the floor · Q / E turn · M scan or model · H hide · Esc deselect</div>
 <script type="module" src="main.js"></script>
 </body>
 </html>

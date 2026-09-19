@@ -12,11 +12,14 @@ public struct JobOutcome: Sendable {
     public var message: String?
     /// Result files and where they are on disk.
     public var results: [(file: ResultFile, url: URL)]
+    /// The folder of the room's scene (scene.json, shell.glb, pieces), when one was built.
+    public var scene: URL?
 
-    public init(ok: Bool, message: String? = nil, results: [(file: ResultFile, url: URL)] = []) {
+    public init(ok: Bool, message: String? = nil, results: [(file: ResultFile, url: URL)] = [], scene: URL? = nil) {
         self.ok = ok
         self.message = message
         self.results = results
+        self.scene = scene
     }
 }
 
@@ -39,6 +42,15 @@ public final class Station: @unchecked Sendable {
     private var jobs: [String: Job] = [:]
     private var resultPaths: [String: [String: String]] = [:]   // job -> result name -> path
     private var tokens: [String: String] = [:]                    // token -> device
+    /// Scene folders the Mac serves, by an unguessable key (the key is the permission:
+    /// a web view cannot send the pairing token with every file it fetches).
+    private var scenes: [String: String] = [:]                    // key -> folder path
+    /// The scene viewer's web page (the repository's scene-viewer folder).
+    public var viewerFolder: URL? {
+        get { lock.withLock { viewer } }
+        set { lock.withLock { viewer = newValue } }
+    }
+    private var viewer: URL?
     private var code: String
     private var running = false
 
@@ -135,6 +147,14 @@ public final class Station: @unchecked Sendable {
                 }
                 return self.pair(pair)
             }
+        case ("GET", _) where s.count >= 2 && s[0] == "viewer":
+            guard let root = viewerFolder else { return .respond(.error(404, "no viewer on this Mac")) }
+            return .respond(Self.file(under: root, path: Array(s.dropFirst())))
+
+        case ("GET", _) where s.count >= 3 && s[0] == "scenes":
+            guard let folder = lock.withLock({ scenes[s[1]] }) else { return .respond(.error(404, "no such scene")) }
+            return .respond(Self.file(under: URL(fileURLWithPath: folder), path: Array(s.dropFirst(2))))
+
         default:
             break
         }
@@ -263,9 +283,11 @@ public final class Station: @unchecked Sendable {
                 self.resultPaths[job.id] = Dictionary(uniqueKeysWithValues: outcome.results.map { ($0.file.name, $0.url.path) })
             }
             self.saveResultPaths(job.id)
+            let scene = outcome.scene.map(self.registerScene)
             self.update(job.id) {
                 $0.status = outcome.ok ? .done : .failed
                 $0.message = outcome.message
+                $0.scene = scene
                 $0.results = outcome.results.map(\.file)
                 if outcome.ok { $0.stageIndex = $0.stages.count }
             }
@@ -289,6 +311,41 @@ public final class Station: @unchecked Sendable {
         onChange?(allJobs)
     }
 
+    // MARK: Scenes
+
+    /// Serves a scene folder; returns the viewer's address for it (relative to
+    /// the station's). The same folder keeps its key.
+    @discardableResult
+    public func registerScene(_ folder: URL) -> String {
+        let path = folder.standardizedFileURL.path
+        let key: String = lock.withLock {
+            if let known = scenes.first(where: { $0.value == path })?.key { return known }
+            let fresh = (UUID().uuidString + UUID().uuidString).replacingOccurrences(of: "-", with: "").lowercased()
+            scenes[fresh] = path
+            return fresh
+        }
+        saveScenes()
+        return "/viewer/index.html?scene=/scenes/\(key)/scene.json"
+    }
+
+    /// A file under `root`, never above it, with the type a browser needs.
+    static func file(under root: URL, path: [String]) -> HTTPResponse {
+        guard !path.isEmpty, path.allSatisfy({ !$0.isEmpty && $0 != ".." && $0 != "." && !$0.contains("/") && !$0.hasPrefix(".") }) else {
+            return .error(400, "bad path")
+        }
+        let url = path.reduce(root) { $0.appendingPathComponent($1) }
+        var isFolder: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), !isFolder.boolValue else {
+            return .error(404, "not found")
+        }
+        let types = ["html": "text/html; charset=utf-8", "js": "text/javascript; charset=utf-8", "mjs": "text/javascript; charset=utf-8",
+                     "json": "application/json", "css": "text/css; charset=utf-8", "glb": "model/gltf-binary",
+                     "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "wasm": "application/wasm",
+                     "splat": "application/octet-stream", "md": "text/plain; charset=utf-8"]
+        return HTTPResponse(status: 200, headers: ["Content-Type": types[url.pathExtension.lowercased()] ?? "application/octet-stream",
+                                                   "Cache-Control": "no-cache"], body: .file(url))
+    }
+
     static func safeName(_ name: String) -> Bool {
         !name.isEmpty && !name.contains("/") && !name.contains("..") && !name.hasPrefix(".")
     }
@@ -308,6 +365,11 @@ public final class Station: @unchecked Sendable {
         try? JSONEncoder().encode(paths).write(to: jobsFolder.appendingPathComponent(id).appendingPathComponent("results.json"))
     }
 
+    private func saveScenes() {
+        let copy = lock.withLock { scenes }
+        try? JSONEncoder().encode(copy).write(to: folder.appendingPathComponent("scenes.json"))
+    }
+
     private func saveTokens() {
         let copy = lock.withLock { tokens }
         try? JSONEncoder().encode(copy).write(to: folder.appendingPathComponent("tokens.json"))
@@ -317,6 +379,10 @@ public final class Station: @unchecked Sendable {
         if let data = try? Data(contentsOf: folder.appendingPathComponent("tokens.json")),
            let saved = try? JSONDecoder().decode([String: String].self, from: data) {
             tokens = saved
+        }
+        if let data = try? Data(contentsOf: folder.appendingPathComponent("scenes.json")),
+           let saved = try? JSONDecoder().decode([String: String].self, from: data) {
+            scenes = saved
         }
         let ids = (try? FileManager.default.contentsOfDirectory(atPath: jobsFolder.path)) ?? []
         for id in ids {

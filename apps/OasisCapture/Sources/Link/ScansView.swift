@@ -181,6 +181,12 @@ struct JobDetail: View {
     @ObservedObject var link = LinkStore.shared
     let jobID: String
     @State private var viewing = false
+    @State private var room: RoomLink?
+
+    private struct RoomLink: Identifiable {
+        let address: URL
+        var id: String { address.absoluteString }
+    }
 
     private var job: Job? { link.job(jobID) }
 
@@ -219,6 +225,17 @@ struct JobDetail: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 10))
                         }
                     }
+                    if let address = link.roomAddress(job) {
+                        Section {
+                            Button {
+                                room = RoomLink(address: address)
+                            } label: {
+                                Label("Open the room", systemImage: "square.split.bottomrightquarter")
+                            }
+                        } footer: {
+                            Text("A clean room with your furniture as pieces: move them, turn them, hide them, or swap one for a clean model. Shown by your Mac over this Wi-Fi.")
+                        }
+                    }
                     Section {
                         if splatURL(job) != nil {
                             Button {
@@ -242,6 +259,9 @@ struct JobDetail: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: job?.status) {
             if let job, job.status == .done { await link.fetchResults(job) }
+        }
+        .fullScreenCover(item: $room) { link in
+            RoomSceneScreen(address: link.address)
         }
         .fullScreenCover(isPresented: $viewing) {
             if let job, let url = splatURL(job) {

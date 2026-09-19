@@ -18,12 +18,22 @@ never filmed. This turns a processed space into something that can:
                   one for the rest (clutter, curtains, things on the walls).
                   The Gaussians that were the walls and floor are dropped: the
                   shell replaces them.
+  models/*.glb    a clean stand-in for every piece: simple furniture of the
+                  piece's kind, at its measured size, in the scan's own
+                  colours, with its back to the wall the piece stands against.
+                  The viewer can show either; a poor scan starts as its model.
   scene.json      what is where: each piece's label, box and anchor, in metres,
                   y up, the room's centre on the floor as origin (three.js
                   conventions), so a viewer can select, move, turn and hide
                   pieces. scene-viewer/ is that viewer.
 
-    python3 tools/mixed_scene.py spaces/<name> [--cell 0.005] [--splat splat.ply]
+    python3 tools/mixed_scene.py spaces/<name> [--cell 0.005] [--splat splat.ply] [--claude]
+
+With --claude (and always in the pipeline, stage 4's `scene` step) Claude looks
+at every surface's texture beside what was actually filmed, and at every piece
+beside a frame of the real thing, and decides: keep a texture, keep only its
+filmed part, or paint the surface plain; show a piece as scanned, as its clean
+model, or not at all (review-surfaces.png, review-pieces.png, review.json).
 
 Needs stage 4's splat, stage 3's shapes.json, the frames in workspace/images
 and LaMa's weights (~/.cache/oasisspaces/big-lama.pt), like fill-room.
@@ -192,6 +202,94 @@ def cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log):
     return pieces
 
 
+# ------------------------------------------------------------------ models
+# Which of splat_edit's simple furniture stands in for a label (first match wins).
+MODEL_KINDS = [("bed", "bed"), ("mattress", "bed"), ("crib", "bed"), ("sofa", "sofa"), ("couch", "sofa"),
+               ("armchair", "armchair"), ("chair", "chair"), ("stool", "chair"), ("bench", "sofa"),
+               ("desk", "desk"), ("table", "table"), ("nightstand", "box"), ("wardrobe", "wardrobe"),
+               ("cabinet", "wardrobe"), ("cupboard", "wardrobe"), ("dresser", "wardrobe"),
+               ("drawers", "wardrobe"), ("shelf", "wardrobe"), ("bookshelf", "wardrobe"), ("fridge", "wardrobe")]
+# (roughness, metallic) of the parts' materials; colours come from the scan.
+FINISH = {"wood": (0.5, 0.0), "dark wood": (0.55, 0.0), "fabric": (0.95, 0.0), "cushion": (0.95, 0.0),
+          "linen": (0.9, 0.0), "metal": (0.35, 1.0)}
+
+
+def model_kind(label: str) -> str:
+    label = (label or "").lower()
+    return next((kind for word, kind in MODEL_KINDS if word in label), "box")
+
+
+def model_parts(room, box: dict, label: str, colours: np.ndarray, heights: np.ndarray, frame: Frame, anchor: np.ndarray):
+    """The clean stand-in for a measured object: [(min, max, finish, rgb)] boxes
+    in the viewer's frame relative to `anchor`. The piece's depth runs along
+    the box's longer or shorter side as its kind has it (a bed is deeper than
+    wide, a wardrobe wider than deep), its back to the nearer wall."""
+    from splat_edit import CUSHION, DARK_WOOD, FABRIC, LINEN, METAL, PIECES, WOOD
+
+    default, parts = PIECES[model_kind(label)]
+    lo, hi = np.array(box["min"], float), np.array(box["max"], float)
+    size = hi - lo
+    deep_is_long = default[1] > default[0]
+    depth_axis = int(np.argmax(size[:2])) if deep_is_long else int(np.argmin(size[:2]))
+    width_axis = 1 - depth_axis
+    room_lo, room_hi = room.centre - room.half, room.centre + room.half
+    back_at_hi = (room_hi[depth_axis] - hi[depth_axis]) <= (lo[depth_axis] - room_lo[depth_axis])
+
+    # The scan's own colours: the whole piece, and its top (the bedding, a table's top).
+    body = np.median(colours, axis=0) if len(colours) else np.array(WOOD, float)
+    top = heights >= np.percentile(heights, 70) if len(heights) else np.zeros(0, bool)
+    upper = np.median(colours[top], axis=0) if top.any() else body
+    palette = {WOOD: ("wood", body), DARK_WOOD: ("dark wood", body * 0.72), FABRIC: ("fabric", body),
+               CUSHION: ("cushion", np.minimum(body * 1.12, 255)), LINEN: ("linen", upper),
+               METAL: ("metal", np.array(METAL, float))}
+    out = []
+    for cx, cy, z0, w, d, h, colour in parts:
+        finish, rgb = palette[colour]
+        part_lo, part_hi = lo.copy(), hi.copy()
+        part_lo[width_axis] = lo[width_axis] + (cx - w / 2) * size[width_axis]
+        part_hi[width_axis] = lo[width_axis] + (cx + w / 2) * size[width_axis]
+        near, far = cy - d / 2, cy + d / 2                       # along the depth, the back at 1
+        if back_at_hi:
+            part_lo[depth_axis], part_hi[depth_axis] = lo[depth_axis] + near * size[depth_axis], lo[depth_axis] + far * size[depth_axis]
+        else:
+            part_lo[depth_axis], part_hi[depth_axis] = hi[depth_axis] - far * size[depth_axis], hi[depth_axis] - near * size[depth_axis]
+        part_lo[2], part_hi[2] = lo[2] + z0 * size[2], lo[2] + min(1.6, z0 + h) * size[2]
+        corners = frame.scene_to_viewer(np.array([part_lo, part_hi])) - anchor
+        out.append((corners.min(axis=0), corners.max(axis=0), finish, np.clip(rgb, 0, 255)))
+    return out
+
+
+def cuboid(lo: np.ndarray, hi: np.ndarray):
+    """24 vertices (4 a face, so the faces shade flat), their normals and 36 indices."""
+    x0, y0, z0 = lo
+    x1, y1, z1 = hi
+    faces = [((1, 0, 0), [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)]),
+             ((-1, 0, 0), [(x0, y0, z1), (x0, y1, z1), (x0, y1, z0), (x0, y0, z0)]),
+             ((0, 1, 0), [(x0, y1, z0), (x0, y1, z1), (x1, y1, z1), (x1, y1, z0)]),
+             ((0, -1, 0), [(x0, y0, z1), (x0, y0, z0), (x1, y0, z0), (x1, y0, z1)]),
+             ((0, 0, 1), [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]),
+             ((0, 0, -1), [(x1, y0, z0), (x0, y0, z0), (x0, y1, z0), (x1, y1, z0)])]
+    positions, normals, indices = [], [], []
+    for normal, quad_corners in faces:
+        base = len(positions)
+        positions += quad_corners
+        normals += [normal] * 4
+        indices += [base, base + 1, base + 2, base, base + 2, base + 3]
+    return np.array(positions, np.float32), np.array(normals, np.float32), np.array(indices, np.uint16)
+
+
+def model_meshes(parts) -> list:
+    """The parts as glTF meshes (one each), coloured, not textured."""
+    meshes = []
+    for n, (lo, hi, finish, rgb) in enumerate(parts):
+        positions, normals, indices = cuboid(lo, hi)
+        roughness, metallic = FINISH[finish]
+        linear = (np.asarray(rgb, float) / 255.0) ** 2.2             # glTF colours are linear
+        meshes.append({"name": f"{finish} {n}", "quad": (positions, normals, None, indices),
+                       "color": [*linear.round(4).tolist(), 1.0], "roughness": roughness, "metallic": metallic})
+    return meshes
+
+
 # ------------------------------------------------------------------- shell
 def ceiling_surface(room, cell: float):
     from surface_fill import Surface
@@ -275,24 +373,31 @@ def write_glb(path: Path, meshes: list) -> None:
 
     for mesh in meshes:
         positions, normals, uvs, indices = mesh["quad"]
-        images.append({"bufferView": view(mesh["jpeg"]), "mimeType": "image/jpeg", "name": mesh["name"]})
-        textures.append({"source": len(images) - 1, "sampler": 0})
-        materials.append({"name": mesh["name"], "doubleSided": False,
-                          "pbrMetallicRoughness": {"baseColorTexture": {"index": len(textures) - 1},
-                                                   "metallicFactor": 0.0, "roughnessFactor": mesh["roughness"]}})
+        surface = {"metallicFactor": mesh.get("metallic", 0.0), "roughnessFactor": mesh["roughness"]}
+        if mesh.get("jpeg"):
+            images.append({"bufferView": view(mesh["jpeg"]), "mimeType": "image/jpeg", "name": mesh["name"]})
+            textures.append({"source": len(images) - 1, "sampler": 0})
+            surface["baseColorTexture"] = {"index": len(textures) - 1}
+        else:
+            surface["baseColorFactor"] = mesh["color"]
+        materials.append({"name": mesh["name"], "doubleSided": False, "pbrMetallicRoughness": surface})
+        attributes = {"POSITION": accessor(positions, "VEC3", 5126, 34962),
+                      "NORMAL": accessor(normals, "VEC3", 5126, 34962)}
+        if uvs is not None:
+            attributes["TEXCOORD_0"] = accessor(uvs, "VEC2", 5126, 34962)
         gltf_meshes.append({"name": mesh["name"], "primitives": [{
-            "attributes": {"POSITION": accessor(positions, "VEC3", 5126, 34962),
-                           "NORMAL": accessor(normals, "VEC3", 5126, 34962),
-                           "TEXCOORD_0": accessor(uvs, "VEC2", 5126, 34962)},
-            "indices": accessor(indices, "SCALAR", 5123, 34963), "material": len(materials) - 1}]})
+            "attributes": attributes, "indices": accessor(indices, "SCALAR", 5123, 34963),
+            "material": len(materials) - 1}]})
         nodes.append({"name": mesh["name"], "mesh": len(gltf_meshes) - 1})
     while len(blob) % 4:
         blob.append(0)
     document = {"asset": {"version": "2.0", "generator": "OasisSpaces mixed_scene.py"},
                 "scene": 0, "scenes": [{"nodes": list(range(len(nodes)))}], "nodes": nodes,
-                "meshes": gltf_meshes, "materials": materials, "textures": textures, "images": images,
-                "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071}],
+                "meshes": gltf_meshes, "materials": materials,
                 "accessors": accessors, "bufferViews": views, "buffers": [{"byteLength": len(blob)}]}
+    if images:
+        document.update(textures=textures, images=images,
+                        samplers=[{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071}])
     text = json.dumps(document, separators=(",", ":")).encode()
     text += b" " * ((-len(text)) % 4)
     with open(path, "wb") as f:
@@ -303,11 +408,102 @@ def write_glb(path: Path, meshes: list) -> None:
         f.write(bytes(blob))
 
 
+# ------------------------------------------------------------------ review
+REVIEW_PROMPT = """You are checking a 3D scene made from a phone video of a room, before people see it. The room's flat surfaces (floor, walls, ceiling) became textured meshes; each piece of furniture is kept as it was scanned, as a movable piece. Two sheets are attached, then frames of the real room.
+
+Sheet 1, surfaces. One row per surface: on the left what the video actually filmed of it (magenta = never filmed, or hidden behind furniture), on the right the finished texture, where an inpainting model continued the filmed part into the magenta. Surfaces: {surfaces}.
+For each surface choose:
+- "keep": the finished texture is believable everywhere (paint continues as paint, tiles as tiles; real things on the wall such as a door, a window, a curtain, a switch or a board may stay).
+- "filmed": the filmed part is good but the continued part is not (smears, ghosts of furniture, invented objects, blotches): keep the filmed part and paint the rest plain.
+- "plain": even the filmed part is wrong for a clean surface (furniture or clutter printed flat onto it, heavy blur, patchwork): paint the whole surface plain.
+
+Sheet 2, pieces. One row per piece: on the left the scanned piece alone, seen from where the video saw it best; on the right that frame of the video. Pieces: {pieces}.
+For each piece choose:
+- "scan": the scan is recognisably that object; show it as filmed.
+- "model": it is a real piece of furniture but the scan is too broken to show (mostly holes, smears, or a shapeless cloud); show a clean simple model of it instead.
+- "drop": it is not a separate real object (part of a wall, a duplicate of another piece, empty space).
+Be fair to soft scans: furniture covered in clothes or bedding is still "scan" if one can tell what it is.
+
+Reply as JSON: {{"surfaces": {{"<name>": {{"use": "keep|filmed|plain", "why": "..."}}, ...}}, "pieces": {{"<id>": {{"use": "scan|model|drop", "why": "..."}}, ...}}, "summary": "one sentence on how the scene will look"}}"""
+
+
+def claude_review(advisor, frames=(), log=print):
+    """A review callback for build(): Claude's verdicts, or None when Claude is not reachable."""
+    def review(surface_sheet: Path, piece_sheet: Path, surfaces: list, pieces: list):
+        if advisor is None or not advisor.available:
+            return None
+        prompt = REVIEW_PROMPT.format(
+            surfaces=", ".join(f"{s['name']} ({s['filmed']:.0%} filmed)" for s in surfaces),
+            pieces=", ".join(f"{p['id']} = {p['label']} ({p['size']})" for p in pieces) or "none")
+        images = [surface_sheet] + ([piece_sheet] if pieces else []) + list(frames)
+        verdict = advisor.ask_json(prompt, images, max_tokens=2500)
+        if verdict:
+            log(f"  Claude: {verdict.get('summary', '')}")
+        return verdict
+    return review
+
+
+def fit(image: np.ndarray, width: int, height: int) -> Image.Image:
+    picture = Image.fromarray(np.clip(image, 0, 255).astype(np.uint8))
+    picture.thumbnail((width, height))
+    return picture
+
+
+def sheet(rows: list, out: Path, tile=(420, 300)) -> Path:
+    """rows of (title, left image, right image) as one labelled picture."""
+    from PIL import ImageDraw, ImageFont
+
+    font = ImageFont.load_default(size=18)
+    w, h = tile
+    page = Image.new("RGB", (2 * w + 30, max(1, len(rows)) * (h + 34) + 10), "white")
+    draw = ImageDraw.Draw(page)
+    for n, (title, left, right) in enumerate(rows):
+        y = 10 + n * (h + 34)
+        draw.text((10, y), title, fill="black", font=font)
+        for k, picture in enumerate((left, right)):
+            small = fit(picture, w, h)
+            page.paste(small, (10 + k * (w + 10), y + 24))
+    page.save(out)
+    return out
+
+
+def piece_rows(room, arr, scene, masks, log) -> list:
+    """For the review: each movable piece alone, from the camera that saw it best, beside that frame."""
+    from object_frames import best_frames
+    from splat_edit import camera_looking_at
+    from splat_render import render
+
+    rows = []
+    boxes = room.shapes["boxes"]
+    for ident, mask in masks.items():
+        if not ident.startswith("B") or mask.sum() == 0:
+            continue
+        index = int(ident[1:])
+        box = boxes[index]
+        target = (np.array(box["min"]) + np.array(box["max"])) / 2
+        try:
+            picks = best_frames(room.space, {index: box}, per_box=1)
+            view = camera_looking_at(room, target, index)
+        except Exception as error:                       # a space moved here without its camera model
+            log(f"  {ident}: no review view ({error})")
+            continue
+        if not view:
+            continue
+        scan = render(arr[mask], view["viewMatrix"], 480, 360, view.get("fovY", 55.0))
+        frame_name = picks[index][0]["frame"] if picks.get(index) else None
+        photo = (np.asarray(Image.open(room.space / "workspace" / "images" / frame_name).convert("RGB"))
+                 if frame_name else np.full((360, 480, 3), 230, np.uint8))
+        rows.append((f"{ident}  {box.get('detected') or box.get('label')}   (scan | the video, {frame_name})", scan, photo))
+    return rows
+
+
 # ------------------------------------------------------------------- build
-def build(space: Path, cell_m: float, splat_name: str, log=print) -> Path:
+def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -> Path:
     import surface_fill
     from pointcloud import load_ply
-    from splat_edit import Room, splat_colours
+    from scipy.ndimage import gaussian_filter
+    from scipy.spatial import cKDTree
+    from splat_edit import Room
     from splat_tools import read_splat
     from surface_fill import blob_arrays, floor_masks, photograph, wall_masks, wall_surfaces
 
@@ -317,8 +513,8 @@ def build(space: Path, cell_m: float, splat_name: str, log=print) -> Path:
     room = Room(space)
     m = room.metre
     out = space / "scene"
-    (out / "pieces").mkdir(parents=True, exist_ok=True)
-    (out / "textures").mkdir(exist_ok=True)
+    for folder in ("pieces", "textures", "models"):
+        (out / folder).mkdir(parents=True, exist_ok=True)
 
     arr, _ = read_splat(space / splat_name)
     log(f"{space.name}: {len(arr):,} Gaussians in {splat_name}; the room is "
@@ -329,8 +525,6 @@ def build(space: Path, cell_m: float, splat_name: str, log=print) -> Path:
     scene, colours, alpha, scale = blob_arrays(room, arr)
     # Haze: training leaves soft, oversized Gaussians hanging in the air along plain walls.
     # In a splat they blur into the wall; on a moved piece they would come along as a smear.
-    from scipy.spatial import cKDTree
-
     sample = dense[np.random.default_rng(0).choice(len(dense), min(len(dense), 2_000_000), replace=False)]
     support = cKDTree(sample).query(scene, workers=-1)[0]
     haze = (support > HAZE_SUPPORT_M * m) & ((alpha < HAZE_ALPHA) | (scale > HAZE_SCALE_M * m))
@@ -355,13 +549,45 @@ def build(space: Path, cell_m: float, splat_name: str, log=print) -> Path:
     photos = photograph(space, room, surfaces, log, occluders=solid, frame_step=1)
 
     # The paint of the walls that were filmed, for a wall that was not.
-    paints = [np.median(photo[(seen > SEEN_WEIGHT) & ~block], axis=0)
-              for surface, block, (photo, seen, _t) in zip(surfaces, blocked, photos)
-              if surface.name.startswith("wall") and ((seen > SEEN_WEIGHT) & ~block).mean() > 0.15]
+    knowns = [(seen > SEEN_WEIGHT) & ~block for block, (_p, seen, _t) in zip(blocked, photos)]
+    paints = [np.median(photo[known], axis=0) for surface, known, (photo, _s, _t) in zip(surfaces, knowns, photos)
+              if surface.name.startswith("wall") and known.mean() > 0.15]
     paint = np.mean(paints, axis=0) if paints else None
+    finished = [texture(surface, photo, seen, block, log, plain=paint)
+                for surface, block, (photo, seen, _t) in zip(surfaces, blocked, photos)]
+
+    # ---- the review: Claude (or whoever `review` is) sees what was made, and decides
+    upright = lambda surface, image: image[::-1] if surface.name.startswith("wall") else image
+    rows = []
+    for surface, known, (photo, _s, _t), final in zip(surfaces, knowns, photos, finished):
+        filmed = np.where(known[..., None], photo, np.array([255.0, 0, 200]))
+        rows.append((f"{surface.name}   (filmed {known.mean():.0%} | finished)", upright(surface, filmed), upright(surface, final)))
+    surface_sheet = sheet(rows, out / "review-surfaces.png")
+    piece_sheet = sheet(piece_rows(room, arr, scene, masks, log), out / "review-pieces.png", tile=(480, 360))
+    boxes = room.shapes["boxes"]
+    size_of = lambda b: " x ".join(f"{v:.1f}" for v in (np.array(b["max"]) - np.array(b["min"])) / m) + " m"
+    asked = [{"id": ident, "label": boxes[int(ident[1:])].get("detected") or boxes[int(ident[1:])].get("label"),
+              "size": size_of(boxes[int(ident[1:])])} for ident, mask in masks.items() if ident.startswith("B") and mask.sum()]
+    verdict = review(surface_sheet, piece_sheet,
+                     [{"name": s.name, "filmed": float(k.mean())} for s, k in zip(surfaces, knowns)], asked) if review else None
+    surface_use = {name: (v or {}).get("use", "keep") for name, v in ((verdict or {}).get("surfaces") or {}).items()}
+    piece_use = {ident: (v or {}).get("use", "scan") for ident, v in ((verdict or {}).get("pieces") or {}).items()}
+
     meshes = []
-    for surface, block, (photo, seen, _through) in zip(surfaces, blocked, photos):
-        image = np.clip(texture(surface, photo, seen, block, log, plain=paint), 0, 255).astype(np.uint8)
+    for surface, known, (photo, _s, _t), final in zip(surfaces, knowns, photos, finished):
+        use = surface_use.get(surface.name, "keep")
+        flat = np.median(photo[known], axis=0) if known.mean() > 0.05 else (paint if paint is not None else np.array([200.0] * 3))
+        if use == "plain":
+            image = np.broadcast_to(flat, final.shape).copy()
+        elif use == "filmed":
+            # The filmed part, fading into plain paint over a few centimetres.
+            weight = np.clip(gaussian_filter(known.astype(float), 0.03 / cell_m) * 2 - 1, 0, 1)[..., None]
+            image = weight * photo + (1 - weight) * flat
+        else:
+            image = final
+        if use != "keep":
+            log(f"  {surface.name}: {use} ({((verdict or {}).get('surfaces') or {}).get(surface.name, {}).get('why', '')})")
+        image = np.clip(image, 0, 255).astype(np.uint8)
         jpeg = io.BytesIO()
         Image.fromarray(image).save(jpeg, "JPEG", quality=92)
         (out / "textures" / f"{surface.name}.jpg").write_bytes(jpeg.getvalue())
@@ -372,9 +598,14 @@ def build(space: Path, cell_m: float, splat_name: str, log=print) -> Path:
     log(f"wrote shell.glb: {len(meshes)} surfaces, {(out / 'shell.glb').stat().st_size / 1e6:.1f} MB")
 
     pieces = []
-    boxes = room.shapes["boxes"]
+    for old in list((out / "pieces").glob("*.splat")) + list((out / "models").glob("*.glb")):
+        old.unlink()
     for ident, mask in masks.items():
         if mask.sum() == 0:
+            continue
+        use = piece_use.get(ident, "scan")
+        if use == "drop":
+            log(f"  {ident}: dropped ({((verdict or {}).get('pieces') or {}).get(ident, {}).get('why', '')})")
             continue
         points = frame.scene_to_viewer(scene[mask])
         lo, hi = np.percentile(points, 1, axis=0), np.percentile(points, 99, axis=0)
@@ -385,8 +616,17 @@ def build(space: Path, cell_m: float, splat_name: str, log=print) -> Path:
             blo, bhi = corners.min(axis=0), corners.max(axis=0)
             bhi[1] = max(bhi[1], hi[1])                   # a headboard taller than the measured box
             anchor = np.array([(blo[0] + bhi[0]) / 2, 0.0, (blo[2] + bhi[2]) / 2])
-            entry.update(label=box.get("detected") or box.get("label"), movable=True,
+            label = box.get("detected") or box.get("label")
+            parts = model_parts(room, box, label, colours[mask], scene[mask][:, 2], frame, anchor)
+            write_glb(out / "models" / f"{ident}.glb", model_meshes(parts))
+            entry.update(label=label, movable=True, model=f"models/{ident}.glb", modelKind=model_kind(label),
+                         show="model" if use == "model" else "scan",
                          box={"min": (blo - anchor).round(3).tolist(), "max": (bhi - anchor).round(3).tolist()})
+            why = ((verdict or {}).get("pieces") or {}).get(ident, {}).get("why")
+            if why:
+                entry["why"] = why
+            if use == "model":
+                log(f"  {ident} {label}: shown as its clean model ({why or ''})")
         else:
             anchor = np.zeros(3)
             entry.update(label={"rest": "everything else", "ceiling-fittings": "ceiling fittings"}[ident],
@@ -418,10 +658,12 @@ def build(space: Path, cell_m: float, splat_name: str, log=print) -> Path:
         "room": {"width": round(2 * room.half[0] / m, 3), "depth": round(2 * room.half[1] / m, 3),
                  "height": round(room.shapes["room_level"]["height"] / m, 3)},
         "shell": "shell.glb", "source": splat_name, "texelMetres": cell_m, "pieces": pieces,
+        "reviewedBy": "claude" if verdict else None, "summary": (verdict or {}).get("summary"),
     }
     (out / "scene.json").write_text(json.dumps(manifest, indent=1) + "\n")
+    (out / "review.json").write_text(json.dumps({"verdict": verdict, "surfaces": surface_use, "pieces": piece_use}, indent=1) + "\n")
     log(f"wrote {out / 'scene.json'}: {len(pieces)} pieces "
-        f"({', '.join(p['label'] for p in pieces if p['movable'])})")
+        f"({', '.join(p['label'] + (' [model]' if p.get('show') == 'model' else '') for p in pieces if p['movable'])})")
     log(f"view: http://localhost:8734/scene-viewer/index.html?scene=../spaces/{space.name}/scene/scene.json")
     return out
 
@@ -431,8 +673,14 @@ def main() -> None:
     parser.add_argument("space", type=Path)
     parser.add_argument("--cell", type=float, default=0.005, help="metres per texel of the shell's textures")
     parser.add_argument("--splat", default="splat.ply", help="the trained splat to cut up")
+    parser.add_argument("--claude", action="store_true", help="let Claude review the textures and the pieces")
     args = parser.parse_args()
-    build(args.space.resolve(), args.cell, args.splat)
+    review = None
+    if args.claude:
+        from advisor import Advisor
+
+        review = claude_review(Advisor())
+    build(args.space.resolve(), args.cell, args.splat, review=review)
 
 
 if __name__ == "__main__":

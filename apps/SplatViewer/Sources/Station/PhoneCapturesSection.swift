@@ -114,6 +114,7 @@ struct PhoneCapturesSection: View {
 
 private struct JobRow: View {
     @Environment(StationService.self) private var station
+    @Environment(\.openWindow) private var openWindow
     let job: Job
 
     var body: some View {
@@ -153,6 +154,10 @@ private struct JobRow: View {
                     .lineLimit(2)
             }
             Spacer()
+            if job.status == .done, let room = station.sceneAddress(job) {
+                Button("Open room") { openWindow(id: "room", value: room) }
+                    .help("The room as a clean shell with movable furniture")
+            }
             if job.status == .done {
                 Button("Open 3D") { station.open(job) }
                 Button { station.reveal(job) } label: { Image(systemName: "folder") }

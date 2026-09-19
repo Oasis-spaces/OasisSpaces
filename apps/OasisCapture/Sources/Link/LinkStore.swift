@@ -152,6 +152,13 @@ final class LinkStore: ObservableObject {
         }
     }
 
+    /// Where the paired Mac shows a job's room, when it built one (jobs sent through the
+    /// cloud have none here: the Mac serves rooms on the local network only).
+    func roomAddress(_ job: Job) -> URL? {
+        guard !job.cloud, let scene = job.scene, let mac = paired else { return nil }
+        return URL(string: scene, relativeTo: mac.baseURL)?.absoluteURL
+    }
+
     /// A job by id, wherever it is.
     func job(_ id: String) -> Job? {
         jobs.first { $0.id == id } ?? cloudJobs.first { $0.id == id }

@@ -22,8 +22,12 @@ final class StationService {
         didSet {
             UserDefaults.standard.set(repositoryPath, forKey: "station.repository")
             runner.repository = URL(fileURLWithPath: repositoryPath)
+            station?.viewerFolder = URL(fileURLWithPath: repositoryPath).appendingPathComponent("scene-viewer")
+            rooms = RoomEntry.all(in: URL(fileURLWithPath: repositoryPath))
         }
     }
+    /// Rooms in the repository that have a scene built (tools/mixed_scene.py, or stage 4's last step).
+    private(set) var rooms: [RoomEntry] = []
 
     /// The account the Mac is signed in to; phones on the same account pair without a code.
     @ObservationIgnored let account = AccountStore()
@@ -49,8 +53,13 @@ final class StationService {
         let station = Station(folder: support, info: StationInfo(id: Self.stationID, name: Self.computerName),
                               stages: PipelineRunner.stages, runner: runner)
         station.onChange = { jobs in
-            Task { @MainActor in StationService.shared.jobs = jobs }
+            Task { @MainActor in
+                StationService.shared.refresh()
+                StationService.shared.rooms = RoomEntry.all(in: URL(fileURLWithPath: StationService.shared.repositoryPath))
+            }
         }
+        station.viewerFolder = URL(fileURLWithPath: repositoryPath).appendingPathComponent("scene-viewer")
+        rooms = RoomEntry.all(in: URL(fileURLWithPath: repositoryPath))
         self.station = station
         do {
             let server = try HTTPServer(
@@ -119,6 +128,17 @@ final class StationService {
         guard !job.cloud else { return }
         station?.retry(job.id)
         refresh()
+    }
+
+    /// Where this Mac's own server shows a job's room (the viewer with the scene in its query).
+    func sceneAddress(_ job: Job) -> URL? {
+        job.scene.flatMap { URL(string: "http://127.0.0.1:\(Link.defaultPort)\($0)") }
+    }
+
+    /// The same for any scene folder in the repository.
+    func sceneAddress(folder: URL) -> URL? {
+        guard let station else { return nil }
+        return URL(string: "http://127.0.0.1:\(Link.defaultPort)\(station.registerScene(folder))")
     }
 
     func resultURL(_ job: Job, _ name: String) -> URL? {

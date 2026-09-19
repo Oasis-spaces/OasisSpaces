@@ -24,6 +24,7 @@ struct HomeContent: View {
                 header
                 DropZone(targeted: dropTargeted) { library.importing = true }
                 PhoneCapturesSection()
+                RoomsSection()
                 if let notice = library.notice {
                     NoticeBanner(text: notice) { library.notice = nil }
                 }

@@ -47,7 +47,10 @@ final class PipelineRunner: JobRunner, @unchecked Sendable {
             // The phone's own files beside the pipeline's, once the space exists.
             if index == 0 { keepCaptureFiles(from: inputs, in: spaceFolder) }
         }
-        return JobOutcome(ok: true, message: gate(of: "splat", in: spaceFolder)?.why, results: results(in: spaceFolder))
+        let scene = spaceFolder.appendingPathComponent("scene")
+        let hasScene = FileManager.default.fileExists(atPath: scene.appendingPathComponent("scene.json").path)
+        return JobOutcome(ok: true, message: gate(of: "splat", in: spaceFolder)?.why, results: results(in: spaceFolder),
+                          scene: hasScene ? scene : nil)
     }
 
     private func spaceName(_ job: Job) -> String {
