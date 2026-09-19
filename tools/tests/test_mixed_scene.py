@@ -122,6 +122,20 @@ def test_a_piece_file_is_32_bytes_a_gaussian_in_the_viewers_frame():
     assert rows["rotation"][0][0] < 250
 
 
+def test_only_things_standing_on_a_piece_move_with_it():
+    piece = lambda ident, anchor, lo, hi, movable=True: {"id": ident, "movable": movable, "anchor": anchor,
+                                                        "box": {"min": lo, "max": hi}}
+    bed = piece("B1", [0.4, 0, 0.0], [-0.9, 0, -1.1], [0.9, 0.6, 1.1])
+    pillow = piece("B2", [0.3, 0, -0.8], [-0.25, 0.55, -0.2], [0.25, 0.75, 0.2])        # on the bed, above the floor
+    cushion = piece("B3", [-0.25, 0, 1.3], [-0.25, 0.0, -0.2], [0.25, 0.5, 0.2])        # on the floor, beside the bed
+    lamp = piece("B4", [0.5, 0, 0.5], [-0.1, 0.0, -0.1], [0.1, 1.5, 0.1])               # inside the footprint but from the floor
+    rest = piece("rest", [0, 0, 0], [-2, 0, -2], [2, 2.5, 2], movable=False)
+    pieces = [bed, pillow, cushion, lamp, rest]
+    ms.mark_stacked(pieces)
+    assert pillow.get("on") == "B1"
+    assert "on" not in cushion and "on" not in lamp and "on" not in bed and "on" not in rest
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

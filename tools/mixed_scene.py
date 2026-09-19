@@ -497,6 +497,26 @@ def piece_rows(room, arr, scene, masks, log) -> list:
     return rows
 
 
+def mark_stacked(pieces: list) -> None:
+    """A thing standing on another moves with it: a movable piece whose anchor
+    lies inside a larger movable piece's footprint, and whose own box starts
+    well above the floor (a pillow on a bed, not a cushion on the floor beside
+    it), gets "on": the larger piece's id."""
+    movable = [p for p in pieces if p.get("movable")]
+    volume = lambda p: float(np.prod(np.array(p["box"]["max"]) - np.array(p["box"]["min"])))
+    for p in movable:
+        hosts = []
+        for q in movable:
+            if p is q or volume(p) >= volume(q) or p["box"]["min"][1] <= 0.2:
+                continue
+            a, qa = np.array(p["anchor"]), np.array(q["anchor"])
+            lo, hi = qa[[0, 2]] + np.array(q["box"]["min"])[[0, 2]], qa[[0, 2]] + np.array(q["box"]["max"])[[0, 2]]
+            if np.all(a[[0, 2]] >= lo) and np.all(a[[0, 2]] <= hi):
+                hosts.append(q)
+        if hosts:
+            p["on"] = min(hosts, key=volume)["id"]          # the smallest thing it stands on
+
+
 # ------------------------------------------------------------------- build
 def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -> Path:
     import surface_fill
@@ -634,18 +654,7 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         entry["anchor"] = anchor.round(3).tolist()
         write_piece(out / entry["file"], arr[mask], frame, scene[mask], anchor)
         pieces.append(entry)
-    # A thing standing on another moves with it (pillows on the bed).
-    movable = [p for p in pieces if p["movable"]]
-    for p in movable:
-        for q in movable:
-            if p is q:
-                continue
-            a, qa = np.array(p["anchor"]), np.array(q["anchor"])
-            within = np.all(a[[0, 2]] >= qa[[0, 2]] + np.array(q["box"]["min"])[[0, 2]]) and \
-                np.all(a[[0, 2]] <= qa[[0, 2]] + np.array(q["box"]["max"])[[0, 2]])
-            smaller = np.prod(np.array(p["box"]["max"]) - p["box"]["min"]) < np.prod(np.array(q["box"]["max"]) - q["box"]["min"])
-            if within and smaller and p["box"]["min"][1] > 0.2:
-                p["on"] = q["id"]
+    mark_stacked(pieces)
 
     # Where the person stood while filming, for a view from inside: the middle of the walked
     # path, at eye height, looking at the room's centre.
