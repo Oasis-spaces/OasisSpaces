@@ -293,6 +293,44 @@ was really behind the object.
 `tools/opensplat` loads its Metal shaders from `tools/default.metallib`;
 keep the two files together.
 
+## The mixed scene: a clean room, the real furniture
+
+A splat of a phone video is soft where the room is plain, and cannot be
+edited: move the bed and there is a hole, because the floor under it was never
+filmed. `tools/mixed_scene.py` turns a processed space into a scene that can:
+
+```bash
+python3 tools/mixed_scene.py spaces/<name>      # a few minutes; writes spaces/<name>/scene/
+python3 -m http.server 8734                      # then open:
+# http://localhost:8734/scene-viewer/index.html?scene=../spaces/<name>/scene/scene.json
+```
+
+- **`shell.glb`**: the floor, walls and ceiling stage 3 measured, as flat
+  meshes textured with the video's own frames. Every frame is projected onto
+  each surface, keeping only views nothing blocks; what no frame saw (behind
+  the wardrobe, under the bed) is continued from the surface around it by the
+  inpainting model `fill-room` uses. A wall nobody filmed is painted like the
+  walls that were. So the background behind every piece already exists.
+- **`pieces/*.splat`**: the trained splat cut up. One file per measured object
+  with its own Gaussians, as filmed; one for the ceiling's fittings; one for
+  everything else. The room's surfaces are found first (a Gaussian in a wall's
+  band that is the wall's colour is the wall), so a piece never takes the
+  paint it stands against with it; soft Gaussians that no measured surface
+  supports are dropped as haze; the Gaussians that were walls and floor are
+  dropped, because the shell replaces them.
+- **`scene.json`**: each piece's label, box and anchor in metres, y up, the
+  room's centre on the floor as origin, what stands on what (pillows move with
+  the bed), and where the person stood while filming.
+
+`scene-viewer/` draws both together (three.js and
+[Spark](https://sparkjs.dev), MIT, loaded from their CDNs): click a piece to
+select it, drag it across the floor, Q and E turn it, H hides it, "Put back"
+returns it to where it was filmed, "Save layout" downloads the arrangement.
+Walls face inwards only, so from above you look into the room. Known limits:
+a piece only has the sides that were filmed, its lighting and shadows are
+baked in, and a texture continued behind furniture is a plausible guess.
+Tests: `python3 tools/tests/test_mixed_scene.py`.
+
 ## Oasis Capture (iPhone app)
 
 `apps/OasisCapture` guides someone through recording a room, entirely on the

@@ -266,8 +266,6 @@ def remove(room: Room, arr: np.ndarray, idents: list[str], patch: bool):
     scene = room.to_scene(np.stack([arr["x"], arr["y"], arr["z"]], axis=1).astype(np.float64))
     colours = splat_colours(arr)
     m = room.metre
-    lo_room = room.centre - room.half + KEEP_WALL_M * m
-    hi_room = room.centre + room.half - KEEP_WALL_M * m
     removing = {room.box(ident)[0] for ident in idents}
     protected = np.zeros(len(arr), bool)
     for i, other in enumerate(room.shapes["boxes"]):
@@ -280,18 +278,7 @@ def remove(room: Room, arr: np.ndarray, idents: list[str], patch: bool):
     centres, regions = [], []
     for ident in idents:
         _, box = room.box(ident)
-        full_lo = np.array(box["min"]) - REMOVE_MARGIN_M * m
-        full_hi = np.array(box["max"]) + REMOVE_MARGIN_M * m
-        full_lo[2] = max(full_lo[2], room.floor_z + KEEP_FLOOR_M * m)
-        lo, hi = full_lo.copy(), full_hi.copy()
-        lo[:2], hi[:2] = np.maximum(lo[:2], lo_room), np.minimum(hi[:2], hi_room)
-        inside = np.all((scene >= lo) & (scene <= hi), axis=1) & ~protected
-        # Against a wall, and just above the box, take only what does not look
-        # like the wall: the back of a headboard, a lamp taller than the box.
-        inside |= unlike_wall(room, scene, colours, full_lo, full_hi, protected | inside)
-        # A headboard or lamp often stands taller than the measured box: take
-        # what grows up out of the object, connected to what was just removed.
-        inside |= attached_above(room, scene, inside, full_lo, full_hi, protected | drop)
+        inside, (lo, hi), (full_lo, full_hi) = object_blobs(room, scene, colours, box, protected, drop)
         drop |= inside
         centres.append((lo + hi) / 2)
         top = full_hi.copy()
@@ -312,6 +299,30 @@ def remove(room: Room, arr: np.ndarray, idents: list[str], patch: bool):
         else:
             print(f"left the hidden floor and wall empty: LaMa weights not found at {LAMA_PATH}")
     return kept, np.mean(centres, axis=0)
+
+
+def object_blobs(room: Room, scene, colours, box: dict, protected, taken):
+    """The blobs that are one measured object: those in its box (plus a margin
+    for a blanket over the edge, never the floor, the walls' paint or another
+    piece of furniture), anything in its footprint that is unlike the wall
+    behind, and parts growing up out of it (a headboard taller than the box).
+    Returns (mask, the box clipped to the room, the box with its margin)."""
+    m = room.metre
+    lo_room = room.centre - room.half + KEEP_WALL_M * m
+    hi_room = room.centre + room.half - KEEP_WALL_M * m
+    full_lo = np.array(box["min"]) - REMOVE_MARGIN_M * m
+    full_hi = np.array(box["max"]) + REMOVE_MARGIN_M * m
+    full_lo[2] = max(full_lo[2], room.floor_z + KEEP_FLOOR_M * m)
+    lo, hi = full_lo.copy(), full_hi.copy()
+    lo[:2], hi[:2] = np.maximum(lo[:2], lo_room), np.minimum(hi[:2], hi_room)
+    inside = np.all((scene >= lo) & (scene <= hi), axis=1) & ~protected
+    # Against a wall, and just above the box, take only what does not look
+    # like the wall: the back of a headboard, a lamp taller than the box.
+    inside |= unlike_wall(room, scene, colours, full_lo, full_hi, protected | inside)
+    # A headboard or lamp often stands taller than the measured box: take
+    # what grows up out of the object, connected to what was just taken.
+    inside |= attached_above(room, scene, inside, full_lo, full_hi, protected | taken)
+    return inside, (lo, hi), (full_lo, full_hi)
 
 
 ATTACHED_ABOVE_M = 1.0     # how far above a removed box connected parts are followed
