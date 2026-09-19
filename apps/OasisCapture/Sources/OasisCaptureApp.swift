@@ -20,7 +20,8 @@ struct OasisCaptureApp: App {
 /// Scan (tips, then the camera), Scans (send to the Mac, follow the analysis,
 /// see results) and Mac (pairing).
 struct RootView: View {
-    @State private var capturing = false
+    /// `--autostart-scan` opens the camera at launch: `devicectl device process launch ... --autostart-scan`.
+    @State private var capturing = ProcessInfo.processInfo.arguments.contains("--autostart-scan")
     @State private var tab = 0
 
     var body: some View {

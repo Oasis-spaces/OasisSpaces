@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Build RoomSegmentation.mlpackage, the on-device model that outlines what is
-in the room while recording.
+"""Build RoomSegmentation.mlpackage, the on-device model for the room's surfaces:
+walls, floor, ceiling, doors and windows (things come from the object
+detector, see convert_objects.py).
 
-SegFormer-B2 fine-tuned on ADE20K (150 indoor and outdoor classes: wall, floor,
-ceiling, bed, cabinet, wardrobe, chest of drawers, sofa, rug, curtain, ...),
-27 M parameters, from https://huggingface.co/nvidia/segformer-b2-finetuned-ade-512-512
-(B0, 3.8 M, was too often wrong: wallpaper as painting, a bed as a sofa).
-The Core ML model takes a 512x512 RGB image and returns a 512x512 map of class
+SegFormer-B0 fine-tuned on ADE20K (150 classes), 3.8 M parameters, from
+https://huggingface.co/nvidia/segformer-b0-finetuned-ade-512-512. It compiles
+for the Neural Engine and answers in tens of milliseconds. B2 (27 M) was tried
+for better furniture labels: the Neural Engine's compiler crashes on it, so it
+ran on the GPU at 0.3 to 0.9 s a frame, which starved ARKit's tracking; and
+furniture is the detector's job now, which B0's big flat classes do not need.
+The Core ML model takes a 512x512 RGB image and returns a 256x256 map of class
 ids (ImageNet normalisation, upsampling and the per-pixel argmax are inside the
 model), so the phone gets classes directly.
 
-Needs Python 3.12 with torch 2.5, transformers 4.46 and coremltools 8.3:
+Needs the oasis-coreml venv (Python 3.12, torch 2.5, transformers 4.46, coremltools 8 or 9):
     ~/.venvs/oasis-coreml/bin/python apps/OasisCapture/scripts/convert_segmentation.py [--check image.jpg]
-The model is not checked in (large binaries do not push from this network);
-build.sh runs this when it is missing.
+The model is not checked in; build.sh runs this when it is missing.
 """
 
 import argparse
@@ -25,13 +27,13 @@ import numpy as np
 import torch
 from transformers import SegformerForSemanticSegmentation
 
-MODEL_ID = "nvidia/segformer-b2-finetuned-ade-512-512"
+MODEL_ID = "nvidia/segformer-b0-finetuned-ade-512-512"
 OUT = Path(__file__).resolve().parent.parent / "Resources" / "RoomSegmentation.mlpackage"
 SIZE = 512
 # The decode head answers at 1/4 resolution; the logits are upsampled inside
 # the model before the argmax, so the class map is as fine as the input and
 # outlines are not jagged.
-OUT_SIZE = 512
+OUT_SIZE = 256
 
 
 class Wrapped(torch.nn.Module):

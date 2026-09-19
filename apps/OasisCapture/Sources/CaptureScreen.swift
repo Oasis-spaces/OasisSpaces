@@ -12,9 +12,67 @@ final class ControllerBox: ObservableObject {
 /// time, a top-down coverage map, and the record button.
 struct CaptureScreen: View {
     @StateObject private var box = ControllerBox()
+    @ObservedObject private var models = SceneRunner.shared.loadState
 
     var body: some View {
-        CaptureContent(controller: box.controller, state: box.controller.state)
+        if models.ready {
+            // The camera only starts once the detector is ready for it.
+            CaptureContent(controller: box.controller, state: box.controller.state)
+        } else {
+            PreparingView(models: models)
+                .onAppear { SceneRunner.shared.preload() }
+        }
+    }
+}
+
+/// Shown instead of the camera while the detector's models load (a quarter
+/// of a minute after a fresh install or a restart of the phone; a moment otherwise).
+struct PreparingView: View {
+    @ObservedObject var models: ModelLoadState
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 28) {
+                Image(systemName: "viewfinder")
+                    .font(.system(size: 56, weight: .light))
+                    .foregroundStyle(.white)
+                    .symbolEffect(.pulse)
+                VStack(spacing: 8) {
+                    Text("Preparing the room detector")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text("The camera opens as soon as it is ready.")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                ProgressView(value: models.progress)
+                    .tint(.white)
+                    .frame(width: 220)
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(models.steps) { step in
+                        HStack(spacing: 10) {
+                            if step.done {
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                            } else if step.failed {
+                                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            } else {
+                                ProgressView().tint(.white).scaleEffect(0.8).frame(width: 20, height: 20)
+                            }
+                            Text(step.title)
+                                .font(.subheadline)
+                                .foregroundStyle(.white.opacity(step.done ? 1 : 0.7))
+                        }
+                    }
+                }
+                Button("Cancel") { dismiss() }
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.top, 8)
+            }
+            .padding(32)
+        }
     }
 }
 

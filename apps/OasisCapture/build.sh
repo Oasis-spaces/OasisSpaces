@@ -41,7 +41,7 @@ fi
 
 log=build/xcodebuild.log
 mkdir -p build
-xcodebuild -project OasisCapture.xcodeproj -scheme OasisCapture -configuration Debug \
+xcodebuild -project OasisCapture.xcodeproj -scheme OasisCapture -configuration Release \
     -destination "$destination" -derivedDataPath build/DerivedData -allowProvisioningUpdates \
     build > "$log" 2>&1 || true
 grep -E "error:|warning: .*Sources/" "$log" | sort -u || true
@@ -49,7 +49,7 @@ if ! grep -q "BUILD SUCCEEDED" "$log"; then
     echo "BUILD FAILED (full log: $(pwd)/$log)"
     exit 1
 fi
-app=build/DerivedData/Build/Products/Debug-iphoneos/OasisCapture.app
+app=build/DerivedData/Build/Products/Release-iphoneos/OasisCapture.app
 echo "Built: $(pwd)/$app"
 [ "${1:-}" = "--build-only" ] && exit 0
 

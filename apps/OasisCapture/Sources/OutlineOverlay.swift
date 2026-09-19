@@ -13,8 +13,6 @@ struct OutlineOverlay: View {
     @ObservedObject var state: CaptureState
     let session: ARSession
     let spec: DetectionSpec
-    /// Outlines from a frame older than this are not drawn (the analysis stalled, or the view is new).
-    static let staleSeconds: Double = 1.5
 
     var body: some View {
         GeometryReader { geometry in
@@ -32,7 +30,7 @@ struct OutlineOverlay: View {
 
                     // Placed furniture: a label above each box that is in view and not
                     // outlined right now (its outline carries the label then).
-                    let fresh = frame.timestamp - state.regionsTime < Self.staleSeconds
+                    let fresh = frame.timestamp - state.regionsTime < state.regionsLife
                     let regions = fresh ? state.regions : []
                     let outlined = Set(regions.compactMap(\.objectId))
                     for object in state.map.objects where !outlined.contains(object.id) {

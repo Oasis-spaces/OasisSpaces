@@ -23,6 +23,8 @@ final class CaptureState: ObservableObject {
     @Published var regions: [Region] = []
     /// When the frame those regions came from was taken (the AR session's clock).
     @Published var regionsTime: Double = 0
+    /// How long outlines stay up without a newer analysis (a few analyses' worth).
+    @Published var regionsLife: Double = 2
     @Published var showOutlines = true
     @Published var detected: [String] = []
     @Published var map = RoomMap()
@@ -352,6 +354,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
     }
 
     private var modelsReported = false
+    private var published = 0
 
     /// A frame was analysed (on the scene queue): its detected things go into
     /// the room (and come back with their tracked identity and label), its
@@ -387,10 +390,21 @@ final class CaptureController: NSObject, ARSessionDelegate {
             }
             self.lastSegmentationTime = time
             let detected = self.secondsSeen.sorted { $0.value > $1.value }.map(\.key)
+            self.published += 1
+            if [1, 3, 10].contains(self.published) || self.published % 20 == 0 {
+                let map = self.mapBuilder.build()
+                AppLog.write("on screen #\(self.published): \(regions.count) outlines (\(understanding.instances.count) things), "
+                             + "\(map.objects.count) placed [\(map.objects.prefix(6).map(\.label).joined(separator: ", "))], "
+                             + "\(self.mapBuilder.tracker.count) tracked, \(map.walls.count) walls")
+            }
+            // Outlines live in the room, so an older one is still in the right place: keep them
+            // for a few analyses, however long an analysis takes on this phone.
+            let life = max(2, self.scene.analysisSeconds * 4 + 1)
             DispatchQueue.main.async {
                 // The overlay draws the regions' world outlines through the live camera.
                 self.state.regions = regions
                 self.state.regionsTime = time
+                self.state.regionsLife = life
                 self.state.detected = detected
                 self.state.depthOK = depthOK
             }

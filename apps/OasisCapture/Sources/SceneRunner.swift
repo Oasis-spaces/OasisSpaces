@@ -1,4 +1,6 @@
+import Accelerate
 import ARKit
+import Combine
 import CoreML
 import Vision
 import CaptureRules
@@ -16,6 +18,25 @@ struct InstanceRegion {
     /// The outline and centre in the room, for drawing through the live camera.
     var worldOutline: [SIMD3<Float>]
     var worldCentroid: SIMD3<Float>
+}
+
+/// How far the models have loaded, for the preparing screen. Changed on the main queue.
+final class ModelLoadState: ObservableObject {
+    struct Step: Identifiable {
+        let id: String
+        let title: String
+        var done = false
+        var failed = false
+    }
+
+    @Published var steps = [
+        Step(id: "RoomObjects", title: "Furniture and objects"),
+        Step(id: "RoomSegmentation", title: "Walls, floor and ceiling"),
+        Step(id: "RoomDepth", title: "Depth"),
+    ]
+    @Published var ready = false
+
+    var progress: Double { Double(steps.filter { $0.done || $0.failed }.count) / Double(steps.count) }
 }
 
 /// What one analysed frame tells us.
@@ -68,10 +89,19 @@ final class SceneRunner {
     /// Rolling average of the time one frame's analysis takes, seconds.
     private(set) var analysisSeconds: Double = 0
     private var runs = 0
+    /// Shown by the preparing screen while the models load.
+    let loadState = ModelLoadState()
+    /// Tracking points of recent frames (world space). One frame often has only a
+    /// handful; the room's points of the last seconds are still where they were, and
+    /// together they pin the depth scale far more often.
+    private var recentPoints: [SIMD3<Float>] = []
+    private static let recentPointLimit = 4000
 
-    /// Loads the models off the main thread. The first load of a model on a
-    /// phone compiles it for the Neural Engine, which can take tens of
-    /// seconds; done on the main thread, iOS kills the app for hanging.
+    /// Loads the three models off the main thread, one after another (side by
+    /// side they fight over the compiler: 114 s instead of 30 on a fresh
+    /// install), each run once on a blank image so the first camera frame does
+    /// not pay for the warm-up. The first load after an install compiles for
+    /// the Neural Engine; later launches read the cache and take a second.
     func preload() {
         lock.lock()
         let start = !loading && segmentation == nil
@@ -80,48 +110,85 @@ final class SceneRunner {
         guard start else { return }
         queue.async { [self] in
             let began = Date()
-            /// The Neural Engine first, where the model compiles for it; the GPU
-            /// otherwise (the Neural Engine compiler crashes on some layers, and a
-            /// model it cannot take still runs fine on the GPU, just slower).
-            func request(_ name: String) -> VNCoreMLRequest? {
-                guard let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc") else {
-                    AppLog.write("\(name) is not in the app bundle")
-                    return nil
-                }
-                for units in [MLComputeUnits.all, .cpuAndGPU] {
-                    let configuration = MLModelConfiguration()
-                    configuration.computeUnits = units
-                    let started = Date()
-                    do {
-                        let model = try MLModel(contentsOf: url, configuration: configuration)
-                        let request = VNCoreMLRequest(model: try VNCoreMLModel(for: model))
-                        // The whole frame, squeezed to the model's input: results map back by scaling.
-                        request.imageCropAndScaleOption = .scaleFill
-                        AppLog.write(String(format: "%@ loaded in %.1f s (%@)", name, Date().timeIntervalSince(started),
-                                     units == .all ? "Neural Engine" : "GPU"))
-                        return request
-                    } catch {
-                        AppLog.write("\(name) failed to load (\(units == .all ? "Neural Engine" : "GPU")): \(error)")
+            var loaded: [String: VNCoreMLRequest] = [:]
+            for name in ["RoomObjects", "RoomSegmentation", "RoomDepth"] {
+                let request = Self.request(name, units: [.all, .cpuAndGPU])
+                if let request { Self.warmUp(request, name: name) }
+                loaded[name] = request
+                DispatchQueue.main.async {
+                    if let i = self.loadState.steps.firstIndex(where: { $0.id == name }) {
+                        self.loadState.steps[i].done = request != nil
+                        self.loadState.steps[i].failed = request == nil
                     }
                 }
-                return nil
             }
-            let segmentation = request("RoomSegmentation")
-            let depth = request("RoomDepth")
-            let detector = request("RoomObjects")
-            self.lock.lock()
-            self.segmentation = segmentation
-            self.depth = depth
-            self.detector = detector
-            self.loadSeconds = Date().timeIntervalSince(began)
-            self.lock.unlock()
-            AppLog.write(String(format: "models ready in %.1f s (surfaces %@, depth %@, objects %@)",
-                         self.loadSeconds, segmentation == nil ? "missing" : "ok", depth == nil ? "missing" : "ok",
-                         detector == nil ? "missing" : "ok"))
+            lock.lock()
+            segmentation = loaded["RoomSegmentation"]
+            depth = loaded["RoomDepth"]
+            detector = loaded["RoomObjects"]
+            loadSeconds = Date().timeIntervalSince(began)
+            lock.unlock()
+            AppLog.write(String(format: "models ready in %.1f s (surfaces %@, depth %@, objects %@)", loadSeconds,
+                                segmentation == nil ? "missing" : "ok", depth == nil ? "missing" : "ok",
+                                detector == nil ? "missing" : "ok"))
+            DispatchQueue.main.async { self.loadState.ready = true }
         }
     }
 
-    var isReady: Bool { lock.withLock { segmentation != nil } }
+    private static func name(_ state: ARCamera.TrackingState) -> String {
+        switch state {
+        case .normal: return "normal"
+        case .notAvailable: return "not available"
+        case .limited(.initializing): return "starting"
+        case .limited(.excessiveMotion): return "limited (moving fast)"
+        case .limited(.insufficientFeatures): return "limited (plain view)"
+        case .limited(.relocalizing): return "limited (finding its place)"
+        case .limited: return "limited"
+        }
+    }
+
+    /// One run on a grey image: the first run of a model is many times slower than the rest.
+    private static func warmUp(_ request: VNCoreMLRequest, name: String) {
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 640, 480, kCVPixelFormatType_32BGRA,
+                            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer)
+        guard let buffer else { return }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let base = CVPixelBufferGetBaseAddress(buffer) {
+            memset(base, 128, CVPixelBufferGetDataSize(buffer))
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        let started = Date()
+        try? VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .up).perform([request])
+        AppLog.write(String(format: "%@ warmed up in %.2f s", name, Date().timeIntervalSince(started)))
+    }
+
+    /// One model as a Vision request, on the first of `units` that takes it.
+    private static func request(_ name: String, units: [MLComputeUnits]) -> VNCoreMLRequest? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc") else {
+            AppLog.write("\(name) is not in the app bundle")
+            return nil
+        }
+        for unit in units {
+            let label = unit == .all ? "Neural Engine" : "GPU"
+            let configuration = MLModelConfiguration()
+            configuration.computeUnits = unit
+            let started = Date()
+            do {
+                let model = try MLModel(contentsOf: url, configuration: configuration)
+                let request = VNCoreMLRequest(model: try VNCoreMLModel(for: model))
+                // The whole frame, squeezed to the model's input: results map back by scaling.
+                request.imageCropAndScaleOption = .scaleFill
+                AppLog.write(String(format: "%@ loaded in %.1f s (%@)", name, Date().timeIntervalSince(started), label))
+                return request
+            } catch {
+                AppLog.write("\(name) failed to load (\(label)): \(error)")
+            }
+        }
+        return nil
+    }
+
+    var isReady: Bool { lock.withLock { segmentation != nil || detector != nil } }
     var hasDepth: Bool { lock.withLock { depth != nil } }
 
     /// The latest surface segmentation, safe to read from any queue.
@@ -138,7 +205,11 @@ final class SceneRunner {
         busy = true
         lastRun = frame.timestamp
         let buffer = frame.capturedImage
-        let points = frame.rawFeaturePoints?.points ?? []
+        let fresh = frame.rawFeaturePoints?.points ?? []
+        recentPoints.append(contentsOf: fresh)
+        if recentPoints.count > Self.recentPointLimit { recentPoints.removeFirst(recentPoints.count - Self.recentPointLimit) }
+        let points = recentPoints
+        let tracking = frame.camera.trackingState
         let camera = frame.camera
         let time = frame.timestamp
         queue.async { [weak self] in
@@ -146,11 +217,16 @@ final class SceneRunner {
             defer { self.busy = false }
             let began = Date()
 
+            var marks: [(String, Date)] = [("start", began)]
+            func mark(_ name: String) { marks.append((name, Date())) }
             // 1. Surfaces, on the upright image.
             let upright = VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .right)
             guard (try? upright.perform([segmentation])) != nil,
                   let observation = segmentation.results?.first as? VNCoreMLFeatureValueObservation,
-                  let array = observation.featureValue.multiArrayValue else { return }
+                  let array = observation.featureValue.multiArrayValue else {
+                if self.runs == 0 { AppLog.write("the surfaces model gave no result for a frame") }
+                return
+            }
             let shape = array.shape.map(\.intValue)
             let height = shape[shape.count - 2], width = shape[shape.count - 1]
             var classes = [Int32](repeating: 0, count: width * height)
@@ -160,12 +236,20 @@ final class SceneRunner {
             self.lock.lock()
             self.latest = result
             self.lock.unlock()
+            mark("surfaces")
 
             // 2. Things, on the upright image.
             var instances: [Instance] = []
-            if let detector, (try? upright.perform([detector])) != nil {
-                instances = self.decode(detector)
+            if let detector {
+                do {
+                    try upright.perform([detector])
+                    mark("detector")
+                    instances = self.decode(detector)
+                } catch {
+                    if self.runs < 3 { AppLog.write("the object detector failed on a frame: \(error)") }
+                }
             }
+            mark("decode")
 
             // 3. Depth, on the sensor image as it is (landscape, like the model was trained).
             let pinhole = Self.pinhole(camera)
@@ -180,6 +264,7 @@ final class SceneRunner {
                 understanding.depthFit = fit
                 if let fit, fit.error < 0.2 { depthValues = values.scaled(fit) }
             }
+            mark("depth")
             understanding.instances = instances.map { self.region($0, depth: depthValues, pinhole: pinhole) }
             // The surfaces' outlines go into the room too, so they follow the camera like the things do.
             for i in understanding.segmentation.regions.indices {
@@ -191,10 +276,15 @@ final class SceneRunner {
             }
             let took = Date().timeIntervalSince(began)
             self.analysisSeconds = self.analysisSeconds == 0 ? took : self.analysisSeconds * 0.9 + took * 0.1
+            mark("lift")
             self.runs += 1
-            if self.runs % 20 == 0 {
-                AppLog.write(String(format: "analysis %.0f ms/frame, %d things, depth %@", self.analysisSeconds * 1000,
-                             instances.count, understanding.depthFit.map { String(format: "fit %.2f", $0.error) } ?? "none"))
+            if [1, 3, 10].contains(self.runs) || self.runs % 20 == 0 {
+                let stages = zip(marks.dropFirst(), marks).map { String(format: "%@ %.0f", $0.0, $0.1.timeIntervalSince($1.1) * 1000) }
+                let labels = instances.prefix(6).compactMap { self.objects.info($0.classIndex)?.label }.joined(separator: ", ")
+                AppLog.write(String(format: "analysis #%d: %.0f ms (%@) · %d things [%@] · depth %@ from %d points (%d in this frame, %d remembered) · tracking %@",
+                                    self.runs, took * 1000, stages.joined(separator: ", "), instances.count, labels,
+                                    understanding.depthFit.map { String(format: "fit %.2f", $0.error) } ?? "none",
+                                    understanding.depthFit?.samples ?? 0, fresh.count, points.count, Self.name(tracking)))
             }
             done(understanding)
         }
@@ -234,8 +324,11 @@ final class SceneRunner {
             let p = array.dataPointer.bindMemory(to: Float.self, capacity: count)
             out.withUnsafeMutableBufferPointer { $0.baseAddress!.update(from: p, count: count) }
         case .float16:
-            let p = array.dataPointer.bindMemory(to: Float16.self, capacity: count)
-            for i in 0..<count { out[i] = Float(p[i]) }
+            var source = vImage_Buffer(data: array.dataPointer, height: 1, width: vImagePixelCount(count), rowBytes: count * 2)
+            out.withUnsafeMutableBytes { raw in
+                var target = vImage_Buffer(data: raw.baseAddress, height: 1, width: vImagePixelCount(count), rowBytes: count * 4)
+                vImageConvert_Planar16FtoPlanarF(&source, &target, 0)
+            }
         case .double:
             let p = array.dataPointer.bindMemory(to: Double.self, capacity: count)
             for i in 0..<count { out[i] = Float(p[i]) }
@@ -352,15 +445,25 @@ final class SceneRunner {
     }
 
     /// The scale that turns the model's values into metres, from the tracked
-    /// points that land in this frame.
+    /// points that land in this frame. Remembered points can lie behind what
+    /// this frame shows (the other side of a wardrobe): after a first fit,
+    /// points much further than the surface seen at their pixel are dropped
+    /// and the fit is made again.
     private static func fitScale(_ values: DepthValues, pinhole: PinholeCamera, points: [SIMD3<Float>]) -> DepthScale.Fit? {
         var predicted: [Float] = [], metres: [Float] = []
         for p in points {
-            guard let (u, v, z) = pinhole.project(p), u >= 0, v >= 0, u < Float(pinhole.width), v < Float(pinhole.height),
+            guard let (u, v, z) = pinhole.project(p), z < 10, u >= 0, v >= 0, u < Float(pinhole.width), v < Float(pinhole.height),
                   let d = values.at(x: u / Float(pinhole.width), y: v / Float(pinhole.height)) else { continue }
             predicted.append(d)
             metres.append(z)
         }
-        return DepthScale.fit(predicted: predicted, metres: metres)
+        guard let first = DepthScale.fit(predicted: predicted, metres: metres) else { return nil }
+        var seenPredicted: [Float] = [], seenMetres: [Float] = []
+        for (d, z) in zip(predicted, metres) {
+            guard let surface = first.metres(d), z <= surface * 1.3, z >= surface * 0.6 else { continue }
+            seenPredicted.append(d)
+            seenMetres.append(z)
+        }
+        return DepthScale.fit(predicted: seenPredicted, metres: seenMetres) ?? first
     }
 }
