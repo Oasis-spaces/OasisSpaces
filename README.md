@@ -243,11 +243,14 @@ on a Colab GPU through Google's Colab CLI (`colab`, signed in once):
 - **Installs:** the notebook's install cells run on the VM, only those the requested steps need.
 - **Claude:** checks are answered here through `tools/claude_relay.py`.
 - **Stages:** stages 1–3 and stage 4's steps each run as their own job, and the space's new files come back to `spaces/<space>` after each one (every 10 minutes during training).
+- **Mixed scene:** `scene` is the last step on the VM, cut from the space's chosen splat; being the agent's last step, it also brings Claude's capture advice.
 - **Best splat:** the choice runs here at the end, against every earlier splat of the video.
 - **OpenSplat:** the binary built on Colab is kept in `tools/colab-cache/` and reused.
 
 If the session dies, run the command again with `--stages` from the step that
-did not finish, e.g. `--stages train-long choose-training fill`.
+did not finish, e.g. `--stages train-long choose-training fill scene`. A new
+session gets the space as it stands here, without the outputs the requested
+steps make again (`--stages scene` alone takes `splat.ply` up with it).
 
 ## Editing the splat
 
@@ -311,7 +314,12 @@ a few minutes), written to `spaces/<name>/scene/`:
   with its own Gaussians, as filmed; one for the ceiling's fittings; one for
   everything else. The room's surfaces are found first (a Gaussian in a wall's
   band that is the wall's colour is the wall), so a piece never takes the
-  paint it stands against with it; soft Gaussians that no measured surface
+  paint it stands against with it; every Gaussian has one owner (the box it
+  is in, the smaller of two that overlap, else the nearest box within 10 cm),
+  and a piece takes nothing another box owns, so a bed against a wardrobe
+  leaves the doors on the wardrobe; a box measured inside a larger one (a
+  pillow on the bed, a column from the floor up through the mattress) goes
+  with the larger piece; soft Gaussians that no measured surface
   supports are dropped as haze; the Gaussians that were walls and floor are
   dropped, because the shell replaces them.
 - **`models/*.glb`**: a clean stand-in for every piece: simple furniture of

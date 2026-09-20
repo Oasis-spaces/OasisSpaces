@@ -62,6 +62,7 @@ FITTING_BAND_M = 0.45       # things hanging this far under the ceiling are its 
 OUTSIDE_M = 0.12            # beyond the room by this much: seen through a door or window, or a floater
 MIN_ALPHA = 0.05            # fainter Gaussians are dropped
 MIN_PIECE = 200             # a measured object with fewer Gaussians than this is left in the rest
+NESTED = 0.8                # a box with this much of its volume inside a larger one is part of that piece
 HAZE_SUPPORT_M = 0.08       # a soft Gaussian with no dense-cloud surface this close is haze, not a thing
 HAZE_ALPHA = 0.6            # ...soft meaning fainter than this,
 HAZE_SCALE_M = 0.05         # ...or larger than this
@@ -142,14 +143,57 @@ def write_piece(path: Path, arr: np.ndarray, frame: Frame, scene: np.ndarray, an
     return len(out)
 
 
+def nested_in(los, his) -> dict:
+    """{box: the larger box it lies inside} for boxes with NESTED of their
+    volume inside a larger one. Stage 3 measures every box from the floor up,
+    so a pillow on a bed is a column through the mattress: cut on its own it
+    would take a core out of the bed, and protected from the bed it would stay
+    behind in mid-air when the bed moves. It goes with the bed instead."""
+    volume = np.prod(his - los, axis=1)
+    inside = {}
+    for k in np.argsort(volume):                     # each box looks for the largest box holding it
+        for big in np.argsort(-volume):
+            if volume[big] <= volume[k] or big == k:
+                break
+            shared = np.prod(np.clip(np.minimum(his[k], his[big]) - np.maximum(los[k], los[big]), 0, None))
+            if volume[k] > 0 and shared / volume[k] >= NESTED:
+                inside[int(k)] = int(big)
+                break
+    # A box inside a box that is itself inside a third goes with the outermost.
+    for k in inside:
+        while inside[k] in inside:
+            inside[k] = inside[inside[k]]
+    return inside
+
+
+def claims(los, his, points, margin) -> np.ndarray:
+    """The box each point belongs to (-1: none). Inside one box: that box;
+    inside several: the smallest (a basket half under a desk keeps its body);
+    outside them all: the nearest box within `margin`. A piece takes nothing
+    another box claims, so a bed pushed against a wardrobe, its margin and the
+    parts growing up out of it leave the wardrobe's doors on the wardrobe."""
+    owner = np.full(len(points), -1)
+    volume = np.prod(his - los, axis=1)
+    for k in np.argsort(-volume):                    # largest first: a smaller box overwrites
+        owner[np.all((points >= los[k]) & (points <= his[k]), axis=1)] = k
+    free = np.flatnonzero(owner < 0)
+    if len(free) and len(los):
+        gap = np.stack([np.linalg.norm(np.maximum(np.maximum(lo - points[free], points[free] - hi), 0), axis=1)
+                        for lo, hi in zip(los, his)])
+        nearest = gap.argmin(axis=0)
+        close = gap[nearest, np.arange(len(free))] <= margin
+        owner[free[close]] = nearest[close]
+    return owner
+
+
 def cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log):
     """Which Gaussians are which: {piece id: mask}. The room's surfaces are
     found first, so a piece never takes the wall it stands against with it:
     a Gaussian in a wall's band counts as the wall when it is the wall's
     colour (a headboard or a shelf on the wall is not). Then the objects
-    (stage 3's built boxes, largest first, so a pillow does not take the bed's
-    blanket), then what is left."""
-    from splat_edit import ABOVE_COLOUR_GAP, KEEP_OTHER_M, object_blobs, typical
+    (stage 3's built boxes, each within what it claims, largest first), then
+    what is left."""
+    from splat_edit import ABOVE_COLOUR_GAP, REMOVE_MARGIN_M, object_blobs, typical
 
     m = room.metre
     level = room.shapes["room_level"]
@@ -175,15 +219,25 @@ def cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log):
     boxes = [(i, b) for i, b in enumerate(room.shapes["boxes"]) if b.get("build", True)]
     volume = lambda b: float(np.prod(np.array(b["max"]) - np.array(b["min"])))
     boxes.sort(key=lambda ib: -volume(ib[1]))
+    name = lambda ib: f"B{ib[0]} {ib[1].get('detected') or ib[1].get('label')}"
+    corners = lambda which: np.array([b[which] for _, b in boxes], float).reshape(-1, 3)
+    for k, big in sorted(nested_in(corners("min"), corners("max")).items()):
+        log(f"  {name(boxes[k])}: inside {name(boxes[big])}, goes with it")
+        boxes[k] = None
+    boxes = [ib for ib in boxes if ib]
+    # A box claiming too little to be a piece claims nothing: its few Gaussians
+    # go to the box around or beside it, not to the rest.
+    while boxes:
+        owner = claims(corners("min"), corners("max"), scene, REMOVE_MARGIN_M * m)
+        held = np.bincount(owner[(owner >= 0) & ~shell], minlength=len(boxes))
+        if held.min() >= MIN_PIECE:
+            break
+        log(f"  {name(boxes[int(held.argmin())])}: only {int(held.min())} Gaussians, not a piece of its own")
+        boxes.pop(int(held.argmin()))
     taken = np.zeros(len(arr), bool)
     pieces = {}
-    for i, box in boxes:
-        protected = shell.copy()
-        for j, other in boxes:
-            if j != i:
-                lo = np.array(other["min"]) + KEEP_OTHER_M * m
-                hi = np.array(other["max"]) - KEEP_OTHER_M * m
-                protected |= np.all((scene >= lo) & (scene <= hi), axis=1)
+    for k, (i, box) in enumerate(boxes):
+        protected = shell | ((owner >= 0) & (owner != k))
         mask, _, _ = object_blobs(room, scene, colours, box, protected | taken, taken | shell)
         mask &= ~taken & ~shell
         if mask.sum() < MIN_PIECE:

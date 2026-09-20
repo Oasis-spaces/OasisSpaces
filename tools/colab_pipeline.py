@@ -24,7 +24,9 @@ taught (Sep 2026), done the same way every time:
 
 Stage 4 runs as its steps, each its own job, fetched before the next:
 train-quick, train-long (saved every 10,000 steps and resumed from the newest
-save), choose-training, fill; choose-best then runs here. A session installs
+save), choose-training, fill, scene (the mixed scene, built from the chosen
+training; being the agent's last step, it also brings Claude's capture
+advice); choose-best then runs here. A session installs
 only what its steps need, and the OpenSplat binary built on Colab is kept in
 tools/colab-cache/ and reused by later sessions with the same PyTorch and GPU.
 
@@ -53,10 +55,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 # Stages 1-3, then stage 4 as its steps (pipeline/agent.py SPLAT_STEPS), each
-# its own job on the VM with its results fetched before the next starts. The
-# last step, choosing the best splat of the video, runs here after the fetch,
-# where every earlier splat of the video is.
-STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "train-spirula", "choose-training", "fill"]
+# its own job on the VM with its results fetched before the next starts.
+# Choosing the best splat of the video runs here after the fetch, where every
+# earlier splat of the video is; the scene does not wait for it, because it is
+# built from the space's own splat.ply, not from the published best.
+STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "train-spirula", "choose-training",
+         "fill", "scene"]
 SPLAT_STEPS = STEPS[3:]
 # The notebook install cells each step needs. OpenSplat links OpenCV, which the
 # COLMAP cell installs, so training needs that cell too.
@@ -69,6 +73,7 @@ NEEDS = {
     "train-spirula": ["install-python"],   # skipped on the VM: no Spirula there
     "choose-training": ["install-python"],
     "fill": ["install-python"],
+    "scene": ["install-python"],           # LaMa, as for fill
 }
 CACHE = ROOT / "tools" / "colab-cache"   # the OpenSplat binary built on Colab, reused
 OPENSPLAT_BIN = "/content/OpenSplat/build/opensplat"
@@ -415,18 +420,31 @@ def wait_installs(vm: Colab, needed: list[str]) -> None:
             time.sleep(30)
 
 
-# Outputs a stage-4 step makes again, left out when a new session carries on.
-REBUILT_BY_STAGE4 = ("splat.ply", "splat.splat", "splat-filled.ply", "splat-filled.splat")
+# Outputs a stage-4 step makes again, left out when a new session runs that
+# step. A step that only reads them (fill and scene read splat.ply) gets them.
+REMADE_BY = {"choose-training": ("splat.ply", "splat.splat"),
+             "fill": ("splat-filled.ply", "splat-filled.splat"),
+             "scene": ("scene/",)}
 
 
-def upload_space(vm: Colab, name: str, first_step: str) -> None:
+def remade_by(stages: list[str]) -> tuple[str, ...]:
+    return tuple(f for step in stages for f in REMADE_BY.get(step, ()))
+
+
+def left_out(rel: str, remade: tuple[str, ...]) -> bool:
+    """`rel` (a path inside the space) is a file, or lies in a folder, that a
+    requested step makes again."""
+    return any(rel == f or (f.endswith("/") and (rel + "/").startswith(f)) for f in remade)
+
+
+def upload_space(vm: Colab, name: str, stages: list[str]) -> None:
     """A space as it stands here, for a new session carrying on from a later
     step. Files the VM then has are marked as fetched, so they do not come
     back with the step's results."""
     space = ROOT / "spaces" / name
     if not space.exists():
         return
-    skip_outputs = first_step in SPLAT_STEPS
+    remade = remade_by(stages)
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / f"{name}.tar"
         saves = sorted((int(p.stem.rsplit("_", 1)[1]), p.name) for p in space.glob("splat-long_*.ply")
@@ -436,8 +454,7 @@ def upload_space(vm: Colab, name: str, first_step: str) -> None:
             tar.add(space, arcname=name,
                     filter=lambda info: None if (any(skip in info.name for skip in NOT_FETCHED)
                                                  or info.name in superseded
-                                                 or (skip_outputs and info.name in
-                                                     {f"{name}/{f}" for f in REBUILT_BY_STAGE4}))
+                                                 or left_out(info.name[len(name) + 1:], remade))
                     else info)
         vm.put(archive, f"{REMOTE_WORK}/space-{name}.tar")
     vm.shell(f"mkdir -p {REMOTE_ROOT}/spaces && tar -xf {REMOTE_WORK}/space-{name}.tar -C {REMOTE_ROOT}/spaces",
@@ -601,7 +618,7 @@ def main() -> None:
         remote_has = vm.shell(f"test -f {REMOTE_ROOT}/spaces/{args.name}/agent-report.json && echo yes || true",
                               timeout=120).strip() == "yes"
         if not remote_has:
-            upload_space(vm, args.name, args.stages[0])
+            upload_space(vm, args.name, args.stages)
         else:
             # Carrying on in the same session: bring what the VM has here first.
             log(f"  fetched {fetch_space(vm, args.name)} file(s) already on the VM")

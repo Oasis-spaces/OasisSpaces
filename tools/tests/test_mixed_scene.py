@@ -136,6 +136,34 @@ def test_only_things_standing_on_a_piece_move_with_it():
     assert "on" not in cushion and "on" not in lamp and "on" not in bed and "on" not in rest
 
 
+def test_a_box_inside_a_larger_one_goes_with_it():
+    # Stage 3 measures every box from the floor up: bed, a pillow on it (a column through
+    # the mattress), a wardrobe touching the bed, a basket half under a desk.
+    los = np.array([[0, 0, 0], [1.2, 0.5, 0], [0, 2.2, 0], [4, 0, 0], [4.1, 0.3, 0]], float)
+    his = np.array([[1.8, 2.2, 0.8], [1.5, 1.1, 0.7], [1.6, 2.8, 2.5], [4.5, 0.6, 0.9], [4.4, 1.0, 0.4]], float)
+    assert ms.nested_in(los, his) == {1: 0}          # only the pillow; the basket is half outside the desk
+    # a box in a box in a box goes with the outermost
+    russian = np.array([[0, 0, 0], [0.1, 0.1, 0], [0.2, 0.2, 0]], float)
+    assert ms.nested_in(russian, russian + [[3, 3, 3], [2, 2, 2], [1, 1, 1]]) == {1: 0, 2: 0}
+
+
+def test_a_piece_takes_nothing_another_box_claims():
+    bed, wardrobe, desk, basket = 0, 1, 2, 3
+    los = np.array([[0, 0, 0], [0, 2.2, 0], [4, 0, 0], [4.1, 0.3, 0]], float)
+    his = np.array([[1.8, 2.2, 0.8], [1.6, 2.8, 2.5], [4.5, 0.6, 0.9], [4.4, 1.0, 0.4]], float)
+    points = np.array([[0.9, 1.0, 0.5],      # in the bed
+                       [0.8, 2.21, 1.6],     # the wardrobe's door, within what the bed's margin reaches
+                       [0.8, 2.17, 1.6],     # a door Gaussian a little in front of the wardrobe's box, over the bed
+                       [0.8, 1.0, 0.85],     # a blanket just over the bed's box
+                       [0.8, 2.15, 0.83],    # on the bed by the wardrobe: nearer the bed's top than the doors
+                       [4.2, 0.5, 0.2],      # in the desk's box and the basket's: the smaller one's
+                       [4.2, 0.1, 0.2],      # under the desk only
+                       [3.0, 3.0, 1.0]])     # in the open
+    owner = ms.claims(los, his, points, margin=0.1)
+    assert owner.tolist() == [bed, wardrobe, wardrobe, bed, bed, basket, desk, -1]
+    assert ms.claims(los[:0], his[:0], points, margin=0.1).tolist() == [-1] * len(points)
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

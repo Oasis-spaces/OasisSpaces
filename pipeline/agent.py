@@ -1139,17 +1139,26 @@ class Agent:
         beside each. Claude looks at every texture against what was filmed and
         every piece against a frame of the real thing, and decides what to keep,
         what to paint plain and which pieces to show as models. An extra: it
-        never ends the run."""
-        if (self.space / "splat.ply").exists() and (self.space / "shapes.json").exists():
-            self.safe(self.build_scene)
+        never ends the run, and what came of it is in the report either way."""
+        missing = [f for f in ("splat.ply", "shapes.json") if not (self.space / f).exists()]
+        if missing:
+            self.decide("splat", "skip", f"no scene: {' and '.join(missing)} missing "
+                        "(the scene is cut from the chosen splat along stage 3's room model)")
+            return True
+        started = time.time()
+        try:
+            self.build_scene(started)
+        except (Exception, SystemExit) as exc:
+            self.decide("splat", "skip", f"no scene: the build failed ({type(exc).__name__}: {exc})",
+                        seconds=round(time.time() - started, 1))
         return True
 
-    def build_scene(self) -> None:
+    def build_scene(self, started: float) -> None:
         from mixed_scene import build, claude_review
         from surface_fill import LAMA_PATH
 
         if not LAMA_PATH.exists():
-            print(f"    no scene: the inpainting weights are not at {LAMA_PATH}")
+            self.decide("splat", "skip", f"no scene: LaMa weights not found at {LAMA_PATH}")
             return
         seen = {}
         ask = claude_review(self.advisor, self.room_frames(2), log=lambda text: print("   " + text))
@@ -1167,7 +1176,19 @@ class Agent:
             self.judged("scene", {"surfaces": verdict.get("surfaces"), "pieces": verdict.get("pieces"),
                                   "summary": verdict.get("summary")},
                         f"{verdict.get('summary', '')}" + (f" ({'; '.join(changed)})" if changed else ""))
-        print(f"    scene: {out / 'scene.json'}")
+        pieces = json.loads((out / "scene.json").read_text())["pieces"]
+        movable = [p for p in pieces if p["movable"]]
+        as_model = [p["label"] for p in movable if p.get("show") == "model"]
+        fixed = sum(p["count"] for p in pieces if not p["movable"])
+        self.decide("splat", "accept",
+                    f"scene built: {len(movable)} movable piece(s) ({', '.join(p['label'] for p in movable) or 'none'})"
+                    + (f", shown as clean models: {', '.join(as_model)}" if as_model else "")
+                    + f"; {fixed:,} Gaussians left fixed; "
+                    + ("reviewed by Claude" if verdict else "not reviewed: every surface and piece kept as built")
+                    + f" ({(out / 'scene.json').relative_to(self.space)})",
+                    metrics={"movable": len(movable), "as_model": len(as_model), "fixed_gaussians": fixed,
+                             "reviewed": bool(verdict)},
+                    seconds=round(time.time() - started, 1))
 
     def image_cache_gb(self, downscale: int) -> float:
         """What OpenSplat's GPU copy of the training images would take."""
