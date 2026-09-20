@@ -90,7 +90,18 @@ function addPiece(info) {
   // The clean stand-in, beside the scan: one of the two shows.
   const model = new THREE.Group();
   if (info.model) {
-    new GLTFLoader().loadAsync(new URL(info.model, sceneURL).href).then((gltf) => model.add(gltf.scene));
+    new GLTFLoader().loadAsync(new URL(info.model, sceneURL).href).then((gltf) => {
+      // A photographed side (a wardrobe's doors, a table's top) holds the room's own light,
+      // like the shell: drawn as it is, while the plain parts of the model take the lights.
+      gltf.scene.traverse((node) => {
+        if (node.isMesh && node.material.map) {
+          const map = node.material.map;
+          map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+          node.material = new THREE.MeshBasicMaterial({ map, side: THREE.FrontSide });
+        }
+      });
+      model.add(gltf.scene);
+    });
     group.add(model);
   }
   const showing = info.show === "model" && info.model ? "model" : "scan";

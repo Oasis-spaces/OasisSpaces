@@ -1173,20 +1173,24 @@ class Agent:
         if verdict:
             changed = [f"{name}: {v.get('use')}" for name, v in (verdict.get("surfaces") or {}).items() if v.get("use") != "keep"]
             changed += [f"{ident}: {v.get('use')}" for ident, v in (verdict.get("pieces") or {}).items() if v.get("use") != "scan"]
+            changed += [f"{name}: {v.get('use')}" for name, v in (verdict.get("faces") or {}).items() if v.get("use") != "keep"]
             self.judged("scene", {"surfaces": verdict.get("surfaces"), "pieces": verdict.get("pieces"),
-                                  "summary": verdict.get("summary")},
+                                  "faces": verdict.get("faces"), "summary": verdict.get("summary")},
                         f"{verdict.get('summary', '')}" + (f" ({'; '.join(changed)})" if changed else ""))
         pieces = json.loads((out / "scene.json").read_text())["pieces"]
         movable = [p for p in pieces if p["movable"]]
         as_model = [p["label"] for p in movable if p.get("show") == "model"]
+        photographed = sum(len(p.get("photographed", [])) for p in movable)
         fixed = sum(p["count"] for p in pieces if not p["movable"])
         self.decide("splat", "accept",
                     f"scene built: {len(movable)} movable piece(s) ({', '.join(p['label'] for p in movable) or 'none'})"
                     + (f", shown as clean models: {', '.join(as_model)}" if as_model else "")
+                    + (f", {photographed} model side(s) photographed from the video" if photographed else "")
                     + f"; {fixed:,} Gaussians left fixed; "
                     + ("reviewed by Claude" if verdict else "not reviewed: every surface and piece kept as built")
                     + f" ({(out / 'scene.json').relative_to(self.space)})",
-                    metrics={"movable": len(movable), "as_model": len(as_model), "fixed_gaussians": fixed,
+                    metrics={"movable": len(movable), "as_model": len(as_model), "photographed_sides": photographed,
+                             "fixed_gaussians": fixed,
                              "reviewed": bool(verdict)},
                     seconds=round(time.time() - started, 1))
 

@@ -164,6 +164,84 @@ def test_a_piece_takes_nothing_another_box_claims():
     assert ms.claims(los[:0], his[:0], points, margin=0.1).tolist() == [-1] * len(points)
 
 
+def test_a_photographed_side_sits_just_in_front_of_its_models_side():
+    from surface_fill import Surface
+
+    box = {"min": [1.0, 2.0, 0.0], "max": [2.5, 2.6, 2.4]}
+    # the splat has the doors 4 cm inside stage 3's box: on the model they would be hidden behind its side
+    doors = Surface("object-B13-y-", np.array([2.5, 2.04, 0.0]), np.array([-1.0, 0, 0]), np.array([0, 0, 1.0]),
+                    np.array([0, -1.0, 0]), 300, 480, 0.005)
+    top = Surface("object-B13-top", np.array([1.0, 2.0, 2.31]), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]),
+                  np.array([0, 0, 1.0]), 300, 120, 0.005)
+    assert np.allclose(ms.panel_surface(doors, box, 0.004).origin, [2.5, 2.0 - 0.004, 0.0])
+    assert np.allclose(ms.panel_surface(top, box, 0.004).origin, [1.0, 2.0, 2.4 + 0.004])
+    assert ms.panel_surface(doors, box, 0.004).cols == 300 and ms.face_box(doors) == "B13"
+    assert np.allclose(doors.origin, [2.5, 2.04, 0.0])                   # the filmed face itself is left alone
+
+
+def test_a_leftover_gaussian_is_a_thing_only_on_a_detected_object():
+    from scipy.spatial import cKDTree
+
+    rng = np.random.default_rng(0)
+    wall = np.stack([rng.uniform(0, 3, 30_000), np.zeros(30_000), rng.uniform(0, 2.5, 30_000)], axis=1)
+    curtain = np.stack([rng.uniform(1, 2, 10_000), np.full(10_000, 0.12), rng.uniform(0.2, 2.2, 10_000)], axis=1)
+    points = np.vstack([wall, curtain])
+    labels = np.r_[np.zeros(len(wall), np.uint8), np.full(len(curtain), 4, np.uint8)]
+    gaussians = np.array([[1.5, 0.12, 1.0],      # in the curtain
+                          [1.5, 0.10, 2.0],      # the curtain, a little off its measured surface
+                          [2.6, 0.02, 1.0],      # paint on the bare wall
+                          [0.4, 0.03, 0.5],      # more paint
+                          [1.5, 0.60, 1.0]])     # hanging in the room with nothing measured near
+    assert ms.on_detected_object(cKDTree(points), labels, gaussians, 0.05).tolist() == [True, True, False, False, False]
+    assert ms.on_detected_object(cKDTree(points), labels, gaussians[:0], 0.05).tolist() == []
+
+
+def test_despeckling_changes_only_the_speckles():
+    rng = np.random.default_rng(1)
+    photo = np.full((60, 80, 3), 200.0)
+    photo[:, 40:] = 90.0                                  # a door's dark frame: a sharp edge that must stay
+    photo += rng.normal(0, 2, photo.shape)
+    known = np.ones((60, 80), bool)
+    known[:20, :15] = False                               # never filmed
+    photo[~known] = 0
+    speckles = [(30, 10), (45, 25), (10, 60), (50, 70)]
+    for r, c in speckles:
+        photo[r, c] = [40, 40, 120]
+    out = ms.despeckle(photo, known)
+    for r, c in speckles:
+        assert np.abs(out[r, c] - photo[r, (c // 40) * 40 + 5]).max() < 10          # back to the colour round it
+    changed = np.abs(out - photo).sum(axis=2) > 0
+    assert changed.sum() == len(speckles)                 # the edge, the noise and the hole's rim are untouched
+
+
+def test_only_what_clearly_stands_before_a_face_hides_it():
+    from surface_fill import Surface
+
+    place = room(metre=1.0)
+    face = Surface("object-B1-y-", np.array([1.0, 2.0, 0.0]), np.array([-1.0, 0, 0]), np.array([0, 0, 1.0]),
+                   np.array([0, -1.0, 0]), 200, 200, 0.005)               # 1 x 1 m, facing -y
+    rng = np.random.default_rng(0)
+    across = lambda n, lo, hi: np.stack([rng.uniform(0.0, 1.0, n), np.zeros(n), rng.uniform(lo, hi, n)], axis=1)
+    doors = across(40_000, 0.0, 1.0) + [0, 2.0, 0]
+    doors[:, 1] -= np.abs(rng.normal(0, 0.04, len(doors)))               # the doors, measured roughly: up to ~10 cm out
+    bed = across(40_000, 0.0, 0.4) + [0, 2.0, 0]
+    bed[:, 1] -= rng.uniform(0.2, 0.5, len(bed))                         # a bed before the lower 40 cm
+    hidden = ms.standing_in_front(place, face, np.vstack([doors, bed]))
+    assert hidden.shape == (200, 200)
+    assert hidden[:70].mean() > 0.95                                     # rows run up from the bottom: the bed
+    assert hidden[100:].mean() < 0.02                                    # rough depth on the doors hides nothing
+
+
+def test_a_review_sheet_takes_any_number_of_pictures_in_a_row():
+    grey = np.full((30, 40, 3), 128, np.uint8)
+    with tempfile.TemporaryDirectory() as folder:
+        two = ms.sheet([("a", grey, grey)], Path(folder) / "two.png", tile=(40, 30))
+        three = ms.sheet([("a", grey, grey, grey), ("b", grey, grey)], Path(folder) / "three.png", tile=(40, 30))
+        from PIL import Image
+        assert Image.open(two).size == (2 * 50 + 10, 30 + 34 + 10)
+        assert Image.open(three).size == (3 * 50 + 10, 2 * (30 + 34) + 10)
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

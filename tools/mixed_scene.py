@@ -66,6 +66,19 @@ NESTED = 0.8                # a box with this much of its volume inside a larger
 HAZE_SUPPORT_M = 0.08       # a soft Gaussian with no dense-cloud surface this close is haze, not a thing
 HAZE_ALPHA = 0.6            # ...soft meaning fainter than this,
 HAZE_SCALE_M = 0.05         # ...or larger than this
+PANEL_CELL_M = 0.0025       # texels of a photographed furniture face: a pattern on a door needs finer than paint
+PANEL_SHARPNESS = 4.0       # its photograph is decided by the closest, most frontal frames (surface_fill.photograph)
+SPECKLE_GAP = 30            # a filmed texel this far (RGB) from its neighbourhood's median is a speckle
+PANEL_LIFT_M = 0.004        # a photographed face sits this far in front of its model's side
+THING_REACH_M = 0.05        # a leftover Gaussian looks this far for measured points...
+THING_NEIGHBOURS = 8        # ...at up to this many of them,
+THING_MIN = 4               # needs this many,
+THING_SHARE = 0.5           # and this share of them detected as some object, to be a thing and not paint
+FRONT_CLEAR_M = 0.15        # what stands this far in front of a face hides it (a bed before a wardrobe)...
+FRONT_CELL_M = 0.02         # ...counted on cells this size,
+FRONT_POINTS = 8            # with this many measured points in one
+PANEL_MIN_FILMED = 0.35     # a face filmed less than this stays the model's plain colour
+TURNED_DEGREES = 55         # the review also shows each scan from this far round, and from above
 SEEN_WEIGHT = 0.02          # a texel counts as filmed above this (as in surface_fill)
 ROUGHNESS = {"floor": 0.45, "ceiling": 1.0, "wall": 0.92}
 
@@ -186,13 +199,20 @@ def claims(los, his, points, margin) -> np.ndarray:
     return owner
 
 
-def cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log):
+def cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log, detected=None):
     """Which Gaussians are which: {piece id: mask}. The room's surfaces are
     found first, so a piece never takes the wall it stands against with it:
     a Gaussian in a wall's band counts as the wall when it is the wall's
     colour (a headboard or a shelf on the wall is not). Then the objects
     (stage 3's built boxes, each within what it claims, largest first), then
-    what is left."""
+    what is left.
+
+    `detected(positions) -> mask` says which positions sit on something the
+    detector outlined (on_detected_object). With it, what a piece takes from
+    outside its measured box (the margin, a headboard growing up out of it)
+    and everything left over must be on a detected object: the rest is wall
+    paint hanging in the room, which a moved bed would drag along as a smear.
+    Inside a box nothing is asked: outlines cover only part of a wardrobe."""
     from splat_edit import ABOVE_COLOUR_GAP, REMOVE_MARGIN_M, object_blobs, typical
 
     m = room.metre
@@ -235,11 +255,17 @@ def cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log):
         log(f"  {name(boxes[int(held.argmin())])}: only {int(held.min())} Gaussians, not a piece of its own")
         boxes.pop(int(held.argmin()))
     taken = np.zeros(len(arr), bool)
+    paint = np.zeros(len(arr), bool)
     pieces = {}
     for k, (i, box) in enumerate(boxes):
         protected = shell | ((owner >= 0) & (owner != k))
         mask, _, _ = object_blobs(room, scene, colours, box, protected | taken, taken | shell)
         mask &= ~taken & ~shell
+        if detected is not None:
+            beyond = np.flatnonzero(mask & ~np.all((scene >= np.array(box["min"]) - 0.02 * m)
+                                                   & (scene <= np.array(box["max"]) + 0.02 * m), axis=1))
+            paint[beyond[~detected(scene[beyond])]] = True
+            mask &= ~paint
         if mask.sum() < MIN_PIECE:
             log(f"  B{i} {box.get('label')}: only {int(mask.sum())} Gaussians, left in the rest")
             continue
@@ -251,6 +277,13 @@ def cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log):
     fittings = left & (scene[:, 2] > ceiling - FITTING_BAND_M * m)
     pieces["ceiling-fittings"] = fittings
     pieces["rest"] = left & ~fittings
+    if detected is not None:
+        around = int(paint.sum())
+        rest = np.flatnonzero(pieces["rest"] & ~paint)
+        paint[rest[~detected(scene[rest])]] = True
+        pieces["rest"] &= ~paint
+        log(f"  dropped {int(paint.sum()):,} Gaussians on no detected object (paint hanging off the walls): "
+            f"{around:,} around the pieces, {int(paint.sum()) - around:,} from what was left")
     log(f"  dropped {int((shell & ~outside).sum()):,} Gaussians that were walls, floor or ceiling, "
         f"{int(outside.sum()):,} outside the room; {int(pieces['rest'].sum()):,} left as the rest")
     return pieces
@@ -386,6 +419,76 @@ def texture(surface, photo, seen, blocked, log, plain=None) -> np.ndarray:
     return inpaint(np.where(known[..., None], photo, 128), ~known, log)
 
 
+def panel_surface(surface, box: dict, lift: float):
+    """The photographed face moved onto its box's side, `lift` in front of it.
+    surface_fill.object_surfaces puts a face at the depth where the splat has
+    it, a few centimetres in or out of stage 3's box; the clean model fills
+    the box exactly, so its panel belongs on the box's side, never behind it."""
+    from dataclasses import replace
+
+    axis = int(np.argmax(np.abs(surface.normal)))
+    side = np.array(box["max" if surface.normal[axis] > 0 else "min"], float)[axis]
+    origin = np.array(surface.origin, float)
+    origin[axis] = side + np.sign(surface.normal[axis]) * lift
+    return replace(surface, origin=origin)
+
+
+def on_detected_object(tree, labels: np.ndarray, positions: np.ndarray, reach: float) -> np.ndarray:
+    """Which `positions` sit on something stage 2's detector outlined (the
+    dense cloud's points carry the object names Claude chose for the room;
+    0 is unlabelled: walls, floor, ceiling, whatever nobody named). What is
+    left of a splat once the furniture is cut out is mostly wall paint that
+    training left hanging up to half a metre into the room, in colours too
+    far from the wall's to be taken for it; by opacity and size it is like any
+    other Gaussian, but no detected object is under it. A curtain, an air
+    conditioner or a backpack has one."""
+    if not len(positions):
+        return np.zeros(0, bool)
+    distance, index = tree.query(positions, k=THING_NEIGHBOURS, distance_upper_bound=reach, workers=-1)
+    found = np.isfinite(distance)
+    named = found & (labels[np.minimum(index, len(labels) - 1)] > 0)
+    return (found.sum(axis=1) >= THING_MIN) & (named.sum(axis=1) >= THING_SHARE * found.sum(axis=1))
+
+
+def despeckle(photo: np.ndarray, known: np.ndarray, size: int = 7) -> np.ndarray:
+    """The photo with its speckles smoothed away: single filmed texels unlike
+    everything round them, where one frame's depth test let a sliver of
+    something nearer through. Only those texels change (to their
+    neighbourhood's median); the rest keeps its sharpness."""
+    from scipy.ndimage import median_filter, uniform_filter
+
+    median = median_filter(photo, size=(size, size, 1))
+    surrounded = uniform_filter(known.astype(float), size) > 0.6         # a median next to a hole is half black
+    speckle = known & surrounded & (np.abs(photo - median).sum(axis=2) > SPECKLE_GAP)
+    return np.where(speckle[..., None], median, photo)
+
+
+def standing_in_front(room, face, points: np.ndarray) -> np.ndarray:
+    """Texels of a furniture face that something else stands in front of.
+    surface_fill.object_masks asks for two points in a 5 mm texel from 6 cm
+    out, which suits deciding where a splat may be filled; but the dense
+    cloud's depth is rough by several centimetres, so on a photograph it
+    blanks the doors themselves (the walkthrough's wardrobe: 71% filmed down
+    to 36%). Each frame's own depth test already keeps other things off the
+    photograph; this only adds what clearly stands before the face."""
+    from scipy.ndimage import binary_dilation, binary_opening
+    from surface_fill import raster
+
+    m = room.metre
+    k = max(1, int(round(FRONT_CELL_M * m / face.cell)))
+    rows, cols = -(-face.rows // k), -(-face.cols // k)
+    depth = (points - face.origin) @ face.normal
+    before = points[(depth > FRONT_CLEAR_M * m) & (depth < 0.6 * m)]
+    coarse = raster(face, before, rows, cols, face.cell * k) >= FRONT_POINTS
+    coarse = binary_dilation(binary_opening(coarse, iterations=1), iterations=2)
+    return np.kron(coarse, np.ones((k, k), bool))[:face.rows, :face.cols]
+
+
+def face_box(surface) -> str:
+    """'object-B13-y-' -> 'B13'."""
+    return surface.name.split("-")[1]
+
+
 def quad(surface, frame: Frame):
     """The surface's rectangle in the viewer's frame: positions, normal, texture
     coordinates and triangles facing the room. Texel (row, col) of the texture
@@ -471,26 +574,41 @@ For each surface choose:
 - "filmed": the filmed part is good but the continued part is not (smears, ghosts of furniture, invented objects, blotches): keep the filmed part and paint the rest plain.
 - "plain": even the filmed part is wrong for a clean surface (furniture or clutter printed flat onto it, heavy blur, patchwork): paint the whole surface plain.
 
-Sheet 2, pieces. One row per piece: on the left the scanned piece alone, seen from where the video saw it best; on the right that frame of the video. Pieces: {pieces}.
+Sheet 2, pieces. One row per piece: the scanned piece alone seen from where the video saw it best; the same scan seen from round the side and above, an angle nobody filmed; that frame of the video. People move and turn these pieces and look at the room from above, so the second picture is what they will mostly see: a scan is a cloud of soft blobs that only looks right from where it was filmed. Pieces: {pieces}.
+Each piece also has a clean simple model of its kind at its measured size. {faces_note}
 For each piece choose:
-- "scan": the scan is recognisably that object; show it as filmed.
-- "model": it is a real piece of furniture but the scan is too broken to show (mostly holes, smears, or a shapeless cloud); show a clean simple model of it instead.
+- "scan": the scan is recognisably that object and still clean from the unfilmed angle (no haze, streaks or smears hanging off it).
+- "model": it is a real piece of furniture, but from the unfilmed angle the scan is hazy, streaked, full of holes or a shapeless cloud; show the clean model instead. Prefer this for flat-sided furniture (wardrobes, cabinets, desks, tables) whenever the scan is not crisp: the look to aim for is smooth and polished, not foggy.
 - "drop": it is not a separate real object (part of a wall, a duplicate of another piece, empty space).
-Be fair to soft scans: furniture covered in clothes or bedding is still "scan" if one can tell what it is.
+Be fair to soft things: a bed under bedding or a pile of clothes has no flat sides, so a simple model loses what it is; keep it "scan" if one can tell what it is.
+{faces_ask}
+Reply as JSON: {{"surfaces": {{"<name>": {{"use": "keep|filmed|plain", "why": "..."}}, ...}}, "pieces": {{"<id>": {{"use": "scan|model|drop", "why": "..."}}, ...}}, "faces": {{"<name>": {{"use": "keep|plain", "why": "..."}}, ...}}, "summary": "one sentence on how the scene will look"}}"""
 
-Reply as JSON: {{"surfaces": {{"<name>": {{"use": "keep|filmed|plain", "why": "..."}}, ...}}, "pieces": {{"<id>": {{"use": "scan|model|drop", "why": "..."}}, ...}}, "summary": "one sentence on how the scene will look"}}"""
+FACES_NOTE = ("Sheet 3 shows the sides of those models that the video filmed flat-on, as photographs to put on the model "
+              "(left: what was filmed, magenta = never seen or hidden; right: finished, the magenta continued by an "
+              "inpainting model). Faces: {faces}.")
+FACES_ASK = """
+For each face on sheet 3 choose:
+- "keep": the finished photograph is believable as that side of the furniture (doors, drawers, handles, a table top), including where it was continued.
+- "plain": it is not (other objects printed flat onto it, smears, a ghost of what stood in front, heavy blur): leave that side of the model in its plain colour.
+"""
 
 
 def claude_review(advisor, frames=(), log=print):
     """A review callback for build(): Claude's verdicts, or None when Claude is not reachable."""
-    def review(surface_sheet: Path, piece_sheet: Path, surfaces: list, pieces: list):
+    def review(surface_sheet: Path, piece_sheet: Path, surfaces: list, pieces: list,
+               face_sheet: Path | None = None, faces: list = ()):
         if advisor is None or not advisor.available:
             return None
+        listed = ", ".join(f"{f['name']} = the {f['side']} of {f['piece']} ({f['filmed']:.0%} filmed)" for f in faces)
         prompt = REVIEW_PROMPT.format(
             surfaces=", ".join(f"{s['name']} ({s['filmed']:.0%} filmed)" for s in surfaces),
-            pieces=", ".join(f"{p['id']} = {p['label']} ({p['size']})" for p in pieces) or "none")
-        images = [surface_sheet] + ([piece_sheet] if pieces else []) + list(frames)
-        verdict = advisor.ask_json(prompt, images, max_tokens=2500)
+            pieces=", ".join(f"{p['id']} = {p['label']} ({p['size']})" for p in pieces) or "none",
+            faces_note=FACES_NOTE.format(faces=listed) if faces else "No side of any model was filmed well enough to photograph.",
+            faces_ask=FACES_ASK if faces else "")
+        images = ([surface_sheet] + ([piece_sheet] if pieces else []) + ([face_sheet] if faces and face_sheet else [])
+                  + list(frames))
+        verdict = advisor.ask_json(prompt, images, max_tokens=3500)
         if verdict:
             log(f"  Claude: {verdict.get('summary', '')}")
         return verdict
@@ -504,25 +622,45 @@ def fit(image: np.ndarray, width: int, height: int) -> Image.Image:
 
 
 def sheet(rows: list, out: Path, tile=(420, 300)) -> Path:
-    """rows of (title, left image, right image) as one labelled picture."""
+    """rows of (title, image, image, ...) as one labelled picture."""
     from PIL import ImageDraw, ImageFont
 
     font = ImageFont.load_default(size=18)
     w, h = tile
-    page = Image.new("RGB", (2 * w + 30, max(1, len(rows)) * (h + 34) + 10), "white")
+    across = max([len(row) - 1 for row in rows] + [2])
+    page = Image.new("RGB", (across * (w + 10) + 10, max(1, len(rows)) * (h + 34) + 10), "white")
     draw = ImageDraw.Draw(page)
-    for n, (title, left, right) in enumerate(rows):
+    for n, (title, *pictures) in enumerate(rows):
         y = 10 + n * (h + 34)
         draw.text((10, y), title, fill="black", font=font)
-        for k, picture in enumerate((left, right)):
+        for k, picture in enumerate(pictures):
             small = fit(picture, w, h)
             page.paste(small, (10 + k * (w + 10), y + 24))
     page.save(out)
     return out
 
 
+def turned_view(room, view: dict, target: np.ndarray) -> list:
+    """The view matrix of `view`'s camera carried TURNED_DEGREES round `target`
+    (scene frame) and up to look down on it: an angle nobody filmed, which is
+    how a piece is seen once the room is looked at from above or it is turned."""
+    from splat_export import look_matrix, view_json
+
+    V = np.array(view["viewMatrix"], float).reshape(4, 4).T
+    position = room.to_scene((-V[:3, :3].T @ V[:3, 3])[None])[0]
+    arm = position - target
+    a = np.radians(TURNED_DEGREES)
+    turn = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+    reach = max(np.linalg.norm(arm[:2]), 1.2 * room.metre)
+    flat = turn @ (arm[:2] / max(np.linalg.norm(arm[:2]), 1e-9)) * reach
+    moved = np.array([target[0] + flat[0], target[1] + flat[1], target[2] + 0.9 * reach])
+    p = room.to_splat(moved[None])[0]
+    return view_json(look_matrix(p, room.to_splat(target[None])[0] - p, room.world[2]), p)["viewMatrix"]
+
+
 def piece_rows(room, arr, scene, masks, log) -> list:
-    """For the review: each movable piece alone, from the camera that saw it best, beside that frame."""
+    """For the review: each movable piece alone, from the camera that saw it
+    best and from an angle nobody filmed, beside the best frame."""
     from object_frames import best_frames
     from splat_edit import camera_looking_at
     from splat_render import render
@@ -544,10 +682,12 @@ def piece_rows(room, arr, scene, masks, log) -> list:
         if not view:
             continue
         scan = render(arr[mask], view["viewMatrix"], 480, 360, view.get("fovY", 55.0))
+        turned = render(arr[mask], turned_view(room, view, target), 480, 360, view.get("fovY", 55.0))
         frame_name = picks[index][0]["frame"] if picks.get(index) else None
         photo = (np.asarray(Image.open(room.space / "workspace" / "images" / frame_name).convert("RGB"))
                  if frame_name else np.full((360, 480, 3), 230, np.uint8))
-        rows.append((f"{ident}  {box.get('detected') or box.get('label')}   (scan | the video, {frame_name})", scan, photo))
+        rows.append((f"{ident}  {box.get('detected') or box.get('label')}   (scan as filmed | the scan from an unfilmed angle "
+                     f"| the video, {frame_name})", scan, turned, photo))
     return rows
 
 
@@ -573,13 +713,15 @@ def mark_stacked(pieces: list) -> None:
 
 # ------------------------------------------------------------------- build
 def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -> Path:
+    from dataclasses import replace
+
     import surface_fill
     from pointcloud import load_ply
     from scipy.ndimage import gaussian_filter
     from scipy.spatial import cKDTree
     from splat_edit import Room
     from splat_tools import read_splat
-    from surface_fill import blob_arrays, floor_masks, photograph, wall_masks, wall_surfaces
+    from surface_fill import blob_arrays, floor_masks, object_surfaces, photograph, wall_masks, wall_surfaces
 
     if not surface_fill.LAMA_PATH.exists():
         sys.exit(f"LaMa weights not found at {surface_fill.LAMA_PATH} (see the README's fill-room)")
@@ -593,14 +735,16 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     arr, _ = read_splat(space / splat_name)
     log(f"{space.name}: {len(arr):,} Gaussians in {splat_name}; the room is "
         f"{2 * room.half[0] / m:.2f} x {2 * room.half[1] / m:.2f} m")
-    dense = room.to_scene(load_ply(space / "cloud-dense.ply").points.astype(np.float64))
+    cloud = load_ply(space / "cloud-dense.ply")
+    dense = room.to_scene(cloud.points.astype(np.float64))
     floor, floor_blocked, arr, _ = floor_masks(room, arr, dense, log)      # also clears haze over the floor
     floor_height = float(floor.origin[2])
     scene, colours, alpha, scale = blob_arrays(room, arr)
     # Haze: training leaves soft, oversized Gaussians hanging in the air along plain walls.
     # In a splat they blur into the wall; on a moved piece they would come along as a smear.
-    sample = dense[np.random.default_rng(0).choice(len(dense), min(len(dense), 2_000_000), replace=False)]
-    support = cKDTree(sample).query(scene, workers=-1)[0]
+    sampled = np.random.default_rng(0).choice(len(dense), min(len(dense), 2_000_000), replace=False)
+    measured = cKDTree(dense[sampled])
+    support = measured.query(scene, workers=-1)[0]
     haze = (support > HAZE_SUPPORT_M * m) & ((alpha < HAZE_ALPHA) | (scale > HAZE_SCALE_M * m))
     log(f"  {int(haze.sum()):,} of {len(arr):,} Gaussians are haze (soft, with no measured surface near)")
     arr, scene, colours, alpha, scale = arr[~haze], scene[~haze], colours[~haze], alpha[~haze], scale[~haze]
@@ -609,7 +753,10 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     frame = Frame(room, floor_height)
 
     log("cutting the splat into pieces")
-    masks = cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log)
+    detected = None
+    if cloud.labels is not None and (cloud.labels > 0).any():        # a cloud from before stage 2 named its points has none
+        detected = lambda positions: on_detected_object(measured, cloud.labels[sampled], positions, THING_REACH_M * m)
+    masks = cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log, detected)
 
     log("photographing the surfaces from the frames")
     front = np.vstack([dense, scene[alpha > 0.5]])
@@ -620,7 +767,18 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         blocked.append(standing | hidden)
     blocked.append(hanging_mask(room, ceiling, front))
     solid = np.stack([arr["x"], arr["y"], arr["z"]], axis=1)[alpha > 0.3].astype(np.float64)
+    # The furniture's flat sides that face the room (a wardrobe's doors, a table's top) are
+    # photographed in the same pass: a scan is haze from any angle it was not filmed from, a
+    # photograph on the clean model's side is sharp from all of them.
+    # They get their own pass: finer texels from the full-size frames, the best frames deciding,
+    # because a door's pattern smears when every frame is averaged in; paint does not.
+    finer = max(1, int(round(cell_m / PANEL_CELL_M)))
+    faces = [replace(f, cols=f.cols * finer, rows=f.rows * finer, cell=f.cell / finer)
+             for f in object_surfaces(room, scene, alpha, log) if masks.get(face_box(f), np.zeros(1)).sum()]
+    face_blocked = [standing_in_front(room, face, front) for face in faces]
     photos = photograph(space, room, surfaces, log, occluders=solid, frame_step=1)
+    face_photos = (photograph(space, room, faces, log, occluders=solid, frame_step=1,
+                              sharpness=PANEL_SHARPNESS, shrink=1) if faces else [])
 
     # The paint of the walls that were filmed, for a wall that was not.
     knowns = [(seen > SEEN_WEIGHT) & ~block for block, (_p, seen, _t) in zip(blocked, photos)]
@@ -639,13 +797,37 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     surface_sheet = sheet(rows, out / "review-surfaces.png")
     piece_sheet = sheet(piece_rows(room, arr, scene, masks, log), out / "review-pieces.png", tile=(480, 360))
     boxes = room.shapes["boxes"]
+    # The faces filmed well enough, finished like the walls: what stood in front is continued.
+    panels, rows = {}, []
+    for face, block, (photo, seen, _t) in zip(faces, face_blocked, face_photos):
+        known = (seen > SEEN_WEIGHT) & ~block
+        photo = despeckle(photo, known)
+        name = face.name.removeprefix("object-")
+        if known.mean() < PANEL_MIN_FILMED:
+            log(f"  {name}: only {known.mean():.0%} of it filmed; that side of the model stays plain")
+            continue
+        final = texture(face, photo, seen, block, log)
+        stand = (lambda image: image[::-1]) if face.normal[2] == 0 else (lambda image: image)
+        rows.append((f"{name}   (filmed {known.mean():.0%} | finished)",
+                     stand(np.where(known[..., None], photo, np.array([255.0, 0, 200]))), stand(final)))
+        box = boxes[int(face_box(face)[1:])]
+        panels[name] = {"face": face, "image": final, "filmed": float(known.mean()), "piece": face_box(face),
+                        "asked": {"name": name, "filmed": float(known.mean()),
+                                  "side": "top" if face.normal[2] else "side facing the room",
+                                  "piece": f"{face_box(face)} {box.get('detected') or box.get('label')}"}}
+    face_sheet = sheet(rows, out / "review-faces.png") if rows else None
     size_of = lambda b: " x ".join(f"{v:.1f}" for v in (np.array(b["max"]) - np.array(b["min"])) / m) + " m"
     asked = [{"id": ident, "label": boxes[int(ident[1:])].get("detected") or boxes[int(ident[1:])].get("label"),
               "size": size_of(boxes[int(ident[1:])])} for ident, mask in masks.items() if ident.startswith("B") and mask.sum()]
     verdict = review(surface_sheet, piece_sheet,
-                     [{"name": s.name, "filmed": float(k.mean())} for s, k in zip(surfaces, knowns)], asked) if review else None
+                     [{"name": s.name, "filmed": float(k.mean())} for s, k in zip(surfaces, knowns)], asked,
+                     face_sheet, [panel["asked"] for panel in panels.values()]) if review else None
     surface_use = {name: (v or {}).get("use", "keep") for name, v in ((verdict or {}).get("surfaces") or {}).items()}
     piece_use = {ident: (v or {}).get("use", "scan") for ident, v in ((verdict or {}).get("pieces") or {}).items()}
+    face_use = {name: (v or {}).get("use", "keep") for name, v in ((verdict or {}).get("faces") or {}).items()}
+    for name in [n for n in panels if face_use.get(n, "keep") != "keep"]:
+        log(f"  {name}: plain ({((verdict or {}).get('faces') or {}).get(name, {}).get('why', '')})")
+        del panels[name]
 
     meshes = []
     for surface, known, (photo, _s, _t), final in zip(surfaces, knowns, photos, finished):
@@ -672,7 +854,8 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     log(f"wrote shell.glb: {len(meshes)} surfaces, {(out / 'shell.glb').stat().st_size / 1e6:.1f} MB")
 
     pieces = []
-    for old in list((out / "pieces").glob("*.splat")) + list((out / "models").glob("*.glb")):
+    for old in (list((out / "pieces").glob("*.splat")) + list((out / "models").glob("*.glb"))
+                + list((out / "textures").glob("B*.jpg"))):
         old.unlink()
     for ident, mask in masks.items():
         if mask.sum() == 0:
@@ -692,7 +875,20 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
             anchor = np.array([(blo[0] + bhi[0]) / 2, 0.0, (blo[2] + bhi[2]) / 2])
             label = box.get("detected") or box.get("label")
             parts = model_parts(room, box, label, colours[mask], scene[mask][:, 2], frame, anchor)
-            write_glb(out / "models" / f"{ident}.glb", model_meshes(parts))
+            photographed = []
+            for name, panel in panels.items():
+                if panel["piece"] != ident:
+                    continue
+                jpeg = io.BytesIO()
+                Image.fromarray(np.clip(panel["image"], 0, 255).astype(np.uint8)).save(jpeg, "JPEG", quality=92)
+                (out / "textures" / f"{name}.jpg").write_bytes(jpeg.getvalue())
+                positions, normals, uvs, indices = quad(panel_surface(panel["face"], box, PANEL_LIFT_M * m), frame)
+                photographed.append({"name": f"photo {name}", "jpeg": jpeg.getvalue(), "roughness": 0.8,
+                                     "quad": (positions - anchor.astype(np.float32), normals, uvs, indices)})
+            write_glb(out / "models" / f"{ident}.glb", model_meshes(parts) + photographed)
+            if photographed:
+                entry["photographed"] = [mesh["name"].removeprefix("photo ") for mesh in photographed]
+                log(f"  {ident} {label}: its model carries {len(photographed)} photographed side(s)")
             entry.update(label=label, movable=True, model=f"models/{ident}.glb", modelKind=model_kind(label),
                          show="model" if use == "model" else "scan",
                          box={"min": (blo - anchor).round(3).tolist(), "max": (bhi - anchor).round(3).tolist()})
@@ -724,7 +920,8 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         "reviewedBy": "claude" if verdict else None, "summary": (verdict or {}).get("summary"),
     }
     (out / "scene.json").write_text(json.dumps(manifest, indent=1) + "\n")
-    (out / "review.json").write_text(json.dumps({"verdict": verdict, "surfaces": surface_use, "pieces": piece_use}, indent=1) + "\n")
+    (out / "review.json").write_text(json.dumps({"verdict": verdict, "surfaces": surface_use, "pieces": piece_use,
+                                                 "faces": {name: "keep" for name in panels}}, indent=1) + "\n")
     log(f"wrote {out / 'scene.json'}: {len(pieces)} pieces "
         f"({', '.join(p['label'] + (' [model]' if p.get('show') == 'model' else '') for p in pieces if p['movable'])})")
     log(f"view: http://localhost:8734/scene-viewer/index.html?scene=../spaces/{space.name}/scene/scene.json")

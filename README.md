@@ -320,17 +320,33 @@ a few minutes), written to `spaces/<name>/scene/`:
   leaves the doors on the wardrobe; a box measured inside a larger one (a
   pillow on the bed, a column from the floor up through the mattress) goes
   with the larger piece; soft Gaussians that no measured surface
-  supports are dropped as haze; the Gaussians that were walls and floor are
+  supports are dropped as haze; and what a piece takes from outside its
+  measured box, and everything left over, must sit on something stage 2's
+  detector outlined (the dense cloud's points carry the object names Claude
+  chose), because the rest is wall paint that training left hanging up to
+  half a metre into the room: a curtain or a backpack stays, the white
+  smears along the walls go; the Gaussians that were walls and floor are
   dropped, because the shell replaces them.
 - **`models/*.glb`**: a clean stand-in for every piece: simple furniture of
   its kind (bed, sofa, armchair, chair, table, desk, wardrobe, box) at the
   measured size, in the scan's own colours, its back to the wall it stands
-  against. The viewer shows either the scan or the model.
+  against. The viewer shows either the scan or the model. A side of the
+  model that the video filmed flat-on (a wardrobe's doors, a table's top) is
+  photographed from the frames like the walls, at 2.5 mm a texel from the
+  full-size frames with the closest, most frontal frames deciding, speckles
+  removed and what stood in front continued by the inpainting model: a scan
+  is soft from every angle it was not filmed from, a photograph on a flat
+  side is sharp from all of them.
 - **Claude's review** (`review-surfaces.png`, `review-pieces.png`,
-  `review.json`): Claude sees every texture beside what was actually filmed,
-  and every piece beside a frame of the real thing, and decides per surface
-  (keep the texture, keep only its filmed part, or paint it plain) and per
-  piece (show the scan, show the clean model, or drop it). On the walkthrough
+  `review-faces.png`, `review.json`): Claude sees every texture beside what
+  was actually filmed, and every piece from where it was filmed best, from
+  an angle nobody filmed (round the side and above, which is how a moved
+  piece is mostly seen) and beside a frame of the real thing, and decides per
+  surface (keep the texture, keep only its filmed part, or paint it plain),
+  per piece (show the scan, show the clean model, or drop it; flat-sided
+  furniture whose scan is hazy from the unfilmed angle becomes its model)
+  and per photographed side (keep it, or leave that side plain: a desk top
+  with its clutter printed flat is refused). On the walkthrough
   it kept the doorway wall with its curtain and noticeboard, painted the
   smeared walls plain and swapped a desk whose scan was "a floating fragment"
   for its model.

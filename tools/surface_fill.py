@@ -133,10 +133,14 @@ def depth_buffer(dense_c: np.ndarray, info: dict, cam: dict, shrink: int = DEPTH
 
 
 def photograph(space: Path, room, surfaces: list, log=print, occluders=None,
-               frame_step: int = FRAME_STEP):
+               frame_step: int = FRAME_STEP, sharpness=1.0, shrink: int = 2):
     """For each surface: (photo HxWx3 float, weight HxW, see-through count HxW),
     the surface as the frames saw it. One pass over the frames serves every
-    surface. `occluders` (camera-solve points) add to the dense cloud for
+    surface. `sharpness` (one number, or one per surface) raises each frame's
+    weight to that power: at 1 every frame that saw a texel is averaged in,
+    which hides exposure steps on plain paint but smears a pattern, because
+    the frames' poses disagree by a texel or two; higher, the closest and most
+    frontal frames decide. `shrink` is how far the frames are reduced first. `occluders` (camera-solve points) add to the dense cloud for
     deciding what blocks a view: the splat's blobs cover furniture sides that
     only frames between the dense cloud's keyframes saw. A spot counts as seen
     through in a frame when that frame sees a surface well behind it: an
@@ -158,6 +162,7 @@ def photograph(space: Path, room, surfaces: list, log=print, occluders=None,
     for surface in surfaces:
         pts_s = surface.points()
         grids.append((pts_s, pts_s @ room.world, len(pts_s)))   # scene, camera-solve frame
+    sharpness = np.broadcast_to(np.asarray(sharpness, float), (len(surfaces),))
     samples = [[] for _ in surfaces]         # per surface, per frame: (cells, colours, weights)
     through = [np.zeros(n) for _, _, n in grids]
     frames_used = [0] * len(surfaces)
@@ -189,8 +194,8 @@ def photograph(space: Path, room, surfaces: list, log=print, occluders=None,
                 continue
             if img is None:
                 img = np.asarray(Image.open(space / "workspace" / "images" / info["name"])
-                                 .convert("RGB").reduce(2), dtype=np.float32)
-            uu, vv = u[idx] / 2, v[idx] / 2
+                                 .convert("RGB").reduce(shrink), dtype=np.float32)
+            uu, vv = u[idx] / shrink, v[idx] / shrink
             x0, y0 = np.floor(uu).astype(int), np.floor(vv).astype(int)
             x1, y1 = np.minimum(x0 + 1, img.shape[1] - 1), np.minimum(y0 + 1, img.shape[0] - 1)
             fx_, fy_ = (uu - x0)[:, None], (vv - y0)[:, None]
@@ -208,29 +213,34 @@ def photograph(space: Path, room, surfaces: list, log=print, occluders=None,
         n = grids[k][2]
 
         def accumulate(keep_fn=None):
-            wsum, csum = np.zeros(n), np.zeros((n, 3))
+            """(how well seen, the colours' weights, the weighted colours)."""
+            seen, wsum, csum = np.zeros(n), np.zeros(n), np.zeros((n, 3))
             for idx, colour, weight in samples[k]:
                 if keep_fn is not None:
                     keep = keep_fn(idx, colour)
                     idx, colour, weight = idx[keep], colour[keep], weight[keep]
+                seen += np.bincount(idx, weights=weight, minlength=n)
+                if sharpness[k] != 1.0:
+                    weight = (weight / reference) ** sharpness[k]
                 wsum += np.bincount(idx, weights=weight, minlength=n)
                 for ch in range(3):
                     csum[:, ch] += np.bincount(idx, weights=weight * colour[:, ch], minlength=n)
-            return wsum, csum
+            return seen, wsum, csum
 
-        wsum, csum = accumulate()
+        _, wsum, csum = accumulate()
         mean = csum / np.maximum(wsum, 1e-12)[:, None]
         # Second pass without colours far from the first mean (reflections, motion).
-        dev_sum = np.zeros(n)
+        dev_sum, plain_sum = np.zeros(n), np.zeros(n)
         for idx, colour, weight in samples[k]:
             dev_sum += np.bincount(idx, weights=weight * np.sum((colour - mean[idx]) ** 2, axis=1),
                                    minlength=n)
-        spread = np.sqrt(dev_sum / np.maximum(wsum, 1e-12))
-        wsum2, csum2 = accumulate(lambda idx, colour: np.linalg.norm(colour - mean[idx], axis=1)
-                                  <= np.maximum(20.0, 1.2 * spread[idx]))
+            plain_sum += np.bincount(idx, weights=weight, minlength=n)
+        spread = np.sqrt(dev_sum / np.maximum(plain_sum, 1e-12))
+        seen2, wsum2, csum2 = accumulate(lambda idx, colour: np.linalg.norm(colour - mean[idx], axis=1)
+                                         <= np.maximum(20.0, 1.2 * spread[idx]))
         shape = (surface.rows, surface.cols)
-        results.append(((csum2 / np.maximum(wsum2, 1e-12)[:, None]).reshape(*shape, 3),
-                        (wsum2 / reference).reshape(shape), through[k].reshape(shape)))
+        results.append(((csum2 / np.maximum(wsum2, 1e-300)[:, None]).reshape(*shape, 3),
+                        (seen2 / reference).reshape(shape), through[k].reshape(shape)))
         log(f"  {surface.name} photo: {frames_used[k]} frames saw it")
     return results
 
