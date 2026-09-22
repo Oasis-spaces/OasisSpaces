@@ -278,6 +278,9 @@ def test_a_review_sheet_takes_any_number_of_pictures_in_a_row():
         assert Image.open(three).size == (3 * 50 + 10, 2 * (30 + 34) + 10)
         one = ms.sheet([("a", grey)], Path(folder) / "one.png", tile=(40, 30))
         assert Image.open(one).size == (50 + 10, 30 + 34 + 10)      # no empty half
+        named = ms.sheet([("a", grey)], Path(folder) / "named.png", tile=(40, 30), heading="Sheet 4 - sides")
+        assert Image.open(named).size == (50 + 10, 44 + 30 + 34 + 10)
+        assert np.asarray(Image.open(named))[5, 5].tolist() == [30, 30, 30]   # the heading bar
 
 
 if __name__ == "__main__":

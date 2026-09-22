@@ -636,17 +636,24 @@ def fit(image: np.ndarray, width: int, height: int) -> Image.Image:
     return picture
 
 
-def sheet(rows: list, out: Path, tile=(420, 300)) -> Path:
-    """rows of (title, image, image, ...) as one labelled picture."""
+def sheet(rows: list, out: Path, tile=(420, 300), heading: str | None = None) -> Path:
+    """rows of (title, image, image, ...) as one labelled picture. `heading`
+    names the sheet on the picture itself: the prompt refers to sheets by
+    number, and on one relayed review Claude received all six pictures yet
+    could not tell which was sheet 4, so the pictures say it."""
     from PIL import ImageDraw, ImageFont
 
     font = ImageFont.load_default(size=18)
     w, h = tile
     across = max([len(row) - 1 for row in rows] + [1])
-    page = Image.new("RGB", (across * (w + 10) + 10, max(1, len(rows)) * (h + 34) + 10), "white")
+    top = 44 if heading else 0
+    page = Image.new("RGB", (across * (w + 10) + 10, top + max(1, len(rows)) * (h + 34) + 10), "white")
     draw = ImageDraw.Draw(page)
+    if heading:
+        draw.rectangle([0, 0, page.width, top - 6], fill=(30, 30, 30))
+        draw.text((12, 8), heading.upper(), fill="white", font=ImageFont.load_default(size=24))
     for n, (title, *pictures) in enumerate(rows):
-        y = 10 + n * (h + 34)
+        y = top + 10 + n * (h + 34)
         draw.text((10, y), title, fill="black", font=font)
         for k, picture in enumerate(pictures):
             small = fit(picture, w, h)
@@ -914,10 +921,12 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     for surface, known, (photo, _s, _t), final in zip(surfaces, knowns, photos, finished):
         filmed = np.where(known[..., None], photo, np.array([255.0, 0, 200]))
         rows.append((f"{surface.name}   (filmed {known.mean():.0%} | finished)", upright(surface, filmed), upright(surface, final)))
-    surface_sheet = sheet(rows, out / "review-surfaces.png")
-    piece_sheet = sheet(piece_rows(room, arr, scene, masks, log), out / "review-pieces.png", tile=(480, 360))
+    surface_sheet = sheet(rows, out / "review-surfaces.png", heading="Sheet 1 - surfaces")
+    piece_sheet = sheet(piece_rows(room, arr, scene, masks, log), out / "review-pieces.png", tile=(480, 360),
+                        heading="Sheet 2 - pieces")
     layout = layout_row(room, arr, scene, masks, log)
-    layout_sheet = sheet(layout, out / "review-layout.png", tile=(760, 570)) if layout else None
+    layout_sheet = (sheet(layout, out / "review-layout.png", tile=(760, 570),
+                          heading="Sheet 3 - the room with every piece named") if layout else None)
     boxes = room.shapes["boxes"]
     # The faces filmed well enough, finished like the walls: what stood in front is continued.
     panels, rows = {}, []
@@ -937,7 +946,7 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
                         "asked": {"name": name, "filmed": float(known.mean()),
                                   "side": "top" if face.normal[2] else "side facing the room",
                                   "piece": f"{face_box(face)} {box.get('detected') or box.get('label')}"}}
-    face_sheet = sheet(rows, out / "review-faces.png") if rows else None
+    face_sheet = sheet(rows, out / "review-faces.png", heading="Sheet 4 - the models' photographed sides") if rows else None
     size_of = lambda b: " x ".join(f"{v:.1f}" for v in (np.array(b["max"]) - np.array(b["min"])) / m) + " m"
     asked = [{"id": ident, "label": boxes[int(ident[1:])].get("detected") or boxes[int(ident[1:])].get("label"),
               "size": size_of(boxes[int(ident[1:])])} for ident, mask in masks.items() if ident.startswith("B") and mask.sum()]
