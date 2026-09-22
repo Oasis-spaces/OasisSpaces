@@ -367,10 +367,12 @@ def solve_guided(space: Path, guide: Path, budget: int = GUIDED_VIEWS,
         return out
 
     placed = {n: into_colmap(p) for n, p in predicted.items()}
-    units = 1.0
+    # Metres: densify's measured scale, else MapAnything's own, since its poses are metric
+    # and the fit maps its metres onto COLMAP's units (walkthrough: 3.02 vs densify's 2.84).
+    units = scale
     meta = space / "densify.json"
     if meta.exists():
-        units = float(json.loads(meta.read_text()).get("colmap_units_per_metre") or 1.0)
+        units = float(json.loads(meta.read_text()).get("colmap_units_per_metre") or scale)
 
     def angle(a, b):
         return float(np.degrees(np.arccos(np.clip((np.trace(a[:3, :3].T @ b[:3, :3]) - 1) / 2, -1, 1))))
