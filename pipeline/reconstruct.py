@@ -280,6 +280,111 @@ def gpu_flags(subcommand: str, new_prefix: str, old_prefix: str) -> list[str]:
     return []
 
 
+PRIORS_FILE = "pose-priors.json"
+PRIOR_REPROJ_PX = 16      # first triangulation's limit: priors are centimetres off and lack the lens model
+
+
+def read_priors(workspace: Path) -> dict:
+    """workspace/pose-priors.json: a camera pose for every frame from somewhere
+    other than COLMAP's own mapper, and the camera's intrinsics.
+
+        {"source": "mapanything", "camera": {"width", "height", "fx", "fy", "cx", "cy"},
+         "frames": {"frame_00001.jpg": {"qvec": [w, x, y, z], "tvec": [x, y, z]}, ...},
+         "metric": true}
+
+    qvec/tvec are COLMAP's cam_from_world (world -> camera), the continuous
+    pixel convention (the top-left corner at 0), in metres when "metric".
+    Any pose source can write it: MapAnything (pipeline/mapanything_solve.py)
+    today, a phone's own tracking or a SLAM front end later."""
+    path = workspace / PRIORS_FILE
+    if not path.exists():
+        sys.exit(f"--mapper priors needs {path} (run pipeline/mapanything_solve.py first)")
+    priors = json.loads(path.read_text())
+    if not priors.get("frames"):
+        sys.exit(f"{path} holds no frames")
+    return priors
+
+
+def priors_match_frames(workspace: Path, images_dir: Path) -> bool:
+    """The frames on disk are the ones the pose priors were made from."""
+    path = workspace / PRIORS_FILE
+    if not path.exists() or not images_dir.is_dir():
+        return False
+    named = set(json.loads(path.read_text()).get("frames", {}))
+    return bool(named) and named <= {p.name for p in images_dir.glob("*.jpg")}
+
+
+def triangulate_priors(workspace: Path, images_dir: Path, database: Path, sparse_dir: Path,
+                       log: Path) -> None:
+    """COLMAP's own matches triangulated with the cameras held where the
+    priors put them, then one bundle adjustment.
+
+    The mapper is the step that breaks on a phone video of a room: after a
+    turn or along a plain wall it cannot register the next frames, and the
+    capture splits into pieces. With every camera already placed there is
+    nothing to register, so it cannot split; the triangulation still comes
+    from our own SIFT matches, so densify gets real multi-view tracks, and
+    the adjustment then tightens poses the priors only estimated."""
+    import sqlite3
+
+    priors = read_priors(workspace)
+    cam = priors["camera"]
+    with sqlite3.connect(database) as db:
+        rows = db.execute("SELECT image_id, name, camera_id FROM images").fetchall()
+    known = workspace / "sparse-priors"
+    shutil.rmtree(known, ignore_errors=True)
+    known.mkdir(parents=True)
+    camera_ids = sorted({camera_id for _, _, camera_id in rows})
+    if len(camera_ids) != 1:
+        sys.exit(f"expected one camera in {database}, found {len(camera_ids)}")
+    # OPENCV like every other solve here; distortion as the priors know it, else zero for
+    # the adjustment to find.
+    distortion = " ".join(str(float(cam.get(k, 0.0))) for k in ("k1", "k2", "p1", "p2"))
+    (known / "cameras.txt").write_text(
+        f"{camera_ids[0]} OPENCV {cam['width']} {cam['height']} "
+        f"{cam['fx']} {cam['fy']} {cam['cx']} {cam['cy']} {distortion}\n")
+    lines, placed = [], 0
+    for image_id, name, camera_id in sorted(rows):
+        pose = priors["frames"].get(name)
+        if pose is None:
+            continue
+        qw, qx, qy, qz = pose["qvec"]
+        tx, ty, tz = pose["tvec"]
+        lines += [f"{image_id} {qw} {qx} {qy} {qz} {tx} {ty} {tz} {camera_id} {name}", ""]
+        placed += 1
+    if placed < 2:
+        sys.exit(f"only {placed} of the database's frames have a prior pose")
+    (known / "images.txt").write_text("\n".join(lines) + "\n")
+    (known / "points3D.txt").write_text("")
+    print(f"COLMAP: triangulating with {placed} of {len(rows)} cameras placed by "
+          f"{priors.get('source', 'the priors')}")
+    model = sparse_dir / "0"
+    model.mkdir(parents=True, exist_ok=True)
+    # Two passes. Priors are close but not exact (a few centimetres, no lens
+    # distortion), and COLMAP's 4 px limits would throw most matches away
+    # against them: so first triangulate loosely and let one adjustment move
+    # the cameras and find the distortion, then triangulate again at COLMAP's
+    # own limits from the adjusted cameras, and adjust once more. Tracks seen
+    # in only two frames are kept: most matches of a walked video are between
+    # neighbouring frames.
+    triangulate = ["colmap", "point_triangulator", "--database_path", str(database),
+                   "--image_path", str(images_dir), "--output_path", str(model),
+                   "--refine_intrinsics", "0", "--Mapper.tri_ignore_two_view_tracks", "0"]
+    loose = [f"--Mapper.{k}" for k in ("filter_max_reproj_error", "tri_merge_max_reproj_error",
+                                       "tri_complete_max_reproj_error")]
+    adjust = ["colmap", "bundle_adjuster", "--input_path", str(model), "--output_path", str(model),
+              "--BundleAdjustment.refine_focal_length", "1",
+              "--BundleAdjustment.refine_principal_point", "0",
+              "--BundleAdjustment.refine_extra_params", "1"]
+    print(f"COLMAP: triangulating loosely ({PRIOR_REPROJ_PX:g} px) around the priors, then adjusting")
+    run([*triangulate, "--input_path", str(known),
+         *[arg for flag in loose for arg in (flag, str(PRIOR_REPROJ_PX))]], log)
+    run(adjust, log)
+    print("COLMAP: triangulating again at COLMAP's own limits, then adjusting")
+    run([*triangulate, "--input_path", str(model), "--clear_points", "1"], log)
+    run(adjust, log)
+
+
 def sparse_reconstruction(
     workspace: Path, images_dir: Path, sequential: bool, mapper: str,
     features: str, log: Path
@@ -314,6 +419,8 @@ def sparse_reconstruction(
     mapping_args = ["--database_path", str(database),
                     "--image_path", str(images_dir),
                     "--output_path", str(sparse_dir)]
+    if mapper == "priors":
+        triangulate_priors(workspace, images_dir, database, sparse_dir, log)
     if mapper == "global":
         rejected = workspace / "sparse-global-rejected"
         shutil.rmtree(rejected, ignore_errors=True)
@@ -461,10 +568,16 @@ def main() -> None:
                         help="feature type: COLMAP's SIFT, or learned ALIKED + "
                              "LightGlue (slower on a CPU-only build, better on "
                              "low-texture walls)")
-    parser.add_argument("--mapper", choices=["global", "incremental"],
+    parser.add_argument("--mapper", choices=["global", "incremental", "priors"],
                         default="global",
                         help="COLMAP mapper (default global; incremental is "
-                             "the pre-4.0 behaviour)")
+                             "the pre-4.0 behaviour; priors triangulates with the "
+                             "cameras workspace/pose-priors.json places, e.g. from "
+                             "pipeline/mapanything_solve.py)")
+    parser.add_argument("--frames-only", action="store_true",
+                        help="extract the frames and stop: a pose source such as "
+                             "pipeline/mapanything_solve.py then places them, and a "
+                             "--mapper priors run triangulates")
     parser.add_argument("--dense", action="store_true",
                         help="attempt CUDA dense reconstruction after SfM")
     parser.add_argument("--voxel", type=float, default=None,
@@ -484,11 +597,17 @@ def main() -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     log = workspace / "colmap.log"
 
+    # The priors were made from the frames already here (pose-priors.json names
+    # them), so a priors run keeps those frames rather than extracting new ones.
+    keep_frames = args.mapper == "priors" and priors_match_frames(workspace, images_dir)
+    if args.frames_only and keep_frames:
+        keep_frames = False                  # asked for fresh frames: the priors go stale
     # A rerun must not mix with stale state: features/models/frames from a
     # previous attempt (or a different --fps / source) would corrupt the
     # solve. Wipe everything derived, including old frames.
     for stale in [workspace / "database.db", workspace / "sparse",
-                  workspace / "sparse-global-rejected", workspace / "dense", images_dir,
+                  workspace / "sparse-global-rejected", workspace / "dense",
+                  *([] if keep_frames else [images_dir]),
                   *workspace.glob("model_*.ply"), workspace / "sparse.ply",
                   workspace / "dropped-frames.json", *workspace.glob("dropped-frames-*.txt")]:
         if stale.is_dir():
@@ -496,8 +615,12 @@ def main() -> None:
         elif stale.exists():
             stale.unlink()
 
+    if not keep_frames:                      # new frames: priors made from the old ones no longer apply
+        (workspace / PRIORS_FILE).unlink(missing_ok=True)
     is_video = source.is_file() and source.suffix.lower() in VIDEO_EXTENSIONS
-    if is_video:
+    if keep_frames:
+        print(f"Keeping the {sum(1 for _ in images_dir.glob('*.jpg'))} frames the pose priors were made from")
+    elif is_video:
         require_binary("ffmpeg", "brew install ffmpeg")
         extract_frames(source, images_dir, args.fps, log)
     elif source.is_dir():
@@ -510,9 +633,15 @@ def main() -> None:
         print(f"Using {count} images from {source}")
     else:
         sys.exit(f"{source} is neither an image folder nor a video file")
+    if args.frames_only:
+        print(f"frames in {images_dir}; place them (pipeline/mapanything_solve.py spaces/{args.name}), "
+              f"then run again with --mapper priors")
+        return
 
+    # Placed frames are a walk's frames in order: each needs matching only to its
+    # neighbours (all 186 frames against each other took over an hour on a T4).
     sparse_ply, best_model = sparse_reconstruction(
-        workspace, images_dir, sequential=is_video, mapper=args.mapper,
+        workspace, images_dir, sequential=is_video or args.mapper == "priors", mapper=args.mapper,
         features=args.features, log=log
     )
 
