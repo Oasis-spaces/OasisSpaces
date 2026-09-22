@@ -68,6 +68,18 @@ def test_the_scale_is_guessed_from_how_high_the_phone_was_held():
     assert abs(cm.units_from_height(poses, np.vstack([floor, walls]), up) - units) < 0.05 * units
 
 
+def test_a_stale_recorded_scale_loses_to_the_phones_height():
+    rng = np.random.default_rng(5)
+    units = 2.8
+    points = np.vstack([rng.uniform([-2, -2, 0], [2, 2, 0.01], (3000, 3)),
+                        rng.uniform([-2, -2, 0], [2, 2, 2.6], (3000, 3))]) * units
+    poses = np.stack([camera(np.array([x, 0, 1.4]) * units, [1, 0.1 * x, -0.3]) for x in np.linspace(-1, 1, 9)])
+    up = np.array([0, 0, 1.0])
+    guessed = cm.units_from_height(poses, points, up)
+    assert 1 / cm.SCALE_DISAGREEMENT < units / guessed < cm.SCALE_DISAGREEMENT      # a real scale is believed
+    assert not 1 / cm.SCALE_DISAGREEMENT < 1.0 / guessed < cm.SCALE_DISAGREEMENT    # 1.0, the stale record, is not
+
+
 def test_the_floor_is_the_hull_of_an_open_ring_of_walls():
     walls = np.zeros((40, 40), bool)
     walls[5, 5:35] = walls[34, 5:35] = walls[5:35, 5] = True        # three walls; the fourth side open

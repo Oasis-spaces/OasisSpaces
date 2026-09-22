@@ -39,6 +39,7 @@ WELL_SEEN = 3              # frames that make a part of the floor well covered
 SECTORS = 12               # the compass of directions faced
 PX_PER_M = 120             # plan scale
 HANDHELD_HEIGHT_M = 1.4    # a phone filming a room is held about this high: the scale before densify measures it
+SCALE_DISAGREEMENT = 2     # a recorded scale further than this factor from the phone's height is not believed
 
 
 def read_ply_points(path: Path):
@@ -66,7 +67,7 @@ def load_mapanything(space: Path):
     K = views["intrinsics"]
     width, height = (int(v) for v in views["frame_size"])
     points, colours = read_ply_points(folder / "points.ply")
-    return names, cam2world, K, (width, height), points, colours, 1.0, "MapAnything"
+    return names, cam2world, K, (width, height), points, colours, 1.0, "its own metric depth", "MapAnything"
 
 
 def load_colmap(space: Path, dense: bool = True, units_override: float | None = None):
@@ -96,11 +97,23 @@ def load_colmap(space: Path, dense: bool = True, units_override: float | None = 
         pts = read_points3d_bin(model / "points3D.bin")
         points = np.array([v[:3] for v in pts.values()], float)
         colours = np.full((len(points), 3), 170.0)
+    # The scale, best source first: densify measured it; else MapAnything, whose poses are
+    # metric, fitted onto this solve in stage 1; else build() guesses from the phone's height.
     meta = space / "densify.json"
     units = json.loads(meta.read_text()).get("colmap_units_per_metre") if meta.exists() else None
-    units = units_override or units              # None: not measured yet (build estimates it)
+    note = "densify's measurement" if units else None
+    guided = space / "workspace" / "mapanything" / "guided.json"
+    if not units and guided.exists():
+        # fit_scale, not units_per_metre: the fit maps MapAnything's metres onto this solve,
+        # while units_per_metre is what that run reported in, which is 1.0 in records written
+        # before the metric fallback (commit 07e218a).
+        record = json.loads(guided.read_text())
+        units = record.get("fit_scale") or record.get("units_per_metre")
+        note = "MapAnything's metric poses, fitted onto this solve" if units else None
+    if units_override:
+        units, note = units_override, "the scale given here"
     return ([i["name"] for i in infos], np.stack(cam2world), np.stack(K),
-            (camera["width"], camera["height"]), points, colours, units, "COLMAP")
+            (camera["width"], camera["height"]), points, colours, units, note, "COLMAP")
 
 
 def units_from_height(cam2world: np.ndarray, points: np.ndarray, up: np.ndarray) -> float:
@@ -193,11 +206,15 @@ def floor_coverage(cells_xyz: np.ndarray, cam2world: np.ndarray, K: np.ndarray, 
 def build(space: Path, source: str = "auto", log=print, points_from: str = "dense", out: Path | None = None,
           units: float | None = None) -> dict:
     use_ma = source == "mapanything" or (source == "auto" and (space / "workspace" / "mapanything" / "views.npz").exists())
-    names, cam2world, K, size, points, colours, units, where = (
+    names, cam2world, K, size, points, colours, units, note, where = (
         load_mapanything(space) if use_ma else load_colmap(space, dense=points_from == "dense", units_override=units))
     up, right, forward = room_frame(cam2world, points)
+    guessed = units_from_height(cam2world, points, up)
+    if units and not 1 / SCALE_DISAGREEMENT < units / guessed < SCALE_DISAGREEMENT:
+        # A recorded scale this far from the phone's own height is not believable.
+        units, note = None, None
     if units:
-        scale_from = "MapAnything's metric depth" if use_ma else "densify's measurement"
+        scale_from = note or "the solve"
     else:
         units, scale_from = units_from_height(cam2world, points, up), f"the phone held {HANDHELD_HEIGHT_M} m up (guessed)"
     m = units                                            # solve units per metre
