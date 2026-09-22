@@ -58,6 +58,16 @@ def test_a_cell_behind_the_camera_is_not_seen():
     assert seen.tolist() == [0]
 
 
+def test_the_scale_is_guessed_from_how_high_the_phone_was_held():
+    rng = np.random.default_rng(4)
+    units = 2.8                                                      # solve units per metre
+    floor = rng.uniform([-2, -2, 0], [2, 2, 0.01], (4000, 3)) * units
+    walls = rng.uniform([-2, -2, 0], [2, 2, 2.6], (4000, 3)) * units
+    poses = np.stack([camera(np.array([x, 0, 1.4]) * units, [1, 0.2 * x, -0.3]) for x in np.linspace(-1, 1, 9)])
+    up = np.array([0, 0, 1.0])
+    assert abs(cm.units_from_height(poses, np.vstack([floor, walls]), up) - units) < 0.05 * units
+
+
 def test_the_floor_is_the_hull_of_an_open_ring_of_walls():
     walls = np.zeros((40, 40), bool)
     walls[5, 5:35] = walls[34, 5:35] = walls[5:35, 5] = True        # three walls; the fourth side open

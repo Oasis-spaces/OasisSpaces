@@ -65,7 +65,7 @@ SPLAT_STEPS = STEPS[3:]
 # The notebook install cells each step needs. OpenSplat links OpenCV, which the
 # COLMAP cell installs, so training needs that cell too.
 NEEDS = {
-    "reconstruct": ["install-colmap", "install-python"],
+    "reconstruct": ["install-colmap", "install-python", "install-mapanything"],   # MapAnything fills COLMAP's gaps
     "densify": ["install-python"],
     "shapes": ["install-python", "install-blender"],
     "train-quick": ["install-colmap", "install-python", "install-opensplat"],
@@ -82,7 +82,7 @@ REMOTE_VIDEOS = "/content/videos"
 REMOTE_WORK = "/content/oasis-run"
 RELAY = "/content/claude-relay"
 PART_BYTES = 20 * 1024 * 1024
-INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat"]
+INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat", "install-mapanything"]
 # What the notebook's helper cell sets before running the agent.
 REMOTE_ENV = {
     "BLENDER": "/opt/blender/blender",

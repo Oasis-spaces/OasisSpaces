@@ -38,6 +38,7 @@ SEEN_RANGE_M = 5.0         # a floor cell counts as seen by a camera within this
 WELL_SEEN = 3              # frames that make a part of the floor well covered
 SECTORS = 12               # the compass of directions faced
 PX_PER_M = 120             # plan scale
+HANDHELD_HEIGHT_M = 1.4    # a phone filming a room is held about this high: the scale before densify measures it
 
 
 def read_ply_points(path: Path):
@@ -96,10 +97,20 @@ def load_colmap(space: Path, dense: bool = True, units_override: float | None = 
         points = np.array([v[:3] for v in pts.values()], float)
         colours = np.full((len(points), 3), 170.0)
     meta = space / "densify.json"
-    units = json.loads(meta.read_text()).get("colmap_units_per_metre", 1.0) if meta.exists() else 1.0
-    units = units_override or units
+    units = json.loads(meta.read_text()).get("colmap_units_per_metre") if meta.exists() else None
+    units = units_override or units              # None: not measured yet (build estimates it)
     return ([i["name"] for i in infos], np.stack(cam2world), np.stack(K),
-            (camera["width"], camera["height"]), points, colours, float(units or 1.0), "COLMAP")
+            (camera["width"], camera["height"]), points, colours, units, "COLMAP")
+
+
+def units_from_height(cam2world: np.ndarray, points: np.ndarray, up: np.ndarray) -> float:
+    """Solve units per metre, guessed from how high the phone was held: the
+    median camera above the floor (the low end of the measured points) is
+    taken as HANDHELD_HEIGHT_M. Good to a few tens of percent, which is enough
+    to read a coverage map before densify has measured the scale."""
+    floor = np.percentile(points @ up, 2)
+    above = np.median(cam2world[:, :3, 3] @ up) - floor
+    return float(above / HANDHELD_HEIGHT_M) if above > 0 else 1.0
 
 
 def room_frame(cam2world: np.ndarray, points: np.ndarray):
@@ -184,8 +195,12 @@ def build(space: Path, source: str = "auto", log=print, points_from: str = "dens
     use_ma = source == "mapanything" or (source == "auto" and (space / "workspace" / "mapanything" / "views.npz").exists())
     names, cam2world, K, size, points, colours, units, where = (
         load_mapanything(space) if use_ma else load_colmap(space, dense=points_from == "dense", units_override=units))
-    m = units                                            # solve units per metre
     up, right, forward = room_frame(cam2world, points)
+    if units:
+        scale_from = "MapAnything's metric depth" if use_ma else "densify's measurement"
+    else:
+        units, scale_from = units_from_height(cam2world, points, up), f"the phone held {HANDHELD_HEIGHT_M} m up (guessed)"
+    m = units                                            # solve units per metre
     heights = points @ up
     floor, ceiling = np.percentile(heights, 2), np.percentile(heights, 98)
     plan = np.stack([points @ right, points @ forward], axis=1)
@@ -299,7 +314,9 @@ def build(space: Path, source: str = "auto", log=print, points_from: str = "dens
         "floor_never_seen": round(float(unseen.sum()) / max(1, inside.sum()), 3),
         "directions_faced": f"{int((sectors > 0).sum())} of {SECTORS}",
         "directions_never_faced_deg": [int(-180 + 360 * k / SECTORS) for k in range(SECTORS) if sectors[k] == 0],
+        "scale_from": scale_from,
     }
+    draw.text((W + 20, 342), f"scale from {scale_from}", fill=(90, 90, 90), font=small)
     draw.text((W + 20, 360), f"{record['footprint_m2']} sq m room, {record['height_m']} m high", fill=(30, 30, 30), font=small)
     draw.text((W + 20, 378), f"{record['frames']} frames over a {record['path_m']} m walk ({where})", fill=(30, 30, 30), font=small)
     draw.text((W + 20, 396), f"floor well seen {record['floor_well_seen']:.0%}, never {record['floor_never_seen']:.0%}", fill=(30, 30, 30), font=small)

@@ -55,7 +55,7 @@ from semantics import MAX_OBJECTS, ROLES, Vocabulary, clean_name, room_vocabular
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
 from pointcloud import space_model_dir  # noqa: E402
 from reconstruct import (  # noqa: E402
-    camera_path_jump, registered_images, solved_models,
+    MAX_PATH_JUMP, camera_path_jump, mean_reprojection, registered_images, solved_models,
 )
 
 STAGES = ["reconstruct", "densify", "shapes", "splat"]
@@ -74,6 +74,8 @@ OPENSPLAT = os.environ.get("OPENSPLAT") or str(ROOT / "tools/opensplat")
 # A capture is in good shape when most frames land in one model; below the
 # partial mark, later stages would only rebuild a fragment of the room.
 MIN_REGISTERED_FRACTION = 0.60
+GAP_MIN_FRAMES = 3               # this many frames left out of the main model are worth placing with MapAnything
+GAP_REPROJ_SLACK_PX = 0.3        # the joined solve may be this much looser than COLMAP's own
 PARTIAL_REGISTERED_FRACTION = 0.35
 # Keyframes of a sound model agree on metric scale within ~6%; past the good
 # mark the result is questionable, past the max the cameras are inconsistent.
@@ -245,6 +247,37 @@ def problem_text(problem) -> str:
     if isinstance(problem, dict):
         return f"{problem.get('what', '?')} ({problem.get('severity', 'unrated')})"
     return str(problem)
+
+
+def keep_filled(before: dict, after: dict | None) -> tuple[bool, str]:
+    """Is the solve with the lost frames placed better than COLMAP's own?
+    More frames in one model, no looser than COLMAP's (reprojection within
+    GAP_REPROJ_SLACK_PX), and no camera leaping across the room between two
+    frames (reconstruct.MAX_PATH_JUMP)."""
+    if not after or not after.get("frames"):
+        return False, "the joined solve did not come out"
+    if after["frames"] <= before["frames"]:
+        return False, f"it placed {after['frames']} frames, not more than COLMAP's {before['frames']}"
+    if after.get("models", 1) > 1 and after["frames"] < before["total"] * 0.95:
+        return False, f"it is still {after['models']} pieces"
+    if (before.get("reprojection") is not None and after.get("reprojection") is not None
+            and after["reprojection"] > before["reprojection"] + GAP_REPROJ_SLACK_PX):
+        return False, (f"its reprojection error is {after['reprojection']:.2f} px against COLMAP's "
+                       f"{before['reprojection']:.2f}")
+    if (after.get("path_jump") or 0) > MAX_PATH_JUMP:
+        return False, f"a camera leaps {after['path_jump']:.2f}x the scene's size between two frames"
+    return True, (f"{after['frames']} of {after['total']} frames in one model against COLMAP's "
+                  f"{before['frames']}, reprojection {after.get('reprojection') or 0:.2f} px against "
+                  f"{before.get('reprojection') or 0:.2f}")
+
+
+WALK_PROMPT = """Two maps of the same phone video of a room, each drawn from a camera solve. Both show the room from above: the measured points in their colours, the floor shaded by how often it was seen, and the walk from start (green) to end (red) with a tick where the camera looked.
+
+Map 1 is COLMAP's own solve: it could place {before} of the video's {total} frames in one piece. Map 2 adds the frames it lost, placed by MapAnything from COLMAP's cameras and then triangulated and adjusted together with them: {after} frames. Numbers: {facts}.
+
+The measurements say map 2 is at least as tight as map 1. What they cannot see is whether the frames it added are in the right place. Judge the walk: a person walked through this room once with a phone, so the path should be one continuous, unhurried line with no teleports, no loops through furniture or walls, no stretch that doubles back on itself for no reason, and the added part should continue the walk where map 1's ends or has a gap. The room itself should keep its shape.
+
+Reply as JSON: {{"keep": true if map 2 is a plausible walk and room, false if the added frames are clearly misplaced, "why": "one or two sentences on what you saw"}}"""
 
 
 class Agent:
@@ -479,12 +512,120 @@ class Agent:
             "never joins pieces that do not belong together.\n"
             'Fields: {"action": string, "why": one short sentence, '
             '"capture_problems": array of short phrases}')
-        verdict = self.advisor.ask_json(prompt, self.sample_frames(3))
+        drawn = self.safe(self.draw_capture_map)
+        images = self.sample_frames(3) + ([self.space / "capture-map.png"] if drawn else [])
+        if drawn:
+            prompt += ("\nThe last image is a map of the solve from above: the walk, the floor shaded by how "
+                       "often it was seen (red never), and a compass of the directions the camera faced.")
+        verdict = self.advisor.ask_json(prompt, images)
         if verdict:
             problems = ", ".join(verdict.get("capture_problems") or [])
             self.judged("reconstruct", verdict,
                         f"{verdict.get('action')} - {verdict.get('why', '')}"
                         + (f" [{problems}]" if problems else ""))
+        return verdict
+
+    def draw_capture_map(self, out: Path | None = None) -> dict:
+        """capture-map.png/json from the current solve (tools/capture_map.py):
+        the dense cloud once densify has run, else the solve's own points, and
+        the scale measured or, before densify, guessed from the phone's height."""
+        from capture_map import build
+
+        dense = (self.space / "cloud-dense.ply").exists()
+        record = build(self.space, source="colmap", points_from="dense" if dense else "sparse",
+                       out=out, log=lambda text: print("    " + text))
+        return record
+
+    def mapanything_ready(self) -> bool:
+        import importlib.util
+
+        return self.cuda and importlib.util.find_spec("mapanything") is not None
+
+    def fill_gaps(self) -> None:
+        """Place the frames COLMAP could not, and join its pieces into one.
+
+        COLMAP's global mapper places most of a walked video precisely and
+        loses the frames around a sharp turn or along a plain wall, or splits
+        the walk in two. MapAnything, given COLMAP's lens and the cameras
+        COLMAP did place, places the rest in the same frame
+        (pipeline/mapanything_solve.py --guide); COLMAP then triangulates its
+        own matches around all of them and adjusts (reconstruct.py --mapper
+        priors). Kept only if it measures better (keep_filled) and Claude,
+        comparing the two walks, sees nothing misplaced. Measured on the
+        walkthrough (Sep 2026): 183 of 186 frames in one model against
+        167 + a 14-frame piece, 70,286 points against 38,757, 0.78 px against
+        0.87."""
+        first = self.reconstruction_metrics()
+        lost = first["total"] - first["frames"]
+        if lost < GAP_MIN_FRAMES and first["models"] <= 1:
+            return
+        if not self.mapanything_ready():
+            self.decide("reconstruct", "skip",
+                        f"{lost} of {first['total']} frames are not in the main model ({first['models']} "
+                        "piece(s)); placing them with MapAnything needs a CUDA GPU with map-anything "
+                        "(stage 1 on Colab has both)")
+            return
+        workspace = self.space / "workspace"
+        best = max(solved_models(workspace / "sparse"), key=lambda m: (m / "points3D.bin").stat().st_size)
+        first["reprojection"] = mean_reprojection(best)
+        # COLMAP's solve, kept to go back to; its main model also guides MapAnything.
+        kept = self.space / "workspace-colmap"
+        shutil.rmtree(kept, ignore_errors=True)
+        kept.mkdir()
+        for name in ("sparse", "dropped-frames.json"):
+            if (workspace / name).is_dir():
+                shutil.copytree(workspace / name, kept / name)
+            elif (workspace / name).exists():
+                shutil.copy2(workspace / name, kept / name)
+        if (self.space / "cloud.ply").exists():
+            shutil.copy2(self.space / "cloud.ply", kept / "cloud.ply")
+        guide = kept / "sparse" / best.name
+        self.safe(self.draw_capture_map, self.space / "capture-map-colmap")
+        started = time.time()
+        ok, _ = self.run([sys.executable, str(ROOT / "pipeline/mapanything_solve.py"), str(self.space),
+                          "--guide", str(guide)], "reconstruct", f"MapAnything places the {lost} frames COLMAP lost")
+        if ok:
+            ok, _ = self.run([sys.executable, str(ROOT / "pipeline/reconstruct.py"), str(self.source),
+                              "--name", self.name, "--fps", str(self.fps), "--mapper", "priors"],
+                             "reconstruct", "COLMAP triangulates around its cameras and MapAnything's")
+        after = self.reconstruction_metrics() if ok else None
+        if after and after.get("frames"):
+            joined = max(solved_models(workspace / "sparse"), key=lambda m: (m / "points3D.bin").stat().st_size)
+            after["reprojection"] = mean_reprojection(joined)
+        keep, why = keep_filled(first, after)
+        if keep:
+            self.safe(self.draw_capture_map)
+            verdict = self.safe(self.walk_verdict, first, after, why)
+            if verdict and verdict.get("keep") is False:
+                keep, why = False, f"Claude: {verdict.get('why', 'the added frames look misplaced')}"
+        seconds = round(time.time() - started, 1)
+        if keep:
+            self.decide("reconstruct", "accept", f"frames COLMAP lost placed with MapAnything: {why}", after, seconds)
+            shutil.rmtree(kept, ignore_errors=True)
+            return
+        self.decide("reconstruct", "revert", f"keeping COLMAP's own solve: {why}", after, seconds)
+        for name in ("sparse", "dropped-frames.json"):
+            target = workspace / name
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+            if (kept / name).exists():
+                shutil.move(str(kept / name), str(target))
+        if (kept / "cloud.ply").exists():
+            shutil.move(str(kept / "cloud.ply"), str(self.space / "cloud.ply"))
+        shutil.rmtree(kept, ignore_errors=True)
+
+    def walk_verdict(self, before: dict, after: dict, facts: str) -> dict | None:
+        """Claude compares the walk of COLMAP's solve with the joined one."""
+        maps = [self.space / "capture-map-colmap.png", self.space / "capture-map.png"]
+        if not self.advisor.available or not all(m.exists() for m in maps):
+            return None
+        verdict = self.advisor.ask_json(WALK_PROMPT.format(before=before["frames"], total=before["total"],
+                                                           after=after["frames"], facts=facts), maps)
+        if verdict:
+            self.judged("reconstruct", {"walk_keep": verdict.get("keep"), "why": verdict.get("why")},
+                        f"{'keep' if verdict.get('keep') else 'revert'} the joined walk - {verdict.get('why', '')}")
         return verdict
 
     def name_objects(self) -> None:
@@ -925,6 +1066,16 @@ class Agent:
 
     # ----------------------------------------------------------------- steps
     def step_reconstruct(self) -> bool:
+        """Stage 1: COLMAP places the cameras; frames it could not place are
+        then placed with MapAnything where a GPU allows (fill_gaps); a map of
+        what the capture covered is drawn from the result."""
+        if not self.solve_with_colmap():
+            return False
+        self.safe(self.fill_gaps)
+        self.safe(self.draw_capture_map)
+        return True
+
+    def solve_with_colmap(self) -> bool:
         started = time.time()
         ok, _ = self.run(
             [sys.executable, str(ROOT / "pipeline/reconstruct.py"), str(self.source),
@@ -1043,6 +1194,8 @@ class Agent:
                     f"1 m = {metrics.get('colmap_units_per_metre', float('nan')):.3f} units, "
                     f"keyframes agree within {metrics.get('scale_spread', 0):.0%}, "
                     f"{metrics.get('points', 0):,} points", metrics)
+        # The capture map again, now from the dense cloud and in measured metres.
+        self.safe(self.draw_capture_map)
         return True
 
     def step_shapes(self) -> bool:

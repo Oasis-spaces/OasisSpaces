@@ -96,6 +96,35 @@ fallback if the global mapper fails. The log lists each model with how many
 frames it registered. `densify.py` adds a second check: it warns when
 keyframes disagree on metric scale by more than 30%.
 
+**Frames COLMAP could not place.** The global mapper places most of a walked
+video precisely and loses the frames around a sharp turn or along a plain wall,
+or splits the walk in two (the walkthrough: 167 of 186 frames in one piece, 14
+in a second, 5 in neither). Stage 1 then places the rest with
+[MapAnything](https://github.com/facebookresearch/map-anything) (the Apache-2.0
+checkpoint, on a GPU): `pipeline/mapanything_solve.py --guide` gives it COLMAP's
+lens for every frame and COLMAP's cameras for the frames COLMAP placed, and it
+places only the others, in the same frame; `reconstruct.py --mapper priors` then
+triangulates COLMAP's own matches around all the cameras and adjusts them
+together (loosely first, 16 px, then at COLMAP's limits). The joined solve is
+kept only if it puts more frames in one model, is no looser (reprojection within
+0.3 px), has no camera leaping across the room, and Claude, comparing the two
+walks on their capture maps, sees nothing misplaced; otherwise COLMAP's own
+solve stays. On the walkthrough: 183 of 186 frames in one model, 70,286 points
+against 38,757, 0.78 px against 0.87. Given nothing but the frames, MapAnything
+alone put the cameras 1.6 m from COLMAP's; guided, the frames it was asked to
+place without their poses landed 13 cm off, which the adjustment then corrects.
+Without a CUDA GPU (a Mac) the gap is recorded and left. Any pose source can
+feed `--mapper priors` through `workspace/pose-priors.json` (a phone's own
+tracking, a SLAM front end).
+
+**The capture map** (`tools/capture_map.py`, `capture-map.png`) is drawn after
+stage 1 and again after densify: the room from above, the walk from start to
+end, the floor shaded by how many frames saw it (a per-frame depth buffer of the
+measured points stands in for what blocks the view), and a compass of the
+directions the camera faced. Before densify the scale is guessed from the
+phone's height (1.4 m); after, it is measured. Claude sees it when it decides
+how to retry a weak solve.
+
 `--dense` runs COLMAP's dense multi-view stereo after SfM for a far denser
 cloud, but that step needs CUDA — on a Mac it is skipped with a note. The
 sparse cloud is usually plenty to see and edit the space; for dense results,
@@ -561,9 +590,8 @@ to 2.5.2. If you recreate the environment, make sure `numpy >= 2.3`.
 
 ## Where this can go next
 
-- **Harder captures**: when even the global mapper splits a capture, solve
-  poses on Colab with MP-SfM or MapAnything (Apache weights), or log ARKit
-  poses at capture time.
+- **Harder captures**: log ARKit poses at capture time and feed them to
+  `--mapper priors`; LichtFeld Studio's SLAM front end, once released, the same way.
 - **Better walls in splats**: train on Colab with depth and normal priors
   (gsplat / DN-Splatter / PlanarGS) and exposure compensation (PPISP).
 - **Learned structure**: PlanarSplatting for planes, SpatialLM for doors,

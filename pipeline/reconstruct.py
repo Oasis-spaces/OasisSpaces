@@ -89,6 +89,19 @@ def solved_models(sparse_dir: Path) -> list[Path]:
     return sorted(d for d in sparse_dir.iterdir() if (d / "images.bin").exists())
 
 
+def mean_reprojection(model: Path) -> float | None:
+    """COLMAP's mean reprojection error of a model, in pixels."""
+    result = subprocess.run(["colmap", "model_analyzer", "--path", str(model)],
+                            capture_output=True, text=True)
+    for line in (result.stderr + result.stdout).splitlines():
+        if "Mean reprojection error" in line:
+            try:
+                return float(line.rsplit(":", 1)[1].strip().rstrip("px"))
+            except ValueError:
+                return None
+    return None
+
+
 def camera_path(model: Path):
     """Frames in video order: names, camera centres, frame numbers, and the
     scene's size (5-95 percentile extent of the points), or None when the
