@@ -70,6 +70,30 @@ def test_points_fuse_one_per_voxel():
     assert np.allclose(tint[np.argmax(counts)], [100, 50, 25])
 
 
+def test_a_similarity_is_recovered_from_matched_points():
+    from scipy.spatial.transform import Rotation
+
+    rng = np.random.default_rng(3)
+    src = rng.normal(size=(30, 3))
+    R = Rotation.from_euler("xyz", [20, -35, 70], degrees=True).as_matrix()
+    dst = 2.8 * (R @ src.T).T + [1.0, -2.0, 0.5]
+    scale, R2, t2 = ms.similarity(src, dst)
+    assert abs(scale - 2.8) < 1e-9 and np.allclose(R2, R) and np.allclose(t2, [1.0, -2.0, 0.5])
+
+
+def test_guided_views_hold_every_lost_frame_and_start_from_a_posed_one():
+    images = [Path(f"frame_{n:05d}.jpg") for n in range(1, 187)]
+    known = {p.name: None for p in images if not (112 <= int(p.stem[-5:]) <= 114 or int(p.stem[-5:]) >= 172)}
+    chosen, anchors, held = ms.pick_guided(images, known, budget=94, holdout_every=12)
+    names = {p.name for p in chosen}
+    lost = {p.name for p in images if p.name not in known}
+    assert lost <= names and held <= names and anchors <= names
+    assert not (lost & anchors) and not (held & anchors) and not (lost & held)
+    assert chosen[0].name in anchors
+    assert len(chosen) == 94                                          # the budget used, not exceeded
+    assert len(held) == len(range(6, len(known), 12))                 # one placed frame in twelve
+
+
 def test_a_priors_run_keeps_only_the_frames_the_priors_were_made_from():
     with tempfile.TemporaryDirectory() as folder:
         workspace = Path(folder)
@@ -82,6 +106,23 @@ def test_a_priors_run_keeps_only_the_frames_the_priors_were_made_from():
         assert reconstruct.priors_match_frames(workspace, images)
         (workspace / reconstruct.PRIORS_FILE).write_text(json.dumps({"frames": {"frame_00009.jpg": {}}}))
         assert not reconstruct.priors_match_frames(workspace, images)            # other frames
+
+
+def test_a_copied_densify_record_does_not_point_a_space_at_another_spaces_model():
+    import pointcloud
+
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        for name in ("a", "b"):
+            model = root / name / "workspace" / "sparse" / "0"
+            model.mkdir(parents=True)
+            (model / "images.bin").write_bytes(b"")
+            (model / "points3D.bin").write_bytes(b"")
+        record = json.dumps({"model_dir": str(root / "a" / "workspace" / "sparse" / "0")})
+        (root / "a" / "densify.json").write_text(record)
+        (root / "b" / "densify.json").write_text(record)                  # copied from a
+        assert pointcloud.space_model_dir(root / "a") == root / "a" / "workspace" / "sparse" / "0"
+        assert pointcloud.space_model_dir(root / "b") == root / "b" / "workspace" / "sparse" / "0"
 
 
 if __name__ == "__main__":

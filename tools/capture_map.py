@@ -68,7 +68,7 @@ def load_mapanything(space: Path):
     return names, cam2world, K, (width, height), points, colours, 1.0, "MapAnything"
 
 
-def load_colmap(space: Path):
+def load_colmap(space: Path, dense: bool = True, units_override: float | None = None):
     from densify import read_cameras_bin, read_images_bin, read_points3d_bin
     from pointcloud import space_model_dir
 
@@ -86,9 +86,9 @@ def load_colmap(space: Path):
         fx, fy, cx, cy = cameras[info["camera_id"]]["params"][:4]
         K.append(np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]]))
     camera = cameras[infos[0]["camera_id"]]
-    dense = space / "cloud-dense.ply"
-    if dense.exists():
-        points, colours = read_ply_points(dense)
+    cloud = space / "cloud-dense.ply"
+    if dense and cloud.exists():
+        points, colours = read_ply_points(cloud)
         pick = np.random.default_rng(0).choice(len(points), min(len(points), 800_000), replace=False)
         points, colours = points[pick], colours[pick]
     else:
@@ -97,6 +97,7 @@ def load_colmap(space: Path):
         colours = np.full((len(points), 3), 170.0)
     meta = space / "densify.json"
     units = json.loads(meta.read_text()).get("colmap_units_per_metre", 1.0) if meta.exists() else 1.0
+    units = units_override or units
     return ([i["name"] for i in infos], np.stack(cam2world), np.stack(K),
             (camera["width"], camera["height"]), points, colours, float(units or 1.0), "COLMAP")
 
@@ -178,9 +179,11 @@ def floor_coverage(cells_xyz: np.ndarray, cam2world: np.ndarray, K: np.ndarray, 
     return seen
 
 
-def build(space: Path, source: str = "auto", log=print) -> dict:
+def build(space: Path, source: str = "auto", log=print, points_from: str = "dense", out: Path | None = None,
+          units: float | None = None) -> dict:
     use_ma = source == "mapanything" or (source == "auto" and (space / "workspace" / "mapanything" / "views.npz").exists())
-    names, cam2world, K, size, points, colours, units, where = (load_mapanything if use_ma else load_colmap)(space)
+    names, cam2world, K, size, points, colours, units, where = (
+        load_mapanything(space) if use_ma else load_colmap(space, dense=points_from == "dense", units_override=units))
     m = units                                            # solve units per metre
     up, right, forward = room_frame(cam2world, points)
     heights = points @ up
@@ -300,10 +303,11 @@ def build(space: Path, source: str = "auto", log=print) -> dict:
     draw.text((W + 20, 360), f"{record['footprint_m2']} sq m room, {record['height_m']} m high", fill=(30, 30, 30), font=small)
     draw.text((W + 20, 378), f"{record['frames']} frames over a {record['path_m']} m walk ({where})", fill=(30, 30, 30), font=small)
     draw.text((W + 20, 396), f"floor well seen {record['floor_well_seen']:.0%}, never {record['floor_never_seen']:.0%}", fill=(30, 30, 30), font=small)
-    board.save(space / "capture-map.png")
-    (space / "capture-map.json").write_text(json.dumps(record, indent=1) + "\n")
+    out = out or space / "capture-map"
+    board.save(out.with_suffix(".png"))
+    out.with_suffix(".json").write_text(json.dumps(record, indent=1) + "\n")
     log(f"capture map: {record['footprint_m2']} m², floor well seen {record['floor_well_seen']:.0%}, "
-        f"never {record['floor_never_seen']:.0%}, {record['directions_faced']} directions faced -> {space / 'capture-map.png'}")
+        f"never {record['floor_never_seen']:.0%}, {record['directions_faced']} directions faced -> {out.with_suffix('.png')}")
     return record
 
 
@@ -311,8 +315,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("space", type=Path)
     parser.add_argument("--source", choices=["auto", "mapanything", "colmap"], default="auto")
+    parser.add_argument("--points", choices=["dense", "sparse"], default="dense",
+                        help="a COLMAP solve's dense cloud (when densify has run) or its own sparse points")
+    parser.add_argument("--out", type=Path, help="where to write (default <space>/capture-map.png)")
+    parser.add_argument("--units-per-metre", type=float,
+                        help="the solve's units per metre, when densify.json has not recorded it")
     args = parser.parse_args()
-    build(args.space.resolve(), args.source)
+    build(args.space.resolve(), args.source, points_from=args.points,
+          out=args.out.resolve().with_suffix("") if args.out else None, units=args.units_per_metre)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,11 @@ def space_model_dir(space: Path) -> Path | None:
     if meta.exists():
         recorded = json.loads(meta.read_text()).get("model_dir")
         if recorded:
-            candidates += [Path(recorded), sparse / Path(recorded).name]
+            # Only a path inside this space: a densify.json copied from another space
+            # records that space's model, which exists on the same machine.
+            if Path(recorded).resolve().is_relative_to(space.resolve()):
+                candidates.append(Path(recorded))
+            candidates.append(sparse / Path(recorded).name)
     if sparse.exists():
         candidates += sorted((d for d in sparse.iterdir() if (d / "points3D.bin").exists()),
                              key=lambda d: -(d / "points3D.bin").stat().st_size)
