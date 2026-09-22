@@ -124,16 +124,52 @@ def test_a_piece_file_is_32_bytes_a_gaussian_in_the_viewers_frame():
 
 def test_only_things_standing_on_a_piece_move_with_it():
     piece = lambda ident, anchor, lo, hi, movable=True: {"id": ident, "movable": movable, "anchor": anchor,
-                                                        "box": {"min": lo, "max": hi}}
+                                                        "label": ident, "box": {"min": lo, "max": hi}}
     bed = piece("B1", [0.4, 0, 0.0], [-0.9, 0, -1.1], [0.9, 0.6, 1.1])
     pillow = piece("B2", [0.3, 0, -0.8], [-0.25, 0.55, -0.2], [0.25, 0.75, 0.2])        # on the bed, above the floor
     cushion = piece("B3", [-0.25, 0, 1.3], [-0.25, 0.0, -0.2], [0.25, 0.5, 0.2])        # on the floor, beside the bed
     lamp = piece("B4", [0.5, 0, 0.5], [-0.1, 0.0, -0.1], [0.1, 1.5, 0.1])               # inside the footprint but from the floor
-    rest = piece("rest", [0, 0, 0], [-2, 0, -2], [2, 2.5, 2], movable=False)
+    rest = piece("rest", [0, 0, 0], [-2, 0, -2], [2, 2.4, 2], movable=False)
     pieces = [bed, pillow, cushion, lamp, rest]
-    ms.mark_stacked(pieces)
-    assert pillow.get("on") == "B1"
+    ms.mark_stacked(pieces, None, log=lambda *_: None)                                  # geometry alone
+    assert pillow["on"] == "B1"
     assert "on" not in cushion and "on" not in lamp and "on" not in bed and "on" not in rest
+
+
+def test_claude_decides_what_rests_on_what_and_geometry_fills_the_gaps():
+    piece = lambda ident, anchor, lo, hi: {"id": ident, "movable": True, "anchor": anchor, "label": ident,
+                                           "box": {"min": lo, "max": hi}}
+    bed = piece("B1", [0.4, 0, 0.0], [-0.9, 0, -1.1], [0.9, 0.6, 1.1])
+    pillow = piece("B2", [0.3, 0, -0.8], [-0.25, 0.55, -0.2], [0.25, 0.75, 0.2])
+    chair = piece("B3", [0.2, 0, 0.5], [-0.25, 0.3, -0.25], [0.25, 0.9, 0.25])          # tucked under, geometry would say "on"
+    quiet = lambda *_: None
+
+    # Claude overrules geometry both ways: the chair stands on the floor, the pillow is carried.
+    pieces = [dict(bed), dict(pillow), dict(chair)]
+    ms.mark_stacked(pieces, {"B2": {"on": "B1", "why": "a pillow lying on the bed"},
+                             "B3": {"on": "floor", "why": "a chair pushed under the desk, on the floor"}}, quiet)
+    by = {p["id"]: p for p in pieces}
+    assert by["B2"]["on"] == "B1" and by["B2"]["onWhy"].startswith("a pillow")
+    assert "on" not in by["B3"]
+
+    # A piece Claude said nothing about still falls back to geometry.
+    pieces = [dict(bed), dict(pillow), dict(chair)]
+    ms.mark_stacked(pieces, {"B1": {"on": "floor"}}, quiet)
+    assert {p["id"]: p.get("on") for p in pieces} == {"B1": None, "B2": "B1", "B3": "B1"}
+
+    # Nothing may carry itself, directly or round a circle.
+    for circle in ({"B1": {"on": "B2"}, "B2": {"on": "B1"}}, {"B2": {"on": "B2"}},
+                   {"B1": {"on": "B2"}, "B2": {"on": "B3"}, "B3": {"on": "B1"}}):
+        pieces = [dict(bed), dict(pillow), dict(chair)]
+        ms.mark_stacked(pieces, circle, quiet)
+        carried = {p["id"]: p.get("on") for p in pieces if p.get("on")}
+        seen = set()
+        for start in carried:
+            at, hops = start, 0
+            while at in carried and hops <= len(pieces):
+                at, hops = carried[at], hops + 1
+            assert hops <= len(pieces), f"{circle} left a circle: {carried}"
+            seen.add(start)
 
 
 def test_a_box_inside_a_larger_one_goes_with_it():
@@ -240,6 +276,8 @@ def test_a_review_sheet_takes_any_number_of_pictures_in_a_row():
         from PIL import Image
         assert Image.open(two).size == (2 * 50 + 10, 30 + 34 + 10)
         assert Image.open(three).size == (3 * 50 + 10, 2 * (30 + 34) + 10)
+        one = ms.sheet([("a", grey)], Path(folder) / "one.png", tile=(40, 30))
+        assert Image.open(one).size == (50 + 10, 30 + 34 + 10)      # no empty half
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ STAGES = ["reconstruct", "densify", "shapes", "splat"]
 # belongs to, so re-running a later stage keeps the earlier stages' judgements.
 JUDGEMENT_STAGE = {"objects": "densify", "structure": "shapes", "blender": "shapes",
                    "start view": "splat", "fill": "splat", "choose": "splat",
-                   "splat training": "splat", "scene": "splat"}
+                   "splat training": "splat", "scene": "splat", "frames": "densify"}
 
 # Tools that live in different places per machine: set BLENDER / OPENSPLAT to
 # override (the Colab notebook installs both under /opt and /content).
@@ -120,6 +120,22 @@ MAX_GPU_IMAGE_CACHE_GB = 1.5
 
 # Before stage 2, Claude names what the room holds (see name_objects).
 OBJECT_NAMING_FRAMES = 10
+ROOM_FRAMES = 6                  # how many frames of the room itself Claude picks
+FRAME_CHOICES = 36               # candidates it picks them from
+FRAME_CHOICE_PROMPT = """You are choosing which frames of a phone video of a room the rest of a 3D pipeline will look at.
+
+The attached contact sheet holds {count} frames taken evenly across the video, each numbered in its corner. They are small here; the ones you choose are sent full size to every later question. Nothing later sees any frame you do not choose, so a thing shown in no chosen frame is invisible to the pipeline from now on.
+
+Choose for two purposes.
+
+"room": {room} frames that together show the room itself best: its walls, floor, corners and how it is laid out. Prefer frames looking into the room from far enough back that walls meet and the floor is visible, steady and sharp, well lit, with the camera roughly level. Avoid close-ups of one object, frames looking mostly at a wall, a floor or a ceiling, the corridor or another room, blurred frames, and frames where a hand, a door or a curtain covers most of the view. Spread them around the room rather than three of the same corner.
+
+"objects": {objects} frames that together show as much of the room's contents as possible: every piece of furniture, every storage unit, every mirror, window and screen, and any large loose clutter. Judge them as a set, not one by one: a frame earns its place by showing something the others do not. Closer frames are welcome here, and so is a frame that shows one important object well if nothing else shows it.
+
+A frame may serve both purposes. Where two frames show the same thing, keep the sharper, better lit one.
+
+Fields: {{"room": [numbers, best first], "objects": [numbers, best first], "why": one sentence on what the objects set covers}}"""
+
 OBJECT_NAMING_PROMPT = """You are preparing object detection for a 3D reconstruction of a room, filmed on a phone by an ordinary person. The {count} attached frames are spread across the whole video.
 
 Name every kind of thing in the room that the reconstruction needs to know about. An open-vocabulary detector (GroundingDINO) will search every keyframe for exactly your names, so anything you leave out is never found, and anything you name that is not there can mislabel something else. Each name's role tells the pipeline what to do with the points the detector labels.
@@ -252,6 +268,7 @@ class Agent:
         self.retrain = retrain
         self.splat_steps = splat_steps or list(SPLAT_STEPS)
         self.current_step: str | None = None   # the stage-4 step recording decisions
+        self.chosen: dict | None = None        # the frames Claude picked (choose_frames)
         self.allow_retry = allow_retry
         self.space = ROOT / "spaces" / name
         self.log_path = self.space / "agent.log"
@@ -275,10 +292,15 @@ class Agent:
         return [images[round(i * step)] for i in range(count)]
 
     def room_frames(self, count: int = 3) -> list[Path]:
-        """Frames whose cameras look most directly at the room's centre, spread
+        """Frames of the room: Claude's own picks (choose_frames), else the
+        ones whose cameras look most directly at the room's centre, spread
         across the capture. A video can start and end somewhere else (a pan
         from the corridor), so the first and last frames may not show the room."""
         import numpy as np
+
+        picked = self.picked_frames("room", count)
+        if picked:
+            return picked
 
         try:
             shapes = json.loads((self.space / "shapes.json").read_text())
@@ -316,6 +338,74 @@ class Agent:
             if len(chosen) == count:
                 break
         return [images / name for name in chosen] or self.sample_frames(count)
+
+    def contact_sheet(self, names: list[str], out: Path, across: int = 6, tile: int = 300) -> Path:
+        """The candidate frames as one numbered picture."""
+        from PIL import Image, ImageDraw, ImageFont
+
+        images = self.space / "workspace" / "images"
+        shots = [Image.open(images / name).convert("RGB") for name in names]
+        wide = max(s.width / s.height for s in shots) >= 1
+        cell = (tile, round(tile / 1.4)) if wide else (round(tile / 1.4), tile)
+        down = -(-len(shots) // across)
+        page = Image.new("RGB", (across * (cell[0] + 6) + 6, down * (cell[1] + 6) + 6), "white")
+        draw = ImageDraw.Draw(page)
+        font = ImageFont.load_default(size=22)
+        for n, shot in enumerate(shots):
+            shot.thumbnail(cell)
+            x, y = 6 + (n % across) * (cell[0] + 6), 6 + (n // across) * (cell[1] + 6)
+            page.paste(shot, (x, y))
+            draw.rectangle([x, y, x + 34, y + 26], fill=(0, 0, 0))
+            draw.text((x + 6, y + 3), str(n + 1), fill=(255, 210, 90), font=font)
+        page.save(out)
+        return out
+
+    def choose_frames(self) -> dict | None:
+        """Claude picks the frames every later question is asked with.
+
+        Which frames are sent decides what can be judged at all: an object in
+        no chosen frame cannot be named, and a room shown only from a corner
+        cannot be checked. A rule can only spread frames evenly or point them
+        at the room's middle, so the choice is Claude's, once, from a contact
+        sheet of the whole video; every later question then draws on it."""
+        images = sorted(p.name for p in (self.space / "workspace" / "images").glob("*.jpg"))
+        if not images:
+            return None
+        if not self.advisor.available:
+            return None
+        step = max(1, round(len(images) / FRAME_CHOICES))
+        candidates = images[::step][:FRAME_CHOICES]
+        sheet = self.contact_sheet(candidates, self.space / "frame-choices.png")
+        verdict = self.advisor.ask_json(
+            FRAME_CHOICE_PROMPT.format(count=len(candidates), room=ROOM_FRAMES, objects=OBJECT_NAMING_FRAMES),
+            [sheet], max_tokens=800)
+        if not verdict:
+            print("    claude (frames): no usable answer; frames are picked by the old rules")
+            return None
+        picked = {}
+        for purpose in ("room", "objects"):
+            numbers = [n for n in (verdict.get(purpose) or []) if isinstance(n, int) and 1 <= n <= len(candidates)]
+            picked[purpose] = [candidates[n - 1] for n in dict.fromkeys(numbers)]
+        if not picked["room"] and not picked["objects"]:
+            return None
+        self.chosen = picked
+        (self.space / "frames-chosen.json").write_text(json.dumps(
+            {"candidates": candidates, **picked, "why": verdict.get("why")}, indent=1) + "\n")
+        self.judged("frames", {"room": picked["room"], "objects": picked["objects"],
+                               "why": verdict.get("why")},
+                    f"{len(picked['room'])} frame(s) of the room, {len(picked['objects'])} of its contents"
+                    + (f": {verdict.get('why')}" if verdict.get("why") else ""))
+        return picked
+
+    def picked_frames(self, purpose: str, count: int) -> list[Path] | None:
+        """Claude's frames for this purpose, if it chose any."""
+        if not self.chosen:
+            found = self.space / "frames-chosen.json"
+            self.chosen = json.loads(found.read_text()) if found.exists() else {}
+        names = (self.chosen or {}).get(purpose) or []
+        images = self.space / "workspace" / "images"
+        kept = [images / name for name in names[:count] if (images / name).exists()]
+        return kept or None
 
     def safe(self, call, *args, default=None):
         """A judgement is an optional extra: never let one end the run."""
@@ -411,7 +501,7 @@ class Agent:
         if not self.advisor.available:
             print("    object list: Claude unavailable, the detector uses the default list")
             return
-        frames = self.sample_frames(OBJECT_NAMING_FRAMES)
+        frames = self.picked_frames("objects", OBJECT_NAMING_FRAMES) or self.sample_frames(OBJECT_NAMING_FRAMES)
         verdict = self.advisor.ask_json(
             OBJECT_NAMING_PROMPT.format(count=len(frames), limit=MAX_OBJECTS - 4),
             frames, max_tokens=2000)
@@ -455,7 +545,7 @@ class Agent:
         verdict = self.advisor.ask_json(LABEL_REVIEW_PROMPT.format(
             keyframes=len(dense.get("detections") or {}), shown=len(frames),
             listing=json.dumps(listing), limit=MAX_OBJECTS - 4),
-            [sheet] + self.sample_frames(4), max_tokens=2000)
+            [sheet] + (self.picked_frames("objects", 4) or self.sample_frames(4)), max_tokens=2000)
         if not verdict:
             return False
         revised, changes = self.revise_objects(vocabulary, verdict)
@@ -907,6 +997,11 @@ class Agent:
         return True
 
     def step_densify(self) -> bool:
+        # Which frames every later question is asked with, chosen once here:
+        # stage 1 has just placed the cameras, and naming the objects is the
+        # first question whose answer depends on seeing the whole room.
+        if self.chosen is None:
+            self.safe(self.choose_frames)
         self.safe(self.name_objects)
         ok, _ = self.run([sys.executable, str(ROOT / "pipeline/densify.py"),
                           str(self.space)], "densify", "MoGe-2 + object detection and outlines")

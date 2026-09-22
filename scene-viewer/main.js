@@ -139,8 +139,14 @@ function select(id) {
   if (!id) { outline.visible = false; bar.hidden = true; return; }
   const piece = pieces.get(id);
   document.getElementById("sel-title").textContent = piece.info.label;
+  const carried = [...pieces.values()].filter((p) => p.info.on === id).map((p) => p.info.label);
+  const on = piece.info.on && pieces.get(piece.info.on);
   document.getElementById("sel-size").textContent =
-    `${piece.size.x.toFixed(2)} × ${piece.size.z.toFixed(2)} × ${piece.size.y.toFixed(2)} m`;
+    `${piece.size.x.toFixed(2)} × ${piece.size.z.toFixed(2)} × ${piece.size.y.toFixed(2)} m`
+    + (on ? ` · on the ${on.info.label.toLowerCase()}` : "")
+    + (carried.length ? ` · carries the ${carried.join(", ").toLowerCase()}` : "");
+  document.getElementById("sel-size").title =
+    piece.info.onWhy || (carried.length ? "these move and hide with it" : "");
   const swap = document.getElementById("swap");
   swap.hidden = !piece.info.model;
   swap.textContent = piece.showing === "scan" ? "Show clean model" : "Show the scan";

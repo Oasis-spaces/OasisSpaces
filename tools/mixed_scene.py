@@ -566,29 +566,42 @@ def write_glb(path: Path, meshes: list) -> None:
 
 
 # ------------------------------------------------------------------ review
-REVIEW_PROMPT = """You are checking a 3D scene made from a phone video of a room, before people see it. The room's flat surfaces (floor, walls, ceiling) became textured meshes; each piece of furniture is kept as it was scanned, as a movable piece. Two sheets are attached, then frames of the real room.
+REVIEW_PROMPT = """You are the last check on a 3D scene built from one phone video of a room, before people open it.
 
-Sheet 1, surfaces. One row per surface: on the left what the video actually filmed of it (magenta = never filmed, or hidden behind furniture), on the right the finished texture, where an inpainting model continued the filmed part into the magenta. Surfaces: {surfaces}.
-For each surface choose:
-- "keep": the finished texture is believable everywhere (paint continues as paint, tiles as tiles; real things on the wall such as a door, a window, a curtain, a switch or a board may stay).
-- "filmed": the filmed part is good but the continued part is not (smears, ghosts of furniture, invented objects, blotches): keep the filmed part and paint the rest plain.
-- "plain": even the filmed part is wrong for a clean surface (furniture or clutter printed flat onto it, heavy blur, patchwork): paint the whole surface plain.
+WHAT THE SCENE IS. The room's flat surfaces (floor, walls, ceiling) have become textured meshes; each piece of furniture is a separate object that a person can click, drag across the floor, turn, hide, or swap between its scan and a clean model. So every decision below changes what someone can do in the room, not just how it looks. The bar is a room that looks smooth and polished from any angle and behaves sensibly when things are moved, not a faithful copy of a messy video.
 
-Sheet 2, pieces. One row per piece: the scanned piece alone seen from where the video saw it best; the same scan seen from round the side and above, an angle nobody filmed; that frame of the video. People move and turn these pieces and look at the room from above, so the second picture is what they will mostly see: a scan is a cloud of soft blobs that only looks right from where it was filmed. Pieces: {pieces}.
-Each piece also has a clean simple model of its kind at its measured size. {faces_note}
-For each piece choose:
-- "scan": the scan is recognisably that object and still clean from the unfilmed angle (no haze, streaks or smears hanging off it).
-- "model": it is a real piece of furniture, but from the unfilmed angle the scan is hazy, streaked, full of holes or a shapeless cloud; show the clean model instead. Prefer this for flat-sided furniture (wardrobes, cabinets, desks, tables) whenever the scan is not crisp: the look to aim for is smooth and polished, not foggy.
-- "drop": it is not a separate real object (part of a wall, a duplicate of another piece, empty space).
-Be fair to soft things: a bed under bedding or a pile of clothes has no flat sides, so a simple model loses what it is; keep it "scan" if one can tell what it is.
+WHAT YOU ARE GIVEN. Sheet 1 the surfaces, sheet 2 the pieces, sheet 3 the room with every piece named, {faces_sheet}then frames of the real room. Judge only from these; where they do not show you something, say so in the reason rather than guessing.
+
+SHEET 1, SURFACES. One row per surface: on the left what the video actually filmed of it (magenta = never filmed, or hidden behind furniture), on the right the finished texture, where an inpainting model continued the filmed part into the magenta. Surfaces: {surfaces}.
+For each surface choose "use":
+- "keep": the finished texture is believable everywhere. Paint continues as paint, tiles as tiles; real things on the wall (a door, a window, a curtain, a switch, a board, a picture) may stay, and so may honest wear.
+- "filmed": the filmed part is right but the continued part is not. The filmed part stays and the rest becomes plain paint, blended over a few centimetres. Choose this when the continuation invented objects, smeared furniture across the wall, or broke into seams and blotches.
+- "plain": even the filmed part is wrong for a clean surface, so the whole surface becomes flat paint in the room's own colour. Choose this when furniture or clutter is printed flat onto the surface, when it is heavily blurred, or when almost nothing was filmed and the texture is a guess.
+A surface is the background behind everything else, so a wrong texture is worse than a plain one: when you are undecided between "keep" and "filmed", choose "filmed"; between "filmed" and "plain", prefer the one that leaves no invented object visible.
+
+SHEET 2, PIECES. One row per piece: the scan from where the video saw it best; the same scan from round the side and above, an angle nobody filmed; then the video frame. Pieces: {pieces}.
+People move and turn these pieces and look at the room from above, so the second picture is what they will mostly see. A scan is a cloud of soft blobs that only looks right from where it was filmed. Every piece also has a clean simple model of its kind, built to its measured size in its own colours.
+For each piece choose "use":
+- "scan": the scan is recognisably that object and still clean from the unfilmed angle, with no haze, streaks or smears hanging off it.
+- "model": it is a real piece of furniture, but from the unfilmed angle the scan is hazy, streaked, full of holes, or a shapeless cloud. The clean model is shown instead. Prefer this for flat-sided furniture (wardrobes, cabinets, desks, tables, chests) whenever the scan is not crisp: smooth and polished beats faithful-but-foggy.
+- "drop": it is not a separate real object at all: part of a wall or floor, a duplicate of another piece, a fragment, or empty space. It disappears from the room, so do not use "drop" on a real object merely because its scan is poor; that is what "model" is for.
+Be fair to soft things: a bed under bedding, a pile of clothes or a cushion has no flat sides, so a simple model would lose what it is. Keep those as "scan" if one can tell what they are.
+
+SHEET 3, THE ROOM, AND WHAT RESTS ON WHAT. Sheet 3 shows the room from above and from where it was filmed, with each piece named where it stands. Use it with the frames to work out how the pieces depend on each other, and fill in "relations" for every piece in the list.
+This decides what happens when a person edits the room. A piece that rests on another is carried by it: drag the bed and its pillows go along, hide the desk and what stood on it goes too. A piece that rests on the floor stays where it is when anything else moves.
+For each piece give {{"on": "<id of the piece it rests on>" or "floor" or "wall", "why": "..."}}:
+- "<id>": it sits on top of that piece, or is tucked into it, so it should travel with it. A pillow or cushion on a bed, a laptop or monitor on a desk, a lamp or books on a table, a basket on a shelf, a cushion on a chair.
+- "floor": it stands on the floor on its own, even if it touches another piece. A bedside table beside a bed, a chair pushed under a desk, a basket on the floor next to a wardrobe: none of these should follow the other piece.
+- "wall": it hangs on or is fixed to a wall and does not stand on the floor.
+The same kind of object can rest on different things in different rooms, so decide from the pictures, not from what is usual: a pillow can be on a bed, on a chair or on the floor. Where two pieces overlap, ask which one would fall if the other were taken away. If you cannot see what it rests on, answer "floor", which changes nothing.
 {faces_ask}
-Reply as JSON: {{"surfaces": {{"<name>": {{"use": "keep|filmed|plain", "why": "..."}}, ...}}, "pieces": {{"<id>": {{"use": "scan|model|drop", "why": "..."}}, ...}}, "faces": {{"<name>": {{"use": "keep|plain", "why": "..."}}, ...}}, "summary": "one sentence on how the scene will look"}}"""
+Reply as JSON: {{"surfaces": {{"<name>": {{"use": "keep|filmed|plain", "why": "..."}}, ...}}, "pieces": {{"<id>": {{"use": "scan|model|drop", "why": "..."}}, ...}}, "relations": {{"<id>": {{"on": "<id>|floor|wall", "why": "..."}}, ...}}, "faces": {{"<name>": {{"use": "keep|plain", "why": "..."}}, ...}}, "summary": "one sentence on how the room will look and what moves with what"}}"""
 
-FACES_NOTE = ("Sheet 3 shows the sides of those models that the video filmed flat-on, as photographs to put on the model "
+FACES_NOTE = ("sheet 4 the sides of those models that the video filmed flat-on, as photographs to put on the model "
               "(left: what was filmed, magenta = never seen or hidden; right: finished, the magenta continued by an "
-              "inpainting model). Faces: {faces}.")
+              "inpainting model; faces: {faces}),")
 FACES_ASK = """
-For each face on sheet 3 choose:
+For each face on sheet 4 choose:
 - "keep": the finished photograph is believable as that side of the furniture (doors, drawers, handles, a table top), including where it was continued.
 - "plain": it is not (other objects printed flat onto it, smears, a ghost of what stood in front, heavy blur): leave that side of the model in its plain colour.
 """
@@ -597,16 +610,18 @@ For each face on sheet 3 choose:
 def claude_review(advisor, frames=(), log=print):
     """A review callback for build(): Claude's verdicts, or None when Claude is not reachable."""
     def review(surface_sheet: Path, piece_sheet: Path, surfaces: list, pieces: list,
-               face_sheet: Path | None = None, faces: list = ()):
+               face_sheet: Path | None = None, faces: list = (), layout_sheet: Path | None = None):
         if advisor is None or not advisor.available:
             return None
         listed = ", ".join(f"{f['name']} = the {f['side']} of {f['piece']} ({f['filmed']:.0%} filmed)" for f in faces)
+        with_faces = bool(faces and face_sheet)
         prompt = REVIEW_PROMPT.format(
             surfaces=", ".join(f"{s['name']} ({s['filmed']:.0%} filmed)" for s in surfaces),
             pieces=", ".join(f"{p['id']} = {p['label']} ({p['size']})" for p in pieces) or "none",
-            faces_note=FACES_NOTE.format(faces=listed) if faces else "No side of any model was filmed well enough to photograph.",
-            faces_ask=FACES_ASK if faces else "")
-        images = ([surface_sheet] + ([piece_sheet] if pieces else []) + ([face_sheet] if faces and face_sheet else [])
+            faces_sheet=(FACES_NOTE.format(faces=listed) + " ") if with_faces else "",
+            faces_ask=FACES_ASK if with_faces else "")
+        images = ([surface_sheet] + ([piece_sheet] if pieces else [])
+                  + ([layout_sheet] if layout_sheet else []) + ([face_sheet] if with_faces else [])
                   + list(frames))
         verdict = advisor.ask_json(prompt, images, max_tokens=3500)
         if verdict:
@@ -627,7 +642,7 @@ def sheet(rows: list, out: Path, tile=(420, 300)) -> Path:
 
     font = ImageFont.load_default(size=18)
     w, h = tile
-    across = max([len(row) - 1 for row in rows] + [2])
+    across = max([len(row) - 1 for row in rows] + [1])
     page = Image.new("RGB", (across * (w + 10) + 10, max(1, len(rows)) * (h + 34) + 10), "white")
     draw = ImageDraw.Draw(page)
     for n, (title, *pictures) in enumerate(rows):
@@ -656,6 +671,79 @@ def turned_view(room, view: dict, target: np.ndarray) -> list:
     moved = np.array([target[0] + flat[0], target[1] + flat[1], target[2] + 0.9 * reach])
     p = room.to_splat(moved[None])[0]
     return view_json(look_matrix(p, room.to_splat(target[None])[0] - p, room.world[2]), p)["viewMatrix"]
+
+
+def pixels_of(points_s, room, view, width: int, height: int, fov_y: float = 55.0):
+    """Where scene-frame points land in a render made with `view` (the same
+    convention as splat_render.render)."""
+    V = np.array(view, float).reshape(4, 4).T
+    cam = room.to_splat(np.asarray(points_s, float)) @ V[:3, :3].T + V[:3, 3]
+    focal = height / 2 / np.tan(np.radians(fov_y) / 2)
+    ahead = cam[:, 2] > 1e-6
+    u = focal * cam[:, 0] / np.where(ahead, cam[:, 2], 1) + width / 2
+    v = focal * cam[:, 1] / np.where(ahead, cam[:, 2], 1) + height / 2
+    return u, v, ahead
+
+
+def camera_at(room, position, target, up) -> list:
+    """A viewer camera at `position` (scene frame) looking at `target`."""
+    from splat_export import look_matrix, view_json
+
+    eye = room.to_splat(np.asarray(position, float)[None])[0]
+    return view_json(look_matrix(eye, room.to_splat(np.asarray(target, float)[None])[0] - eye, up),
+                     eye)["viewMatrix"]
+
+
+def layout_row(room, arr, scene, masks, log, size=(760, 570)) -> list:
+    """For the review: the room with every piece named where it stands, from
+    above and from the doorway, so that what rests on what can be judged. The
+    pieces alone tell Claude what each one is; only this tells it where they
+    are in relation to each other."""
+    from PIL import ImageDraw, ImageFont
+    from splat_export import VIEW_FOV_Y
+    from splat_render import render
+
+    m = room.metre
+    boxes = room.shapes["boxes"]
+    named = {ident: mask for ident, mask in masks.items() if ident.startswith("B") and mask.sum()}
+    if not named:
+        return []
+    width, height = size
+    centre = np.array([room.centre[0], room.centre[1], room.floor_z + 1.1 * m])
+    # High enough that the whole room fits, looking straight down.
+    reach = np.tan(np.radians(VIEW_FOV_Y / 2))
+    up = max(room.half[1], room.half[0] * height / width) / reach * 1.2
+    above = np.array([room.centre[0], room.centre[1], room.floor_z + up])
+    views = [("from above", camera_at(room, above, centre, room.world[1]))]
+    # From where the person stood, at eye height: what they see when they open the room.
+    path = np.array(room.shapes.get("cameras") or [], float)
+    if len(path):
+        stood = np.median(path, axis=0)
+        views.append(("from where it was filmed",
+                      camera_at(room, np.array([stood[0], stood[1], room.floor_z + 1.5 * m]),
+                                centre, room.world[2])))
+    shown = np.zeros(len(arr), bool)
+    for mask in named.values():
+        shown |= mask
+    shown |= masks.get("rest", np.zeros(len(arr), bool))
+    font = ImageFont.load_default(size=19)
+    images = []
+    for name, view in views:
+        picture = Image.fromarray(render(arr[shown], view, width, height))
+        draw = ImageDraw.Draw(picture)
+        for ident, mask in named.items():
+            label = boxes[int(ident[1:])]
+            middle = scene[mask].mean(axis=0)
+            u, v, ahead = pixels_of(middle[None], room, view, width, height)
+            if not ahead[0] or not (0 <= u[0] < width and 0 <= v[0] < height):
+                continue
+            text = f"{ident} {label.get('detected') or label.get('label')}"
+            box = draw.textbbox((u[0], v[0]), text, font=font, anchor="mm")
+            draw.rectangle([box[0] - 4, box[1] - 3, box[2] + 4, box[3] + 3], fill=(0, 0, 0))
+            draw.text((u[0], v[0]), text, fill=(255, 210, 90), font=font, anchor="mm")
+        images.append(picture)
+    log(f"  layout: the room with {len(named)} named piece(s), {len(images)} view(s)")
+    return [("the room with every piece named   (" + " | ".join(n for n, _ in views) + ")", *images)]
 
 
 def piece_rows(room, arr, scene, masks, log) -> list:
@@ -691,14 +779,35 @@ def piece_rows(room, arr, scene, masks, log) -> list:
     return rows
 
 
-def mark_stacked(pieces: list) -> None:
-    """A thing standing on another moves with it: a movable piece whose anchor
-    lies inside a larger movable piece's footprint, and whose own box starts
-    well above the floor (a pillow on a bed, not a cushion on the floor beside
-    it), gets "on": the larger piece's id."""
+def mark_stacked(pieces: list, relations: dict | None = None, log=print) -> None:
+    """What rests on what, as "on": the id of the piece that carries it. A
+    piece that rests on another travels with it in the viewer, so dragging a
+    bed takes its pillows and hiding a desk hides what stood on it.
+
+    Claude decides this from the room (the "relations" of its review), because
+    it depends on the room and not on the kind of thing: a pillow can be on a
+    bed, on a chair or on the floor, and a chair tucked under a desk still
+    stands on the floor. Geometry fills in only for pieces Claude did not
+    answer for, and nothing may end up carrying itself in a circle."""
     movable = [p for p in pieces if p.get("movable")]
-    volume = lambda p: float(np.prod(np.array(p["box"]["max"]) - np.array(p["box"]["min"])))
+    here = {p["id"] for p in movable}
+    answered = set()
     for p in movable:
+        said = (relations or {}).get(p["id"]) or {}
+        on = said.get("on")
+        if not on:
+            continue
+        answered.add(p["id"])                       # "floor" and "wall" are answers too
+        if on not in here or on == p["id"]:
+            continue
+        if carries(relations, here, on, p["id"]):
+            log(f"  {p['id']}: cannot rest on {on}, which rests on it; left on the floor")
+            continue
+        p["on"], p["onWhy"] = on, said.get("why")
+        log(f"  {p['id']} {p['label']}: rests on {on} ({said.get('why') or ''})")
+
+    volume = lambda p: float(np.prod(np.array(p["box"]["max"]) - np.array(p["box"]["min"])))
+    for p in [q for q in movable if q["id"] not in answered]:
         hosts = []
         for q in movable:
             if p is q or volume(p) >= volume(q) or p["box"]["min"][1] <= 0.2:
@@ -709,6 +818,17 @@ def mark_stacked(pieces: list) -> None:
                 hosts.append(q)
         if hosts:
             p["on"] = min(hosts, key=volume)["id"]          # the smallest thing it stands on
+
+
+def carries(relations: dict | None, here: set, parent: str, child: str) -> bool:
+    """Does `parent` already rest on `child`, directly or through others?"""
+    seen = set()
+    while parent in here and parent not in seen:
+        seen.add(parent)
+        if parent == child:
+            return True
+        parent = ((relations or {}).get(parent) or {}).get("on")
+    return parent == child
 
 
 # ------------------------------------------------------------------- build
@@ -796,6 +916,8 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         rows.append((f"{surface.name}   (filmed {known.mean():.0%} | finished)", upright(surface, filmed), upright(surface, final)))
     surface_sheet = sheet(rows, out / "review-surfaces.png")
     piece_sheet = sheet(piece_rows(room, arr, scene, masks, log), out / "review-pieces.png", tile=(480, 360))
+    layout = layout_row(room, arr, scene, masks, log)
+    layout_sheet = sheet(layout, out / "review-layout.png", tile=(760, 570)) if layout else None
     boxes = room.shapes["boxes"]
     # The faces filmed well enough, finished like the walls: what stood in front is continued.
     panels, rows = {}, []
@@ -821,7 +943,7 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
               "size": size_of(boxes[int(ident[1:])])} for ident, mask in masks.items() if ident.startswith("B") and mask.sum()]
     verdict = review(surface_sheet, piece_sheet,
                      [{"name": s.name, "filmed": float(k.mean())} for s, k in zip(surfaces, knowns)], asked,
-                     face_sheet, [panel["asked"] for panel in panels.values()]) if review else None
+                     face_sheet, [panel["asked"] for panel in panels.values()], layout_sheet) if review else None
     surface_use = {name: (v or {}).get("use", "keep") for name, v in ((verdict or {}).get("surfaces") or {}).items()}
     piece_use = {ident: (v or {}).get("use", "scan") for ident, v in ((verdict or {}).get("pieces") or {}).items()}
     face_use = {name: (v or {}).get("use", "keep") for name, v in ((verdict or {}).get("faces") or {}).items()}
@@ -904,7 +1026,7 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         entry["anchor"] = anchor.round(3).tolist()
         write_piece(out / entry["file"], arr[mask], frame, scene[mask], anchor)
         pieces.append(entry)
-    mark_stacked(pieces)
+    mark_stacked(pieces, (verdict or {}).get("relations"), log)
 
     # Where the person stood while filming, for a view from inside: the middle of the walked
     # path, at eye height, looking at the room's centre.
@@ -913,6 +1035,9 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     eye = frame.scene_to_viewer(np.array([stood[0], stood[1], floor_height + 1.5 * m]))
     manifest = {
         "space": space.name, "units": "metres", "up": "y",
+        # viewer = ((solve @ world.T - origin) / unitsPerMetre) @ toViewer.T
+        "solveFrame": {"origin": frame.origin.round(6).tolist(), "unitsPerMetre": round(float(m), 6),
+                       "world": np.asarray(room.world).round(9).tolist(), "toViewer": TO_VIEWER.tolist()},
         "inside": {"position": eye.round(3).tolist(), "target": [0.0, 1.1, 0.0]},
         "room": {"width": round(2 * room.half[0] / m, 3), "depth": round(2 * room.half[1] / m, 3),
                  "height": round(room.shapes["room_level"]["height"] / m, 3)},
