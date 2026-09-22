@@ -588,6 +588,9 @@ def main() -> None:
                         help="stages 1-3 and stage 4's steps to run, in order")
     parser.add_argument("--agent-args", default="", help="extra pipeline/agent.py arguments")
     parser.add_argument("--keep-session", action="store_true", help="do not stop the session at the end")
+    parser.add_argument("--no-publish", action="store_true",
+                        help="skip choose-best here: an experiment's splats are not compared with the "
+                             "video's published best, which stays as it is")
     parser.add_argument("--wait-gpu", type=float, default=0, metavar="MINUTES",
                         help="when Colab has no GPU to give, keep asking for this long")
     args = parser.parse_args()
@@ -658,7 +661,7 @@ def main() -> None:
     finally:
         relay.terminate()
 
-    if any(step in args.stages for step in ("choose-training", "fill")):
+    if any(step in args.stages for step in ("choose-training", "fill")) and not args.no_publish:
         log("choose-best: comparing every splat of this video here (tools/splat_choose.py)")
         subprocess.run([sys.executable, str(ROOT / "tools" / "splat_choose.py"), str(video)], cwd=ROOT)
     if not args.keep_session:
