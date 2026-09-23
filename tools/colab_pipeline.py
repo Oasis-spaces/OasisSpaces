@@ -575,6 +575,10 @@ def run_stage(vm: Colab, video_remote: str, name: str, step: str, extra: list[st
             # ended raises SessionEnded from python() instead and is not caught here.
             lost_since = lost_since or time.time()
             minutes = (time.time() - lost_since) / 60
+            # A session at its hour limit ends with the same dropped tunnel: after a few
+            # minutes, a session the listing no longer shows (twice, a minute apart) is over.
+            if minutes > 3 and not vm.alive(checks=2):
+                raise SessionEnded(f"the Colab session {vm.session} has ended")
             if minutes > LOST_CONTACT_MINUTES:
                 raise RuntimeError(f"no contact with the VM for {LOST_CONTACT_MINUTES} minutes; "
                                    f"the job may still be running there: {exc}") from exc
