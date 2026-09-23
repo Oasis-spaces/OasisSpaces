@@ -94,6 +94,7 @@ REMOTE_ENV = {
 # splat project is links plus a seed file rebuilt by splat_seed.py.
 NOT_FETCHED = ("workspace/database.db", "splat-project/")
 FETCH_DURING_MINUTES = 10
+LOST_CONTACT_MINUTES = 30   # a stage's job runs on the VM regardless: contact lost this long is waited out
 
 
 EXEC_ATTEMPTS = 4
@@ -548,7 +549,7 @@ def run_stage(vm: Colab, video_remote: str, name: str, step: str, extra: list[st
                + " ".join(shlex.quote(a) for a in extra))
     since = int(vm.shell("date +%s", timeout=120).split()[0])
     vm.background(command, job)
-    offset, last_fetch = 0, time.time()
+    offset, last_fetch, lost_since = 0, time.time(), None
     while True:
         if step.startswith("train") and time.time() - last_fetch > FETCH_DURING_MINUTES * 60:
             try:
@@ -556,17 +557,31 @@ def run_stage(vm: Colab, video_remote: str, name: str, step: str, extra: list[st
             except RuntimeError as exc:
                 log(f"  fetch during the stage failed ({exc}); trying again later")
             last_fetch = time.time()
-        text, offset = vm.log_since(job, offset)
-        for line in text.splitlines():
-            if line.strip() and "Loading weights" not in line and "it/s]" not in line:
-                print("    vm |", line[:300], flush=True)
-        code = vm.finished(job)
-        if code is not None:
+        try:
             text, offset = vm.log_since(job, offset)
             for line in text.splitlines():
-                if line.strip():
+                if line.strip() and "Loading weights" not in line and "it/s]" not in line:
                     print("    vm |", line[:300], flush=True)
-            break
+            code = vm.finished(job)
+            if code is not None:
+                text, offset = vm.log_since(job, offset)
+                for line in text.splitlines():
+                    if line.strip():
+                        print("    vm |", line[:300], flush=True)
+                break
+        except RuntimeError as exc:
+            # Colab's tunnel to the VM drops for minutes at a time (three runs lost to it
+            # on 2026-09-22) while the job runs on. Wait it out; a session that has really
+            # ended raises SessionEnded from python() instead and is not caught here.
+            lost_since = lost_since or time.time()
+            minutes = (time.time() - lost_since) / 60
+            if minutes > LOST_CONTACT_MINUTES:
+                raise RuntimeError(f"no contact with the VM for {LOST_CONTACT_MINUTES} minutes; "
+                                   f"the job may still be running there: {exc}") from exc
+            log(f"  lost contact with the VM ({minutes:.0f} min so far); its job runs on, asking again in 60 s")
+            time.sleep(60)
+            continue
+        lost_since = None
         time.sleep(20)
     gate = gate_of(vm, name, stage, since)
     if code != 0 and gate.get("why") == "no gate recorded":
