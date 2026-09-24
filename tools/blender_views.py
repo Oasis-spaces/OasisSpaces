@@ -42,6 +42,22 @@ else:
     scene.display.shading.show_object_outline = True
 scene.render.resolution_percentage = 100
 
+# Flat grey floor against flat grey walls hid their junction in these renders
+# (Claude read a measured wall as "built too close"), so each kind gets its own
+# tone: sand floor, pale walls, blue-grey furniture. The .blend keeps the
+# measured colours; this is render-only.
+TONES = {"floor": (0.80, 0.72, 0.56, 1.0), "wall": (0.86, 0.86, 0.88, 1.0), "furniture": (0.50, 0.56, 0.72, 1.0)}
+for obj in bpy.data.objects:
+    if obj.type != "MESH":
+        continue
+    kind = "floor" if obj.name.startswith("Floor") else "wall" if obj.name.startswith("Wall") else "furniture"
+    mat = bpy.data.materials.new(f"view-{kind}")
+    mat.use_nodes = True
+    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = TONES[kind]
+    mat.diffuse_color = TONES[kind]
+    obj.data.materials.clear()
+    obj.data.materials.append(mat)
+
 views = json.loads(Path(views_path).read_text())
 for view in views:
     data = bpy.data.cameras.new(view["name"])
