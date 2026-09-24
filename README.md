@@ -203,6 +203,16 @@ the agent's judgement:
    classifier keeps a detected object's identity but still applies its
    sanity checks, and marks a box `build: false` when it is scan debris
    (implausibly large, floating, or too sparse) so the Blender room skips it.
+   Claude then reviews the candidates against the frames (the agent's
+   structure review): it can drop a wall or a box, relabel a box, move a wall
+   back when it is the front of a fitted wardrobe, or add a box for a whole
+   piece of furniture the frames show but the points never boxed, such as a
+   cupboard whose only measured part is its open door. An added box is
+   placed by the pipeline, not by Claude: its back on the measured wall Claude
+   names, a given distance from the corner it is nearest, stood on the floor,
+   with its sizes clamped to sensible limits (at most three per review).
+   Measured geometry is never moved or resized. The built room is then
+   rendered and Claude checks it once more against a frame.
 4. `tools/blender_room.py` — a parametric Blender room.
 5. `pipeline/splat_seed.py` then `tools/opensplat` — a Gaussian splat. The
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's

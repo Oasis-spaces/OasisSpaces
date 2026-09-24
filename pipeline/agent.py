@@ -185,7 +185,72 @@ This is a second look. The room built from the first review was rendered and che
 structural problems: {problems}. The last {count} image(s) are that render, from an angle and from straight above
 (grey shapes are walls, floor and furniture boxes). Use the same actions to fix them where the images show what is
 wrong: drop a box that is not a free-standing object of its own (part of the bed, a panel, a sliver of a cupboard) or
-that duplicates another, drop a wall that stands free or duplicates a wall. Leave alone what the check did not flag."""
+that duplicates another, drop a wall that stands free or duplicates a wall, add a piece of furniture the frames
+show but the room lacks. Leave alone what the check did not flag."""
+
+ADD_BOXES_MAX = 3                # boxes Claude may add from the frames in one structure review
+FURNITURE_TYPES = {"bed", "seat", "table", "wardrobe", "block"}
+ADDED_SIZE_M = {"width": (0.3, 4.0), "depth": (0.2, 2.0), "height": (0.2, 3.0)}   # sanity limits, metres
+
+
+def place_added_box(shapes: dict, item: dict, units: float) -> dict | str:
+    """A box Claude adds from the frames, placed in the measured room: its back
+    on the wall `against`, its near side `offset_m` along that wall from the
+    corner it shares with `from_corner_with` (centred on the wall without one),
+    standing on the floor. Sizes are clamped to ADDED_SIZE_M, the wall's length
+    and the room's height. Returns the box record, or why it cannot be placed."""
+    import numpy as np
+
+    label = item.get("label")
+    if label not in FURNITURE_TYPES:
+        return f"'{label}' is not a furniture type"
+    planes = shapes["planes"]
+
+    def wall(ident):
+        text = str(ident or "")
+        i = int(text[1:]) if text[:1] == "W" and text[1:].isdigit() else None
+        if i is None or i >= len(planes) or planes[i]["kind"] != "wall" or not planes[i].get("build", True):
+            return None, None
+        return i, planes[i]
+
+    i, w = wall(item.get("against"))
+    if w is None:
+        return f"{item.get('against')} is not a built wall"
+    try:
+        wanted = {k: float(item[f"{k}_m"]) * units for k in ("width", "depth", "height")}
+    except (KeyError, TypeError, ValueError):
+        return "width_m, depth_m and height_m are needed"
+    level = shapes.get("room_level") or {}
+    floor_z = level.get("floor_z", w["center"][2] - w["half_b"])
+    room_height = level.get("height", 2 * w["half_b"])
+    caps = {"width": 2 * w["half_a"], "depth": float("inf"), "height": room_height}
+    size = {k: max(lo * units, min(hi * units, caps[k], v))
+            for k, v in wanted.items() for lo, hi in [ADDED_SIZE_M[k]]}
+    c = np.array(w["center"][:2], dtype=float)
+    a = np.array(w["axis_a"][:2], dtype=float)
+    a /= np.linalg.norm(a)
+    n = np.array(w["normal"][:2], dtype=float)
+    n /= np.linalg.norm(n)
+    room_centre = np.array((shapes.get("room") or {}).get("center", c)[:2], dtype=float)
+    if np.dot(room_centre - c, n) < 0:
+        n = -n                                       # into the room
+    t0 = -size["width"] / 2                          # centred on the wall, unless a corner is named
+    j, other = wall(item.get("from_corner_with"))
+    if other is not None and j != i:
+        b = np.array(other["axis_a"][:2], dtype=float)
+        matrix = np.array([a, -b]).T
+        if abs(np.linalg.det(matrix)) > 1e-6:
+            t_corner = float(np.linalg.solve(matrix, np.array(other["center"][:2]) - c)[0])
+            direction = 1.0 if t_corner < 0 else -1.0    # from that corner toward the wall's middle
+            near = t_corner + direction * max(0.0, float(item.get("offset_m") or 0.0)) * units
+            t0 = near if direction > 0 else near - size["width"]
+    t0 = max(-w["half_a"], min(w["half_a"] - size["width"], t0))
+    corners = [c + t * a + k * size["depth"] * n for t in (t0, t0 + size["width"]) for k in (0.0, 1.0)]
+    xs, ys = [float(q[0]) for q in corners], [float(q[1]) for q in corners]
+    return {"min": [min(xs), min(ys), floor_z], "max": [max(xs), max(ys), floor_z + size["height"]],
+            "points": 0, "source": "claude", "detected": label, "label": label, "build": True,
+            "color": [190, 185, 175], "reason": f"Claude: added from the frames: {item.get('why', '')}"}
+
 
 # After detection, Claude checks the boxes against the list (see review_labels).
 LABEL_REVIEW_PROMPT = """You check object detection for a 3D reconstruction of a room filmed on a phone.
@@ -738,8 +803,9 @@ class Agent:
 
     def structure_review(self, feedback: list | None = None) -> None:
         """Claude decides what each measured candidate is. It can drop a wall or
-        a box, or relabel a box, but never move or resize anything, so the room
-        keeps the measured geometry. With `feedback` (the structural problems
+        a box, relabel a box, or add a box for furniture the frames show that the
+        points never boxed (placed against a measured wall, place_added_box), but
+        never move or resize measured geometry, so the room keeps it. With `feedback` (the structural problems
         the render check found in the room built from an earlier review), it
         looks again with those problems and the renders in front of it."""
         if not self.advisor.available:
@@ -798,11 +864,23 @@ class Agent:
             "If the frames show built-in furniture along that wall, list it in "
             "furniture_fronts: the wall moves back and the space in front of it becomes "
             "a wardrobe. If it is simply the wall, leave it. "
+            "The frames may also show a whole piece of furniture that has no box of its "
+            "own: a cupboard whose only box is its open door, a bed or table the points "
+            "missed. Add it in add_boxes: its type (bed, seat, table, wardrobe, block), "
+            "the wall it stands against (W id), the wall it meets at its nearest corner "
+            "(W id, or null when it stands away from the corners), offset_m from that "
+            "corner to its near side, and its width_m along the wall, depth_m into the "
+            "room and height_m, judged from the frames and from what such furniture "
+            "usually measures (a wardrobe is about 0.6 m deep and 2 m tall). Add only "
+            "what the frames show clearly and no box already covers; when a box covers "
+            f"part of it, drop that box and add the whole piece. At most {ADD_BOXES_MAX}. "
             "Only act where the images make you confident.\n"
             'Fields: {"drop_walls": [{"id": string, "why": string}], '
             '"furniture_fronts": [{"id": string, "why": string}], '
             '"drop_boxes": [{"id": string, "why": string}], '
             '"relabel_boxes": [{"id": string, "label": string, "why": string}], '
+            '"add_boxes": [{"label": string, "against": "W<n>", "from_corner_with": "W<n>" or null, '
+            '"offset_m": number, "width_m": number, "depth_m": number, "height_m": number, "why": string}], '
             '"notes": one sentence}')
         images = [plan] + ([sheet] if picked else []) + self.room_frames(3)
         if feedback:
@@ -882,6 +960,20 @@ class Agent:
                 applied.append(f"relabelled {ident} {boxes[i].get('label')} -> {new}")
                 boxes[i]["label"] = new
                 boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
+        units = self.densify_metrics().get("colmap_units_per_metre")
+        for n, item in enumerate(verdict.get("add_boxes") or []):
+            what = f"an added {item.get('label')}"
+            if n >= ADD_BOXES_MAX:
+                applied.append(f"ignored {what}: at most {ADD_BOXES_MAX} boxes can be added")
+            elif not units:
+                applied.append(f"ignored {what}: the room's scale is not measured")
+            elif isinstance(placed := place_added_box(shapes, item, units), str):
+                applied.append(f"ignored {what}: {placed}")
+            else:
+                boxes.append(placed)
+                corner = item.get("from_corner_with")
+                applied.append(f"added B{len(boxes) - 1} {placed['label']} against {item.get('against')}"
+                               + (f", from its corner with {corner}" if corner else ""))
         return applied
 
     def build_front(self, shapes: dict, i: int, why: str) -> str:
