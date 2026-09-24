@@ -177,20 +177,23 @@ Reply with a single JSON object and nothing else:
 {{"best": letter, "ranking": [letters best first], "why": one sentence}}"""
 
 # Files that make up a built room, kept aside while stage 3 is reviewed again.
-STRUCTURE_FILES = ["shapes.json", "room.blend", "room-render.png", "room-render-plan.png",
+STRUCTURE_FILES = ["shapes.json", "room.blend", "room-render.png", "room-render-plan.png", "room-views.png",
                    "plan-reviewed.png"]
 RECHECK_NOTE = """
 
 This is a second look. The room built from the first review was rendered and checked, and the check found these
-structural problems: {problems}. The last {count} image(s) are that render, from an angle and from straight above
-(grey shapes are walls, floor and furniture boxes). Use the same actions to fix them where the images show what is
-wrong: drop a box that is not a free-standing object of its own (part of the bed, a panel, a sliver of a cupboard) or
-that duplicates another, drop a wall that stands free or duplicates a wall, add a piece of furniture the frames
-show but the room lacks. Leave alone what the check did not flag."""
+structural problems: {problems}. The last {count} image(s) are that render from an angle, the room from straight
+above, and, when there are three, a sheet of rows, each a video frame beside the room rendered from that frame's own
+camera (grey shapes are walls, floor and furniture boxes). Use the same actions to fix them where the images show what
+is wrong: drop a box that is not a free-standing object of its own (part of the bed, a panel, a sliver of a cupboard)
+or that duplicates another, drop a wall that stands free or duplicates a wall, add a piece of furniture the frames
+show but the room lacks, or drop a misplaced piece and add it again where the rows show it stands. Leave alone what
+the check did not flag."""
 
 ADD_BOXES_MAX = 3                # boxes Claude may add from the frames in one structure review
 FURNITURE_TYPES = {"bed", "seat", "table", "wardrobe", "block"}
 ADDED_SIZE_M = {"width": (0.3, 4.0), "depth": (0.2, 2.0), "height": (0.2, 3.0)}   # sanity limits, metres
+CAMERA_CLEARANCE_M = 0.1         # an added box this close to where the phone was cannot be there
 
 
 def place_added_box(shapes: dict, item: dict, units: float) -> dict | str:
@@ -247,6 +250,10 @@ def place_added_box(shapes: dict, item: dict, units: float) -> dict | str:
     t0 = max(-w["half_a"], min(w["half_a"] - size["width"], t0))
     corners = [c + t * a + k * size["depth"] * n for t in (t0, t0 + size["width"]) for k in (0.0, 1.0)]
     xs, ys = [float(q[0]) for q in corners], [float(q[1]) for q in corners]
+    margin = CAMERA_CLEARANCE_M * units
+    for k, (x, y) in enumerate(shapes.get("cameras") or [], 1):
+        if min(xs) - margin <= x <= max(xs) + margin and min(ys) - margin <= y <= max(ys) + margin:
+            return f"the phone stood inside it or against it (camera {k}); nothing solid stands on the walk"
     return {"min": [min(xs), min(ys), floor_z], "max": [max(xs), max(ys), floor_z + size["height"]],
             "points": 0, "source": "claude", "detected": label, "label": label, "build": True,
             "color": [190, 185, 175], "reason": f"Claude: added from the frames: {item.get('why', '')}"}
@@ -836,7 +843,9 @@ class Agent:
             "video. The first image is a floor plan seen from above: darker areas are "
             "dense reconstructed points, the blue outline is the floor, red numbered "
             "lines (W) are wall candidates, green numbered rectangles (B) are furniture "
-            "boxes that will be built, grey ones were rejected by our checks. "
+            "boxes that will be built, grey ones were rejected by our checks, and the "
+            "small blue dots joined by a line are where the phone was as it filmed, so "
+            "nothing solid stands there. "
             + ("The second image shows, for each box, the two video frames where it is "
                "seen best, cropped around it, with the box's outline drawn in green, its "
                "B number and size: judge each box from its own crops, since an object at "
@@ -884,8 +893,8 @@ class Agent:
             '"notes": one sentence}')
         images = [plan] + ([sheet] if picked else []) + self.room_frames(3)
         if feedback:
-            renders = [r for r in (self.space / "room-render.png", self.space / "room-render-plan.png")
-                       if r.exists()]
+            renders = [r for r in (self.space / "room-render.png", self.space / "room-render-plan.png",
+                                   self.space / "room-views.png") if r.exists()]
             prompt += RECHECK_NOTE.format(count=len(renders), problems=json.dumps(feedback))
             images += renders
         verdict = self.advisor.ask_json(prompt, images, max_tokens=2048)
@@ -1011,19 +1020,40 @@ class Agent:
         return (f"W{i} is a furniture front: moved it back {shown} and built "
                 f"B{len(shapes['boxes']) - 1} wardrobe in front of it")
 
+    def view_sheet(self) -> Path | None:
+        """The built room rendered from three of the video's own cameras, each
+        beside its frame (tools/room_views.py): a misplaced piece shows as an
+        offset against the frame, not a hunch from another angle."""
+        from room_views import pairs_sheet, render_views
+
+        names = [p.name for p in self.room_frames(3)]
+        pairs = render_views(self.space, names, self.space / "room-views", blender=BLENDER)
+        return pairs_sheet(pairs, self.space / "room-views.png") if pairs else None
+
     def render_verdict(self) -> None:
         """Claude looks at the built room, from an angle and from above, next to
-        a photo of the real one."""
+        a photo of the real one, and from the video's own cameras beside their
+        frames (view_sheet)."""
         render = self.space / "room-render.png"
         plan = self.space / "room-render-plan.png"
         if not self.advisor.available or not render.exists():
             return
+        sheet = self.safe(self.view_sheet, default=None)
         prompt = (
-            "Three images. The first is a perspective render of a parametric room "
+            f"{'Four' if sheet else 'Three'} images. The first is a perspective render of a parametric room "
             "our pipeline built from a phone video: grey shapes are walls, floor "
             "and furniture boxes. The second is the same room seen from straight "
             "above, like a floor plan. The third is a frame from the video.\n"
-            "How the render is drawn, so do not report these as problems: the walls "
+            + ("The fourth is a sheet of rows: on the left a video frame, on the right "
+               "the room rendered from that frame's own camera position and lens, so "
+               "whatever the video shows should appear in the render in the same place "
+               "and at the same size, apart from what the render lacks by design "
+               "(colours, doors, windows, curtains, small objects). Use the rows to "
+               "judge placement: a piece of furniture standing where its row's frame "
+               "shows open floor, bare wall or something else, or absent from where the "
+               "frame shows it, or far bigger or smaller, is misplaced; a wall likewise. "
+               "Name such a problem 'misplaced: <what>, <how>'.\n" if sheet else "")
+            + "How the render is drawn, so do not report these as problems: the walls "
             "between the camera and the room are hidden on purpose so the inside "
             "shows (the plan view has every wall); walls in a light beige were not "
             "seen and only close the room; furniture is drawn from simple parts, so "
@@ -1038,14 +1068,16 @@ class Agent:
             "Grade every problem. structural: the room itself is wrong - a wall "
             "standing free or ending in open floor, walls not meeting, the floor or "
             "ceiling running past the walls, the room far too big or small for the "
-            "video, furniture floating, sunk into the floor or cutting through a wall. "
+            "video, furniture floating, sunk into the floor or cutting through a wall"
+            + (", or a piece the rows show standing where the video shows none, or far "
+               "from where the video shows it" if sheet else "") + ". "
             "minor: everything else, such as furniture proportions or placement "
             "details. A room with any structural problem is not plausible.\n"
             'Fields: {"plausible": boolean, "problems": array of {"what": short '
             'phrase, "severity": "structural" or "minor"} (things that are wrong), '
             '"missing": array of short phrases (not captured), "advice": array of '
             'short instructions for the next capture}')
-        images = [render] + ([plan] if plan.exists() else []) + self.room_frames(1)
+        images = [render] + ([plan] if plan.exists() else []) + self.room_frames(1) + ([sheet] if sheet else [])
         verdict = self.advisor.ask_json(prompt, images)
         if not verdict:
             print(f"    claude (blender): no usable answer"

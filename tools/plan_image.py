@@ -102,12 +102,20 @@ def draw_plan(space: Path, out: Path) -> Path:
         name = box.get("detected") or box.get("label") or "box"
         label(f"B{i} {name}", ((x0 + x1) / 2, (y0 + y1) / 2), colour)
 
+    # Where the phone was: nothing solid can stand on the walk.
+    cameras = shapes.get("cameras") or []
+    if len(cameras) > 1:
+        draw.line([px(c) for c in cameras], fill=(20, 60, 160), width=2)
+    for c in cameras:
+        x, y = px(c)
+        draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=(20, 60, 160))
+
     if units_per_metre:
         bar = units_per_metre * scale
         y = SIZE - 30
         draw.line([(MARGIN, y), (MARGIN + bar, y)], fill="black", width=5)
         draw.text((MARGIN + bar + 10, y), "1 m", fill="black", font=small, anchor="lm")
-    draw.text((MARGIN, 25), "Floor plan, seen from above: darker = more 3D points",
+    draw.text((MARGIN, 25), "Floor plan, seen from above: darker = more 3D points; blue dots = where the phone was",
               fill="black", font=small, anchor="lm")
     img.save(out)
     return out

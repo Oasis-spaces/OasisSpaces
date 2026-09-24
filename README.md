@@ -211,8 +211,16 @@ the agent's judgement:
    placed by the pipeline, not by Claude: its back on the measured wall Claude
    names, a given distance from the corner it is nearest, stood on the floor,
    with its sizes clamped to sensible limits (at most three per review).
-   Measured geometry is never moved or resized. The built room is then
-   rendered and Claude checks it once more against a frame.
+   Measured geometry is never moved or resized. The plan Claude sees also
+   shows where the phone was, and an added box the phone stood in or against
+   is refused. The built room is then rendered from an angle, from above, and
+   from three of the video's own cameras, each of those beside its frame
+   (`tools/room_views.py`, `room-views.png`): rendered from the frame's own
+   pose and lens, the room should line up with the frame, so a piece standing
+   where the video shows none, or far from where it shows it, is visible as an
+   offset rather than a hunch. Claude's render check grades such a
+   misplacement structural, which sends the room back to the structure review
+   with the rows in front of it.
 4. `tools/blender_room.py` — a parametric Blender room.
 5. `pipeline/splat_seed.py` then `tools/opensplat` — a Gaussian splat. The
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's

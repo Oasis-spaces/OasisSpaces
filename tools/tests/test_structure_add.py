@@ -65,6 +65,18 @@ def test_sizes_are_kept_within_reason_and_the_room():
     assert close([box["max"][2] - box["min"][2]], [23.0])                        # no taller than the room
 
 
+def test_a_box_the_phone_stood_in_or_against_is_refused():
+    shapes = room()
+    item = {"label": "wardrobe", "against": "W0", "from_corner_with": "W3", "offset_m": 0.3,
+            "width_m": 1.0, "depth_m": 0.6, "height_m": 2.0}
+    shapes["cameras"] = [[-15.0, 0.0]]                               # inside where the wardrobe would stand
+    assert "phone stood" in agent.place_added_box(shapes, item, UNITS)
+    shapes["cameras"] = [[-20.0 + 0.6 * UNITS + 0.05 * UNITS, 0.0]]  # 5 cm in front of its face
+    assert "phone stood" in agent.place_added_box(shapes, item, UNITS)
+    shapes["cameras"] = [[-20.0 + 0.6 * UNITS + 0.3 * UNITS, 0.0]]   # 30 cm away: fine
+    assert isinstance(agent.place_added_box(shapes, item, UNITS), dict)
+
+
 def test_what_cannot_be_placed_says_why():
     assert "not a furniture type" in agent.place_added_box(room(), {"label": "sofa", "against": "W0"}, UNITS)
     assert "not a built wall" in agent.place_added_box(
