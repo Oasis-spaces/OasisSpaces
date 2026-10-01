@@ -320,10 +320,12 @@ class Segmenter:
         self.model = Sam2Model.from_pretrained(SEGMENTER_ID).to(self.device).eval()
         self.work_size = work_size
 
-    def outline(self, img, detections: list[dict]) -> int:
+    def outline(self, img, detections: list[dict], clip: bool = True) -> int:
         """Give each detection a "mask" (booleans at the working size, clipped
-        to its rectangle) and the "mask_scale" from image pixels to it.
-        Returns how many detections got an outline."""
+        to its rectangle unless clip=False: a bed's rectangle stops at the
+        visible mattress, SAM's outline may run on over what lies on it) and
+        the "mask_scale" from image pixels to it. Returns how many detections
+        got an outline."""
         from PIL import Image
 
         torch = self.torch
@@ -352,6 +354,8 @@ class Segmenter:
             clipped = np.zeros_like(mask)
             clipped[y0:y1 + 1, x0:x1 + 1] = mask[y0:y1 + 1, x0:x1 + 1]
             box_area = max((x1 - x0 + 1) * (y1 - y0 + 1), 1)
+            if not clip and clipped.sum() >= MIN_OUTLINE_SHARE * box_area:
+                clipped = mask                            # the outline runs past the rectangle
             if clipped.sum() >= MIN_OUTLINE_SHARE * box_area:
                 det["mask"], det["mask_scale"] = clipped, scale
                 outlined += 1

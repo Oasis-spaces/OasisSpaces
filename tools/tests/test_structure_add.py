@@ -139,7 +139,7 @@ def stub(advisor):
     stub.picked_frames = lambda purpose, count: None
     stub.room_frames = lambda count=3: []
     stub.chosen = None
-    stub.place_by_masks = lambda shapes, label: (None, 0)
+    stub.place_by_masks = lambda shapes, label: ([], 0)
     return stub
 
 
@@ -162,15 +162,15 @@ def test_masks_place_the_piece_before_claude_is_asked_and_refuse_it_when_they_di
            "source": "masks", "reason": "placed by its masks in 4 keyframe(s), score 0.46, against W0"}
     advisor = Answers({"add": {"against": "W1", "width_m": 1, "depth_m": 0.6, "height_m": 2}})
     agent_ = stub(advisor)
-    agent_.place_by_masks = lambda shapes, label: (box, 4)
+    agent_.place_by_masks = lambda shapes, label: ([box], 4)
     shapes = room()
     applied = agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
     assert shapes["boxes"] == [box] and applied == ["added B0 wardrobe: " + box["reason"]] and advisor.asked == []
-    agent_.place_by_masks = lambda shapes, label: (None, 5)                  # masks exist but fit no box
+    agent_.place_by_masks = lambda shapes, label: ([], 5)                    # masks exist but fit no box
     shapes = room()
     applied = agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
     assert shapes["boxes"] == [] and "support no box" in applied[0] and advisor.asked == []
-    agent_.place_by_masks = lambda shapes, label: (None, 0)                  # no masks at all: ask Claude
+    agent_.place_by_masks = lambda shapes, label: ([], 0)                    # no masks at all: ask Claude
     shapes = room()
     agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
     assert len(advisor.asked) == 1 and len(shapes["boxes"]) == 1

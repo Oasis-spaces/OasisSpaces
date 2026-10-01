@@ -929,15 +929,15 @@ class Agent:
         self.judged("structure", {**verdict, "applied": applied},
                     "; ".join(applied) or "no changes")
 
-    def place_by_masks(self, shapes: dict, label: str) -> tuple[dict | None, int]:
-        """Fit a box for `label` to its SAM masks in the keyframes
-        (pipeline/placement.py). Returns (box or None, evidence frames)."""
+    def place_by_masks(self, shapes: dict, label: str) -> tuple[list[dict], int]:
+        """Fit boxes for `label` to its SAM masks in the keyframes
+        (pipeline/placement.py), one per instance. Returns (boxes, evidence frames)."""
         units = self.densify_metrics().get("colmap_units_per_metre")
         evidence = placement.mask_evidence(self.space, label, log=lambda text: print("    " + text))
-        box = placement.search(self.space, shapes, label, evidence, units, log=lambda text: print("    " + text))
+        found = placement.instances(self.space, shapes, label, evidence, units, log=lambda text: print("    " + text))
         sheet = self.space / f"placement-{label.replace(' ', '-')}.png"
-        self.safe(placement.evidence_sheet, evidence, box, sheet, self.space)
-        return box, len(evidence["frames"])
+        self.safe(placement.evidence_sheet, evidence, found[0] if found else None, sheet, self.space)
+        return found, len(evidence["frames"])
 
     def place_dropped_piece(self, shapes: dict, label: str, dropped: list[tuple[str, str]]) -> list[str]:
         """The review dropped every '{label}' box as a fragment (a door leaf, a
@@ -948,10 +948,11 @@ class Agent:
         units = self.densify_metrics().get("colmap_units_per_metre")
         if not units:
             return applied
-        by_masks, evidence_frames = self.safe(self.place_by_masks, shapes, label, default=(None, 0)) or (None, 0)
+        by_masks, evidence_frames = self.safe(self.place_by_masks, shapes, label, default=([], 0)) or ([], 0)
         if by_masks:
-            shapes["boxes"].append(by_masks)
-            applied.append(f"added B{len(shapes['boxes']) - 1} {label}: {by_masks['reason']}")
+            for box in by_masks:
+                shapes["boxes"].append(box)
+                applied.append(f"added B{len(shapes['boxes']) - 1} {label}: {box['reason']}")
             return applied
         if evidence_frames >= placement.MIN_FRAMES:
             # The keyframes that saw one do not agree on any box: the frames are the

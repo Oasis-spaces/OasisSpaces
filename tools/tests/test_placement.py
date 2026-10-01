@@ -83,6 +83,60 @@ def test_a_few_false_detections_do_not_sink_a_piece_but_a_few_good_frames_do_not
     assert pl.trimmed_mean([0.9]) == 0.9 and pl.trimmed_mean([]) == 0.0
 
 
+def test_loose_things_on_a_piece_join_its_evidence_and_others_do_not():
+    bed = [{"label": "bed", "score": 0.5, "box": [100, 1000, 2000, 3800]}]
+    frame = bed + [{"label": "backpack", "score": 0.6, "box": [500, 2000, 900, 2600]},      # on the bed
+                   {"label": "backpack", "score": 0.6, "box": [1800, 2200, 2400, 2800]},    # half off it
+                   {"label": "curtain", "score": 0.7, "box": [600, 1200, 1000, 3000]},      # hanging: never
+                   {"label": "pillow", "score": 0.2, "box": [300, 1100, 700, 1400]}]        # too weak a detection
+    joined = pl.with_what_lies_on_it(bed, frame, {"backpack", "pillow"})
+    assert [d["label"] for d in joined] == ["bed", "backpack"] and joined[1]["box"][0] == 500
+
+
+def test_a_detection_at_the_frames_edge_is_scored_inside_its_rectangle():
+    v = view([0, -30, 0], [0, 0, 0])
+    lo, hi = np.array([-5, -5, -5.0]), np.array([5, 5, 5.0])
+    full = pl.silhouette(lo, hi, v, (240, 135))
+    rows, cols = np.nonzero(full)
+    # a sliver: only the left third of the piece shows, the detector's rectangle ends at the frame's left edge
+    cut = cols.min() + (cols.max() - cols.min()) // 3
+    sliver = full.copy()
+    sliver[:, cut:] = False
+    box = [0, int(rows.min() * pl.GRID), int(cut * pl.GRID), int(rows.max() * pl.GRID)]
+    window = pl.scoring_window([{"box": box}], 1080, 1920)
+    assert window is not None and window[0] == 0
+    assert pl.scoring_window([{"box": [300, 500, 700, 900]}], 1080, 1920) is None             # clear of the edges
+    whole = {"label": "x", "frames": {"a": {"mask": sliver, **v, "window": None}}, "unseen": {}}
+    windowed = {"label": "x", "frames": {"a": {"mask": sliver, **v, "window": window}}, "unseen": {}}
+    assert pl.score(lo, hi, whole)[0] < 0.5 < pl.score(lo, hi, windowed)[0]
+
+
+def test_two_cupboards_under_one_label_come_out_as_two_instances():
+    shapes = room()
+    one_lo, one_hi = np.array([-20.0, 5.0, -11.5]), np.array([-14.6, 14.0, 6.5])          # on W0
+    two_lo, two_hi = np.array([-10.0, 22.0 - 5.4, -11.5]), np.array([-1.0, 22.0, 6.5])    # on W1 (y = 22)
+    def views_at(centre, positions):
+        return {f"frame_{k:05d}.jpg": view(pos, centre) for k, pos in positions}
+    v1 = views_at((one_lo + one_hi) / 2, [(1, [-5.0, 2.0, 1.0]), (2, [-2.0, 12.0, 1.0]), (3, [-12.0, 14.0, 2.0])])
+    v2 = views_at((two_lo + two_hi) / 2, [(4, [-6.0, 2.0, 1.0]), (5, [2.0, 8.0, 1.0]), (6, [-14.0, 10.0, 2.0]), (7, [-5.0, 5.0, 3.0])])
+    frames = {n: {"mask": pl.silhouette(one_lo, one_hi, v, (240, 135)), **v, "window": None} for n, v in v1.items()}
+    frames.update({n: {"mask": pl.silhouette(two_lo, two_hi, v, (240, 135)), **v, "window": None} for n, v in v2.items()})
+    found = pl.instances(Path("."), shapes, "wardrobe", {"label": "wardrobe", "frames": frames, "unseen": {}}, UNITS,
+                         log=lambda *_: None)
+    assert len(found) == 2
+    walls = sorted(b["placement"]["wall"] for b in found)
+    assert walls == [0, 1]
+    for box in found:
+        truth = (one_lo, one_hi) if box["placement"]["wall"] == 0 else (two_lo, two_hi)
+        assert np.abs(np.array(box["min"]) - truth[0]).max() < 0.25 * UNITS
+        assert np.abs(np.array(box["max"]) - truth[1]).max() < 0.25 * UNITS
+
+
+def test_sizes_the_masks_cannot_tell_apart_go_to_the_typical_size():
+    assert pl.size_prior((0, 0, 1.5 * UNITS, 1.9 * UNITS, 0.5 * UNITS), "bed", UNITS) < 1e-9
+    assert pl.size_prior((0, 0, 0.9 * UNITS, 0.9 * UNITS, 0.4 * UNITS), "bed", UNITS) > 0.2
+
+
 def test_nothing_is_placed_without_evidence_or_where_the_phone_was():
     shapes = room()
     assert pl.search(Path("."), shapes, "wardrobe", {"label": "wardrobe", "frames": {}, "unseen": {}}, UNITS,

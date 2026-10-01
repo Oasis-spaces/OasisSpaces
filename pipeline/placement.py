@@ -18,6 +18,20 @@ few false detections should not sink a real piece; a piece that fits only a
 few frames should not pass), less half the share of the picture a candidate
 covers in keyframes that did not detect it (a piece standing where the
 detector saw bare wall). Below ACCEPT_SCORE nothing is placed.
+
+The search is two-stage: a coarse pass over every wall, position and size
+with the trimmed score finds the piece; a fine pass then sizes it on every
+frame the found piece explains, averaged without trimming and over the whole
+size range, because the one frame that shows a bed's near edge is exactly the
+frame trimming would drop for a box that stops short.
+
+Two things make the masks fairer evidence. Loose things lying on a piece (the
+clothes and bags on a bed, from the object list's roles) are outlined too and
+joined to its mask, since SAM outlines the visible bedding and would leave the
+cluttered half out. And where the detector's rectangle touches the picture's
+edge, the piece runs out of frame, so that frame is scored inside the
+rectangle (widened a little) rather than over the whole picture: a sliver
+view then counts for what it shows.
 """
 
 from __future__ import annotations
@@ -41,6 +55,14 @@ SIZES_M = {                 # (min, max, step) of width along the wall, depth in
     "seat": ((0.4, 0.9, 0.1), (0.4, 0.9, 0.1), (0.4, 0.5, 0.1)),
 }
 OFFSET_STEP_M = 0.1
+TYPICAL_M = {"wardrobe": (1.0, 0.55, 2.0), "bed": (1.5, 1.9, 0.5), "table": (1.2, 0.6, 0.75), "seat": (0.5, 0.5, 0.45)}
+PRIOR_WEIGHT = 0.03         # breaks ties between sizes the masks cannot tell apart, toward the typical size
+MAX_INSTANCES = 2           # a room can hold two beds or two cupboards under one label
+LOOSE_ROLES = {"loose"}                                  # object-list roles that lie on furniture
+BEDDING = {"pillow", "blanket", "cushion", "duvet", "quilt", "bedsheet", "bed sheet"}
+ON_TOP_SHARE = 0.5          # a loose detection joins a piece when this much of it lies inside the piece's box
+EDGE = 0.02                 # a detection within this share of the frame's edge is cut off by it
+WINDOW = 0.25               # how much a cut-off detection's rectangle is widened for scoring
 FAMILY_WORDS = {"table": ("table", "desk"), "seat": ("chair", "stool", "sofa", "seat", "bench"),
                 "bed": ("bed", "mattress"), "wardrobe": ("wardrobe", "cupboard", "almirah", "cabinet", "drawers", "shelf")}
 
@@ -147,21 +169,70 @@ def views_of(space: Path, names: list[str]) -> dict[str, dict]:
     return views
 
 
+def loose_roles(space: Path) -> set[str]:
+    """Names in the object list whose role says they lie on furniture, plus bedding."""
+    names = set(BEDDING)
+    try:
+        for o in json.loads((Path(space) / "objects.json").read_text()).get("objects") or []:
+            if o.get("role") in LOOSE_ROLES:
+                names.add(o["name"])
+    except (OSError, ValueError):
+        pass
+    return names
+
+
+def on_top(piece: list, loose: list) -> bool:
+    """Does at least ON_TOP_SHARE of the loose detection's rectangle lie inside the piece's?"""
+    ix = max(0, min(piece[2], loose[2]) - max(piece[0], loose[0]))
+    iy = max(0, min(piece[3], loose[3]) - max(piece[1], loose[1]))
+    area = max(1, (loose[2] - loose[0]) * (loose[3] - loose[1]))
+    return ix * iy / area >= ON_TOP_SHARE
+
+
+def with_what_lies_on_it(piece_dets: list[dict], frame_dets: list[dict], loose: set[str]) -> list[dict]:
+    """The piece's detections plus the loose things lying on it in this frame."""
+    def touches(a, b):
+        return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+    extra = [d for d in frame_dets
+             if d["label"] in loose and d.get("score", 1) >= MIN_DETECTION
+             and any(on_top(p["box"], d["box"]) or (d["label"] in BEDDING and touches(p["box"], d["box"]))
+                     for p in piece_dets)]
+    return [dict(d) for d in piece_dets] + [dict(d) for d in extra]
+
+
+def scoring_window(dets: list[dict], width: int, height: int) -> tuple[int, int, int, int] | None:
+    """The raster rectangle to score within when a detection is cut off by
+    the frame's edge (None otherwise): the detections' union, widened by WINDOW."""
+    boxes = [d["box"] for d in dets]
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    cut = x0 <= EDGE * width or y0 <= EDGE * height or x1 >= (1 - EDGE) * width or y1 >= (1 - EDGE) * height
+    if not cut:
+        return None
+    w, h = x1 - x0, y1 - y0
+    x0, x1 = max(0, x0 - WINDOW * w), min(width, x1 + WINDOW * w)
+    y0, y1 = max(0, y0 - WINDOW * h), min(height, y1 + WINDOW * h)
+    return int(x0 / GRID), int(y0 / GRID), int(np.ceil(x1 / GRID)), int(np.ceil(y1 / GRID))
+
+
 def mask_evidence(space: Path, label: str, segmenter=None, log=print) -> dict:
     """The keyframes that detected `label` (densify.json), each with its SAM
-    mask at the scoring raster, its pose and lens; and the keyframes that did
-    not. Masks are cached in workspace/masks/<label>.npz."""
+    mask at the scoring raster (joined with what lies on it), its scoring
+    window when the frame cuts it off, its pose and lens; and the keyframes
+    that did not. Masks are cached in workspace/masks/<label>.v3.npz."""
     from PIL import Image
 
     space = Path(space)
     meta = json.loads((space / "densify.json").read_text())
     detections = meta.get("detections") or {}
+    loose = loose_roles(space)
     hits = {name: [d for d in dets if d["label"] == label and d.get("score", 1) >= MIN_DETECTION]
             for name, dets in detections.items()}
     seen = sorted(n for n, d in hits.items() if d)
     unseen = sorted(n for n, d in hits.items() if not d)
     views = views_of(space, seen + unseen)
-    cache = space / "workspace" / "masks" / f"{label.replace(' ', '-')}.npz"
+    cache = space / "workspace" / "masks" / f"{label.replace(' ', '-')}.v3.npz"
     masks: dict[str, np.ndarray] = {}
     if cache.exists():
         with np.load(cache) as stored:
@@ -178,9 +249,9 @@ def mask_evidence(space: Path, label: str, segmenter=None, log=print) -> dict:
         for name in missing:
             view = views[name]
             shape = (view["height"] // GRID, view["width"] // GRID)
-            dets = [dict(d) for d in hits[name]]
+            dets = with_what_lies_on_it(hits[name], detections[name], loose)
             img = Image.open(space / "workspace" / "images" / name)
-            segmenter.outline(img, dets)
+            segmenter.outline(img, dets, clip=False)        # the outline may run past the rectangle
             union = np.zeros(shape, bool)
             for d in dets:
                 if "mask" in d:
@@ -192,10 +263,13 @@ def mask_evidence(space: Path, label: str, segmenter=None, log=print) -> dict:
             masks[name] = union
         cache.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache, **masks)
-        log(f"    outlined '{label}' in {len(missing)} keyframe(s)")
-    return {"label": label,
-            "frames": {n: {"mask": masks[n], **views[n]} for n in seen if n in masks and n in views},
-            "unseen": {n: views[n] for n in unseen if n in views}}
+        log(f"    outlined '{label}' in {len(missing)} keyframe(s), with what lies on it")
+    frames = {}
+    for n in seen:
+        if n in masks and n in views:
+            frames[n] = {"mask": masks[n], **views[n],
+                         "window": scoring_window(hits[n], views[n]["width"], views[n]["height"])}
+    return {"label": label, "frames": frames, "unseen": {n: views[n] for n in unseen if n in views}}
 
 
 # ----------------------------------------------------------------- the search
@@ -207,13 +281,20 @@ def trimmed_mean(values: list[float]) -> float:
     return float(np.mean(kept)) if kept else 0.0
 
 
-def score(lo, hi, evidence: dict) -> tuple[float, dict[str, float]]:
-    """Trimmed-mean IoU over the evidence frames, less MISS_WEIGHT times the
-    mean share of the picture covered in keyframes that saw no such piece."""
+def score(lo, hi, evidence: dict, trim: bool = True) -> tuple[float, dict[str, float]]:
+    """Trimmed-mean IoU over the evidence frames (plain mean with trim=False),
+    less MISS_WEIGHT times the mean share of the picture covered in keyframes
+    that saw no such piece."""
     per_frame = {}
     for name, view in evidence["frames"].items():
         mask = view["mask"]
-        per_frame[name] = iou(mask, silhouette(lo, hi, view, mask.shape))
+        sil = silhouette(lo, hi, view, mask.shape)
+        window = view.get("window")
+        if window:                                        # cut off by the frame: judge what it shows
+            x0, y0, x1, y1 = window
+            per_frame[name] = iou(mask[y0:y1, x0:x1], sil[y0:y1, x0:x1])
+        else:
+            per_frame[name] = iou(mask, sil)
     if not per_frame:
         return 0.0, {}
     miss = 0.0
@@ -221,13 +302,15 @@ def score(lo, hi, evidence: dict) -> tuple[float, dict[str, float]]:
         shape = (view["height"] // GRID, view["width"] // GRID)
         miss += silhouette(lo, hi, view, shape).mean()
     miss = miss / len(evidence["unseen"]) if evidence["unseen"] else 0.0
-    return trimmed_mean(list(per_frame.values())) - MISS_WEIGHT * miss, per_frame
+    agreement = trimmed_mean(list(per_frame.values())) if trim else float(np.mean(list(per_frame.values())))
+    return agreement - MISS_WEIGHT * miss, per_frame
 
 
 def candidates(shapes: dict, label: str, units: float, fine: tuple | None = None, family: str | None = None):
     """Boxes against every built wall: (wall index, offset from the wall's
     start, width, depth, height), sizes from SIZES_M[family] in solve units;
-    `fine` narrows the search around a (wall, offset, width, depth, height) result."""
+    `fine` keeps the wall and nearly the offset of a (wall, offset, width,
+    depth, height) result and tries every size for it."""
     sizes = SIZES_M[family or SIZES_M.get(label) and label or "wardrobe"]
     level = shapes.get("room_level") or {}
     room_centre = np.array((shapes.get("room") or {}).get("center", [0, 0])[:2], float)
@@ -248,10 +331,8 @@ def candidates(shapes: dict, label: str, units: float, fine: tuple | None = None
         floor_z = level.get("floor_z", p["center"][2] - p["half_b"])
         ranges = []
         for k, (lo_m, hi_m, step_m) in enumerate(sizes):
-            if fine:
-                centre = fine[2 + k]
-                ranges.append(np.clip(centre + np.array([-0.5, -0.25, 0.0, 0.25, 0.5]) * step_m * units,
-                                      lo_m * units, hi_m * units))
+            if fine:                                      # the whole range, at half the step
+                ranges.append(np.arange(lo_m, hi_m + 1e-9, step_m / 2) * units)
             else:
                 ranges.append(np.arange(lo_m, hi_m + 1e-9, step_m) * units)
         for width in ranges[0]:
@@ -276,23 +357,45 @@ def candidates(shapes: dict, label: str, units: float, fine: tuple | None = None
                         yield (i, offset, width, depth, height), lo, hi
 
 
-def search(space: Path, shapes: dict, label: str, evidence: dict, units: float, log=print) -> dict | None:
+def size_prior(key: tuple, family: str, units: float) -> float:
+    """How far a candidate's size is from the family's typical one, 0 (typical) to 1."""
+    typical = TYPICAL_M[family]
+    width, depth, height = key[2] / units, key[3] / units, key[4] / units
+    return float(np.mean([min(1.0, abs(v - t) / t) for v, t in zip((width, depth, height), typical)]))
+
+
+def search(space: Path, shapes: dict, label: str, evidence: dict, units: float, log=print,
+           min_frames: int = MIN_FRAMES) -> dict | None:
     """The best-scoring box for `label`, or None when nothing reaches
-    ACCEPT_SCORE in at least MIN_FRAMES frames. Coarse over every wall, then
-    fine around the best."""
+    ACCEPT_SCORE in at least `min_frames` frames. Coarse over every wall, then
+    fine around the best. Sizes the masks cannot tell apart (a bed seen along
+    its length, cut off by the frame) go to the typical size for the family."""
     if not evidence["frames"]:
         log(f"    no keyframe detected a {label}: nothing to place it by")
         return None
     best = None
     family = size_family(space, label)
-    for stage, fine in (("coarse", None), ("fine", "best")):
-        key = best["key"] if (fine and best) else None
-        for key_, lo, hi in candidates(shapes, label, units, fine=key, family=family):
-            total, per_frame = score(lo, hi, evidence)
-            if best is None or total > best["score"]:
-                best = {"key": key_, "min": lo.tolist(), "max": hi.tolist(), "score": total, "frames": per_frame}
-        if best is None:
-            break
+    for key_, lo, hi in candidates(shapes, label, units, family=family):
+        total, per_frame = score(lo, hi, evidence)
+        total -= PRIOR_WEIGHT * size_prior(key_, family, units)
+        if best is None or total > best["score"]:
+            best = {"key": key_, "min": lo.tolist(), "max": hi.tolist(), "score": total, "frames": per_frame}
+    if best is not None:
+        # Size it on the frames it explains, every one counting.
+        explained = {n: f for n, f in evidence["frames"].items() if best["frames"].get(n, 0) >= 0.2}
+        if len(explained) >= MIN_FRAMES:
+            sizing = {**evidence, "frames": explained}
+            sized = None
+            for key_, lo, hi in candidates(shapes, label, units, fine=best["key"], family=family):
+                total, per_frame = score(lo, hi, sizing, trim=False)
+                total -= PRIOR_WEIGHT * size_prior(key_, family, units)
+                if sized is None or total > sized["score"]:
+                    sized = {"key": key_, "min": lo.tolist(), "max": hi.tolist(), "score": total, "frames": per_frame}
+            if sized is not None:
+                # Keep the found piece's score and frames as its record; take the fine size and place.
+                full, per_frame = score(np.array(sized["min"]), np.array(sized["max"]), evidence)
+                best = {"key": sized["key"], "min": sized["min"], "max": sized["max"],
+                        "score": full - PRIOR_WEIGHT * size_prior(sized["key"], family, units), "frames": per_frame}
     if best is None:
         log(f"    no room for a {label} against any wall off the walk")
         return None
@@ -302,13 +405,38 @@ def search(space: Path, shapes: dict, label: str, evidence: dict, units: float, 
         f"{width / units:.2f} x {depth / units:.2f} x {height / units:.2f} m, score {best['score']:.2f} "
         f"({agreeing} of {len(best['frames'])} frames agree: "
         + ", ".join(f"{n[6:11]} {v:.2f}" for n, v in sorted(best["frames"].items())) + ")")
-    if best["score"] < ACCEPT_SCORE or agreeing < MIN_FRAMES:
+    if best["score"] < ACCEPT_SCORE or agreeing < min_frames:
         return None
     return {"min": best["min"], "max": best["max"], "points": 0, "source": "masks", "detected": label,
             "label": label, "build": True, "color": [190, 185, 175],
             "reason": f"placed by its masks in {agreeing} keyframe(s), score {best['score']:.2f}, against W{wall}",
             "placement": {"wall": wall, "offset_m": round(offset / units, 2), "score": round(best["score"], 3),
                           "frames": {n: round(v, 3) for n, v in best["frames"].items()}}}
+
+
+def instances(space: Path, shapes: dict, label: str, evidence: dict, units: float, log=print) -> list[dict]:
+    """Up to MAX_INSTANCES boxes for `label`: the best fit, then the best fit
+    to the frames it does not explain (a second cupboard under the same
+    label), each needing one more agreeing frame than the last."""
+    found = []
+    remaining = dict(evidence["frames"])
+    for n in range(MAX_INSTANCES):
+        if len(remaining) < MIN_FRAMES + n:
+            break
+        box = search(space, shapes, label, {**evidence, "frames": remaining}, units, log=log,
+                     min_frames=MIN_FRAMES + n)
+        if box is None:
+            break
+        found.append(box)
+        explained = {name for name, v in box["placement"]["frames"].items() if v >= 0.2}
+        remaining = {name: f for name, f in remaining.items() if name not in explained}
+        # the next instance must stand clear of this one
+        shapes = {**shapes, "cameras": list(shapes.get("cameras") or []) + [box_footprint_centre(box)]}
+    return found
+
+
+def box_footprint_centre(box: dict) -> list[float]:
+    return [(box["min"][0] + box["max"][0]) / 2, (box["min"][1] + box["max"][1]) / 2]
 
 
 def evidence_sheet(evidence: dict, box: dict | None, out: Path, space: Path) -> Path | None:
@@ -353,7 +481,7 @@ if __name__ == "__main__":
     shapes = json.loads((args.space / "shapes.json").read_text())
     units = json.loads((args.space / "densify.json").read_text())["colmap_units_per_metre"]
     evidence = mask_evidence(args.space, args.label)
-    box = search(args.space, shapes, args.label, evidence, units)
+    found = instances(args.space, shapes, args.label, evidence, units)
     if args.sheet:
-        print("wrote", evidence_sheet(evidence, box, args.sheet, args.space))
-    print(json.dumps({k: box[k] for k in ("min", "max", "reason", "placement")} if box else None, indent=1))
+        print("wrote", evidence_sheet(evidence, found[0] if found else None, args.sheet, args.space))
+    print(json.dumps([{k: box[k] for k in ("min", "max", "reason", "placement")} for box in found], indent=1))

@@ -225,10 +225,17 @@ the agent's judgement:
    the piece is placed by its own 2D evidence instead (`pipeline/placement.py`):
    the detector's keyframes are outlined with SAM, and the box whose
    silhouettes, projected through the frames' real cameras, overlap those masks
-   best, over every wall, position and size, is the piece; the pan's bed comes
-   back within 16 cm of its measured box from masks alone. Below the acceptance
-   score nothing is placed, and Claude is asked only when no keyframe saw the
-   piece at all.
+   best, over every wall, position and size, is the piece. The search is
+   two-stage: a trimmed score over all the frames finds the piece, then every
+   frame it explains sizes it; loose things lying on it (from the object
+   list's roles) join its outline; a view the frame cuts off is scored inside
+   the detector's rectangle; and two cupboards under one label come out as two
+   instances. The pan's bed comes back within 25 cm of its measured box from
+   masks alone. What the masks cannot do is see through clutter: a bed buried
+   under bags comes out narrow, which is why measured points are used first
+   and the masks only for pieces that have none. Below the acceptance score
+   nothing is placed, and Claude is asked only when no keyframe saw the piece
+   at all.
 4. `tools/blender_room.py` — a parametric Blender room.
 5. `pipeline/splat_seed.py` then `tools/opensplat` — a Gaussian splat. The
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's
@@ -466,10 +473,17 @@ phone (no model calls, no network while recording). Build and install with
   in; the outline's vertices are world points (`OutlineLift`), drawn through
   the live camera thirty times a second, so an outline stays on its thing
   while the phone turns instead of hanging where it was last analysed.
-- **The room map:** Apple's Core ML Depth Anything V2 Small (48 MB, downloaded
-  by `build.sh`) gives a depth for every pixel; the tracking's feature points
-  scale it to metres each frame (`DepthScale`), and every pixel of a detected
-  thing becomes a world point. `ObjectTracker` (in `CaptureRules`) matches
+- **The room map:** MoGe-2 small (MIT, built by `scripts/convert_depth_moge.py`,
+  66 MB) gives every pixel a place in metres on its own: a point map plus a
+  metric scale, with one depth offset recovered from the camera's known focal
+  length (`MetricDepth`). Where ARKit's tracking points are in view they
+  correct it (`DepthScale`, a line fitted in inverse depth). This is the
+  LiDAR replacement: measured against the pipeline's own reconstruction of
+  two rooms, MoGe-2 small alone is 8.5% off per pixel (scale 0.99) and 5.9%
+  with the points, where the previous relative model had no answer at all
+  without points, and the metric Depth Anything and Metric3Dv2 were 40% off
+  without a focal length. Every pixel of a detected thing becomes a world
+  point. `ObjectTracker` (in `CaptureRules`) matches
   each detection to the object it overlaps from above, remembers every 5 cm
   voxel ever seen of that object, so its box is the extent of everything seen
   from every angle, votes its label (a bed one frame called a sofa stays a
@@ -477,6 +491,15 @@ phone (no model calls, no network while recording). Build and install with
   out of view. Boxes are turned to the room's walls (from ARKit's wall
   planes). The mini map shows floor, walls, furniture, path and phone; tap it
   for the full floor plan. `capture.json` records the map.
+- **On the Mac, on a video:** `python3 tools/phone_sim_export.py spaces/<name>`
+  writes the space's frames, camera poses, sparse points and measured
+  furniture in ARKit's conventions; then, in
+  `apps/OasisCapture/Packages/CaptureRules`, `swift run -c release phonesim
+  ../../../../spaces/<name> --every 2` runs the phone's exact models,
+  decoding, refining, depth and tracker over the frames and judges what was
+  placed against stage 3's boxes (footprint overlap, centre error, sizes,
+  labels, what matched nothing). Changes to the phone's perception are
+  checked there before they go on a phone.
 - **Logs:** the app writes `Documents/oasis-capture.log` (model load times,
   analysis ms per frame); read it with
   `xcrun devicectl device copy from --domain-type appDataContainer --domain-identifier com.oasisspaces.capture --source Documents/oasis-capture.log --destination oasis-capture.log`.
