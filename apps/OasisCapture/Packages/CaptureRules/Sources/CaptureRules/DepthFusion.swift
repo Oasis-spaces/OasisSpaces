@@ -16,6 +16,13 @@ public enum DepthScale {
         /// Median relative error of the fit on the points it was fitted to.
         public var error: Float
 
+        public init(a: Float, b: Float, samples: Int, error: Float) {
+            self.a = a; self.b = b; self.samples = samples; self.error = error
+        }
+
+        /// No correction: the predicted values are inverse metres already.
+        public static let identity = Fit(a: 1, b: 0, samples: 0, error: 0.12)
+
         /// Metres for a predicted value.
         public func metres(_ predicted: Float) -> Float? {
             let inverse = a * predicted + b

@@ -24,7 +24,7 @@ targets:
     sources:
       - path: Sources
       - path: Resources/RoomSegmentation.mlpackage
-      - path: Resources/RoomDepth.mlpackage
+      - path: Resources/RoomMetricDepth.mlpackage
       - path: Resources/RoomObjects.mlpackage
       - path: Resources/MaskEncoder.mlpackage
       - path: Resources/MaskDecoder.mlpackage

@@ -8,9 +8,12 @@ import PackageDescription
 let package = Package(
     name: "CaptureRules",
     platforms: [.iOS(.v17), .macOS(.v14)],
-    products: [.library(name: "CaptureRules", targets: ["CaptureRules"])],
+    products: [.library(name: "CaptureRules", targets: ["CaptureRules"]),
+               .executable(name: "phonesim", targets: ["phonesim"])],
     targets: [
         .target(name: "CaptureRules", resources: [.process("Resources")]),
         .testTarget(name: "CaptureRulesTests", dependencies: ["CaptureRules"]),
+        // The phone's perception run on a processed space's frames, on the Mac (see Sources/phonesim).
+        .executableTarget(name: "phonesim", dependencies: ["CaptureRules"]),
     ]
 )

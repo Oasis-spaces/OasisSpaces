@@ -34,7 +34,7 @@ final class ModelLoadState: ObservableObject {
         Step(id: "RoomObjects", title: "Furniture and objects"),
         Step(id: "MaskEncoder", title: "Clean outlines"),
         Step(id: "RoomSegmentation", title: "Walls, floor and ceiling"),
-        Step(id: "RoomDepth", title: "Depth"),
+        Step(id: "RoomMetricDepth", title: "Depth in metres"),
     ]
     @Published var ready = false
 
@@ -64,12 +64,13 @@ struct FrameUnderstanding {
 /// - the mask refiner (MobileSAM) turns each detected thing's box into one
 ///   clean whole-object mask, so the outline follows the real edges of a bed
 ///   or a wardrobe instead of the detector's blocky, fragmented guess;
-/// - the depth model (Depth Anything V2) gives a value for every pixel
-///   (relative, not metres); the tracking's feature points give the true
-///   depth at a few dozen pixels, so a scale is fitted per frame and every
-///   pixel of a detected thing becomes a 3D point. From any angle those points
-///   land on the same object in the room, so it fuses into one box instead of
-///   a new one per viewpoint.
+/// - the depth model (MoGe-2 small) gives every pixel a place in metres on its
+///   own: a point map plus a metric scale, with one depth offset recovered
+///   from the camera's known focal length. Where ARKit's tracking points are
+///   in view they correct it (a line fitted in inverse depth). Every pixel of a
+///   detected thing becomes a 3D point; from any angle those points land on
+///   the same object in the room, so it fuses into one box instead of a new
+///   one per viewpoint.
 final class SceneRunner {
     /// One runner for the app: its models are loaded once, starting at launch.
     static let shared = SceneRunner()
@@ -82,8 +83,11 @@ final class SceneRunner {
     var pointsPerInstance = 500
 
     private var segmentation: VNCoreMLRequest?
-    private var depth: VNCoreMLRequest?
     private var detector: VNCoreMLRequest?
+    /// MoGe-2: a point map with its own metric scale (see MetricDepth).
+    private var depth: MLModel?
+    private var depthInput: CVPixelBuffer?
+    private static let depthWidth = 518, depthHeight = 392
     private var maskEncoder: MLModel?
     private var maskDecoder: MLModel?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -136,10 +140,10 @@ final class SceneRunner {
                     }
                 }
             }
-            for name in ["RoomObjects", "MaskEncoder", "MaskDecoder", "RoomSegmentation", "RoomDepth"] {
+            for name in ["RoomObjects", "MaskEncoder", "MaskDecoder", "RoomSegmentation", "RoomMetricDepth"] {
                 let model = Self.model(name, units: [.all, .cpuAndGPU])
                 if let model {
-                    if name.hasPrefix("Mask") {
+                    if name.hasPrefix("Mask") || name == "RoomMetricDepth" {
                         models[name] = model
                     } else if let request = Self.request(model) {
                         Self.warmUp(request, name: name)
@@ -148,13 +152,16 @@ final class SceneRunner {
                 }
                 if name == "MaskDecoder" {
                     report("MaskEncoder", models["MaskEncoder"] != nil && models["MaskDecoder"] != nil)
+                } else if name == "RoomMetricDepth" {
+                    report(name, models[name] != nil)
                 } else if !name.hasPrefix("Mask") {
                     report(name, loaded[name] != nil)
                 }
             }
             lock.lock()
             segmentation = loaded["RoomSegmentation"]
-            depth = loaded["RoomDepth"]
+            depth = models["RoomMetricDepth"]
+            depthInput = Self.pixelBuffer(width: Self.depthWidth, height: Self.depthHeight)
             detector = loaded["RoomObjects"]
             maskEncoder = models["MaskEncoder"]
             maskDecoder = models["MaskDecoder"]
@@ -200,8 +207,12 @@ final class SceneRunner {
     }
 
     private static func pixelBuffer(side: Int) -> CVPixelBuffer? {
+        pixelBuffer(width: side, height: side)
+    }
+
+    private static func pixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
-        CVPixelBufferCreate(nil, side, side, kCVPixelFormatType_32BGRA,
+        CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA,
                             [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer)
         return buffer
     }
@@ -246,7 +257,7 @@ final class SceneRunner {
     /// Analyses this frame if the previous run finished and the interval has
     /// passed. `done` gets the result on the scene queue.
     func submit(_ frame: ARFrame, done: @escaping (FrameUnderstanding) -> Void) {
-        let (segmentation, depthRequest, detector) = lock.withLock { (self.segmentation, self.depth, self.detector) }
+        let (segmentation, depthModel, depthBuffer, detector) = lock.withLock { (self.segmentation, self.depth, self.depthInput, self.detector) }
         guard let segmentation, !busy, frame.timestamp - lastRun >= interval else { return }
         busy = true
         lastRun = frame.timestamp
@@ -301,18 +312,27 @@ final class SceneRunner {
                 mark("refine")
             }
 
-            // 3. Depth, on the sensor image as it is (landscape, like the model was trained).
+            // 3. Depth in metres, on the sensor image as it is (landscape).
             let pinhole = Self.pinhole(camera)
             var understanding = FrameUnderstanding(time: time, segmentation: result, depthFit: nil,
                                                    instances: [], camera: pinhole)
             var depthValues: DepthValues?
-            if let depthRequest,
-               (try? VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .up).perform([depthRequest])) != nil,
-               let depthMap = (depthRequest.results?.first as? VNPixelBufferObservation)?.pixelBuffer,
-               let values = Self.floats(from: depthMap) {
-                let fit = Self.fitScale(values, pinhole: pinhole, points: points)
-                understanding.depthFit = fit
-                if let fit, fit.error < 0.2 { depthValues = values.scaled(fit) }
+            if let depthModel, let depthBuffer, let metric = self.metricDepth(depthModel, into: depthBuffer, from: buffer, pinhole: pinhole) {
+                // Inverse depth, so the tracking points can correct it with the same line fit as before.
+                var inverse = metric
+                for i in inverse.indices { inverse[i] = metric.data[i] > 0 ? 1 / metric.data[i] : .nan }
+                // With enough tracking points in view the fit corrects the model (measured: 6.6% error
+                // instead of 11.7%); a correction borrowed from other frames was worse than none, so
+                // without points the model's own metres stand.
+                let fit = Self.fitScale(inverse, pinhole: pinhole, points: points)
+                let used: DepthScale.Fit
+                if let fit, fit.error < 0.2, fit.a > 0.4, fit.a < 2.5 {
+                    used = fit
+                } else {
+                    used = .identity                                           // the model's own metres
+                }
+                understanding.depthFit = used
+                depthValues = inverse.scaled(used)
             }
             mark("depth")
             understanding.instances = instances.map { self.region($0, depth: depthValues, pinhole: pinhole) }
@@ -366,6 +386,47 @@ final class SceneRunner {
         let p = Self.floats(predictions), q = Self.floats(protos)
         return InstanceDecoder.decode(predictions: p, anchors: anchors, protos: q, maskWidth: maskWidth,
                                       maskHeight: maskHeight, spec: objects)
+    }
+
+    // MARK: Depth in metres
+
+    /// MoGe-2 on the landscape frame squeezed to its input: the point map's z
+    /// plus the shift the known focal length implies, times the model's metric
+    /// scale. Metres per pixel of the input, nan where the model has none.
+    private func metricDepth(_ model: MLModel, into input: CVPixelBuffer, from buffer: CVPixelBuffer, pinhole: PinholeCamera) -> DepthValues? {
+        let width = Self.depthWidth, height = Self.depthHeight
+        let source = CIImage(cvPixelBuffer: buffer)
+        let scaled = source.transformed(by: CGAffineTransform(scaleX: CGFloat(width) / source.extent.width,
+                                                              y: CGFloat(height) / source.extent.height))
+        ciContext.render(scaled, to: input, bounds: CGRect(x: 0, y: 0, width: width, height: height), colorSpace: CGColorSpaceCreateDeviceRGB())
+        let out: MLFeatureProvider
+        do {
+            out = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(pixelBuffer: input)]))
+        } catch {
+            if runs < 3 { AppLog.write("the depth model failed on a frame: \(error)") }
+            return nil
+        }
+        guard let pointArray = out.featureValue(for: "points")?.multiArrayValue,
+              let maskArray = out.featureValue(for: "mask")?.multiArrayValue,
+              let scaleArray = out.featureValue(for: "metric_scale")?.multiArrayValue else { return nil }
+        let points = Self.floats(pointArray), mask = Self.floats(maskArray)
+        guard points.count == width * height * 3, mask.count == width * height else {
+            if runs < 3 { AppLog.write("the depth model's outputs have an unexpected shape: \(pointArray.shape) \(maskArray.shape)") }
+            return nil
+        }
+        let scale = Float(truncating: scaleArray[0])
+        // The focal length relative to half the sensor's diagonal (the input keeps the sensor's aspect).
+        let focal = MetricDepth.relativeFocal(pixels: pinhole.fx, width: Float(pinhole.width), height: Float(pinhole.height))
+        var depth = [Float](repeating: .nan, count: width * height)
+        let ok: Bool = points.withUnsafeBufferPointer { p in
+            mask.withUnsafeBufferPointer { m in
+                guard let shift = MetricDepth.shift(points: p.baseAddress!, mask: m.baseAddress!, width: width, height: height, focal: focal) else { return false }
+                MetricDepth.metres(points: p.baseAddress!, mask: m.baseAddress!, width: width, height: height, shift: shift, scale: scale, into: &depth)
+                return true
+            }
+        }
+        guard ok else { return nil }
+        return DepthValues(data: depth, width: width, height: height, fit: nil)
     }
 
     // MARK: The mask refiner
@@ -508,6 +569,12 @@ final class SceneRunner {
         var height: Int
         var fit: DepthScale.Fit?
 
+        var indices: Range<Int> { data.indices }
+        subscript(i: Int) -> Float {
+            get { data[i] }
+            set { data[i] = newValue }
+        }
+
         /// Nearest value at a normalised position of the sensor image.
         func at(x: Float, y: Float) -> Float? {
             let px = Int(x * Float(width)), py = Int(y * Float(height))
@@ -526,36 +593,6 @@ final class SceneRunner {
             guard let fit, let d = at(x: x, y: y) else { return nil }
             return fit.metres(d)
         }
-    }
-
-    /// The depth model's grayscale float16 image as floats.
-    private static func floats(from buffer: CVPixelBuffer) -> DepthValues? {
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
-        let stride = CVPixelBufferGetBytesPerRow(buffer)
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
-        var data = [Float](repeating: 0, count: width * height)
-        switch CVPixelBufferGetPixelFormatType(buffer) {
-        case kCVPixelFormatType_OneComponent16Half:
-            for y in 0..<height {
-                let row = (base + y * stride).assumingMemoryBound(to: Float16.self)
-                for x in 0..<width { data[y * width + x] = Float(row[x]) }
-            }
-        case kCVPixelFormatType_OneComponent32Float:
-            for y in 0..<height {
-                let row = (base + y * stride).assumingMemoryBound(to: Float.self)
-                for x in 0..<width { data[y * width + x] = row[x] }
-            }
-        case kCVPixelFormatType_OneComponent8:
-            for y in 0..<height {
-                let row = (base + y * stride).assumingMemoryBound(to: UInt8.self)
-                for x in 0..<width { data[y * width + x] = Float(row[x]) / 255 }
-            }
-        default:
-            return nil
-        }
-        return DepthValues(data: data, width: width, height: height, fit: nil)
     }
 
     private static func pinhole(_ camera: ARCamera) -> PinholeCamera {
