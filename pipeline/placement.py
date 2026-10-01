@@ -41,6 +41,24 @@ SIZES_M = {                 # (min, max, step) of width along the wall, depth in
     "seat": ((0.4, 0.9, 0.1), (0.4, 0.9, 0.1), (0.4, 0.5, 0.1)),
 }
 OFFSET_STEP_M = 0.1
+FAMILY_WORDS = {"table": ("table", "desk"), "seat": ("chair", "stool", "sofa", "seat", "bench"),
+                "bed": ("bed", "mattress"), "wardrobe": ("wardrobe", "cupboard", "almirah", "cabinet", "drawers", "shelf")}
+
+
+def size_family(space: Path, label: str) -> str:
+    """Which SIZES_M entry fits `label`: the object list's build_as (objects.json,
+    the pipeline's own mapping) when it has one, else by the name's words."""
+    try:
+        objects = json.loads((Path(space) / "objects.json").read_text()).get("objects") or []
+        for o in objects:
+            if o.get("name") == label and o.get("build_as") in SIZES_M:
+                return o["build_as"]
+    except (OSError, ValueError):
+        pass
+    for family, words in FAMILY_WORDS.items():
+        if any(w in label for w in words):
+            return family
+    return "wardrobe"
 
 
 # ----------------------------------------------------------------- geometry
@@ -206,11 +224,11 @@ def score(lo, hi, evidence: dict) -> tuple[float, dict[str, float]]:
     return trimmed_mean(list(per_frame.values())) - MISS_WEIGHT * miss, per_frame
 
 
-def candidates(shapes: dict, label: str, units: float, fine: tuple | None = None):
+def candidates(shapes: dict, label: str, units: float, fine: tuple | None = None, family: str | None = None):
     """Boxes against every built wall: (wall index, offset from the wall's
-    start, width, depth, height), sizes from SIZES_M in solve units; `fine`
-    narrows the search around a (wall, offset, width, depth, height) result."""
-    sizes = SIZES_M.get(label, SIZES_M["wardrobe"])
+    start, width, depth, height), sizes from SIZES_M[family] in solve units;
+    `fine` narrows the search around a (wall, offset, width, depth, height) result."""
+    sizes = SIZES_M[family or SIZES_M.get(label) and label or "wardrobe"]
     level = shapes.get("room_level") or {}
     room_centre = np.array((shapes.get("room") or {}).get("center", [0, 0])[:2], float)
     cameras = np.array(shapes.get("cameras") or np.zeros((0, 2)), float)
@@ -266,9 +284,10 @@ def search(space: Path, shapes: dict, label: str, evidence: dict, units: float, 
         log(f"    no keyframe detected a {label}: nothing to place it by")
         return None
     best = None
+    family = size_family(space, label)
     for stage, fine in (("coarse", None), ("fine", "best")):
         key = best["key"] if (fine and best) else None
-        for key_, lo, hi in candidates(shapes, label, units, fine=key):
+        for key_, lo, hi in candidates(shapes, label, units, fine=key, family=family):
             total, per_frame = score(lo, hi, evidence)
             if best is None or total > best["score"]:
                 best = {"key": key_, "min": lo.tolist(), "max": hi.tolist(), "score": total, "frames": per_frame}
@@ -279,7 +298,7 @@ def search(space: Path, shapes: dict, label: str, evidence: dict, units: float, 
         return None
     agreeing = sum(1 for v in best["frames"].values() if v >= 0.2)
     wall, offset, width, depth, height = best["key"]
-    log(f"    {label}: best fit against W{wall}, {offset / units:.2f} m along it, "
+    log(f"    {label} (sized as a {family}): best fit against W{wall}, {offset / units:.2f} m along it, "
         f"{width / units:.2f} x {depth / units:.2f} x {height / units:.2f} m, score {best['score']:.2f} "
         f"({agreeing} of {len(best['frames'])} frames agree: "
         + ", ".join(f"{n[6:11]} {v:.2f}" for n, v in sorted(best["frames"].items())) + ")")
