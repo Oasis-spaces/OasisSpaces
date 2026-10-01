@@ -220,7 +220,15 @@ the agent's judgement:
    where the video shows none, or far from where it shows it, is visible as an
    offset rather than a hunch. Claude's render check grades such a
    misplacement structural, which sends the room back to the structure review
-   with the rows in front of it.
+   with the rows in front of it. When a review drops every box of a furniture
+   type as fragments (a cupboard whose boxes were its open door and a shelf),
+   the piece is placed by its own 2D evidence instead (`pipeline/placement.py`):
+   the detector's keyframes are outlined with SAM, and the box whose
+   silhouettes, projected through the frames' real cameras, overlap those masks
+   best, over every wall, position and size, is the piece; the pan's bed comes
+   back within 16 cm of its measured box from masks alone. Below the acceptance
+   score nothing is placed, and Claude is asked only when no keyframe saw the
+   piece at all.
 4. `tools/blender_room.py` — a parametric Blender room.
 5. `pipeline/splat_seed.py` then `tools/opensplat` — a Gaussian splat. The
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's

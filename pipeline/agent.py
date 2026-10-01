@@ -54,6 +54,7 @@ from object_frames import draw_object_frames  # noqa: E402
 from semantics import MAX_OBJECTS, ROLES, Vocabulary, clean_name, room_vocabulary  # noqa: E402
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
 from pointcloud import space_model_dir  # noqa: E402
+import placement  # noqa: E402
 from reconstruct import (  # noqa: E402
     MAX_PATH_JUMP, camera_path_jump, mean_reprojection, registered_images, solved_models,
 )
@@ -194,6 +195,24 @@ ADD_BOXES_MAX = 3                # boxes Claude may add from the frames in one s
 FURNITURE_TYPES = {"bed", "seat", "table", "wardrobe", "block"}
 ADDED_SIZE_M = {"width": (0.3, 4.0), "depth": (0.2, 2.0), "height": (0.2, 3.0)}   # sanity limits, metres
 CAMERA_CLEARANCE_M = 0.1         # an added box this close to where the phone was cannot be there
+ASKABLE_PIECES = {"bed", "wardrobe", "table", "seat"}   # a review that drops every box of one of these is asked where it stands
+
+
+def dropped_pieces(shapes: dict, verdict: dict, applied: list[str]) -> dict[str, list[tuple[str, str]]]:
+    """Furniture types the review has just dropped every box of, as fragments,
+    with nothing of that type left built: {label: [(id, why), ...]}."""
+    boxes = shapes["boxes"]
+    built = {b.get("label") for b in boxes if b.get("build", True)}
+    found: dict[str, list[tuple[str, str]]] = {}
+    for item in verdict.get("drop_boxes") or []:
+        ident = str(item.get("id", ""))
+        if f"dropped {ident}" not in applied:
+            continue
+        box = boxes[int(ident[1:])]
+        label = box.get("detected") or box.get("label")
+        if label in ASKABLE_PIECES and label not in built:
+            found.setdefault(label, []).append((ident, str(item.get("why", ""))))
+    return found
 
 
 def place_added_box(shapes: dict, item: dict, units: float) -> dict | str:
@@ -903,10 +922,88 @@ class Agent:
                   + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
             return
         applied = self.apply_structure_review(shapes, verdict)
+        for label, dropped in dropped_pieces(shapes, verdict, applied).items():
+            applied += self.safe(self.place_dropped_piece, shapes, label, dropped, default=[]) or []
         shapes_path.write_text(json.dumps(shapes, indent=1) + "\n")
         draw_plan(self.space, self.space / "plan-reviewed.png")
         self.judged("structure", {**verdict, "applied": applied},
                     "; ".join(applied) or "no changes")
+
+    def place_by_masks(self, shapes: dict, label: str) -> tuple[dict | None, int]:
+        """Fit a box for `label` to its SAM masks in the keyframes
+        (pipeline/placement.py). Returns (box or None, evidence frames)."""
+        units = self.densify_metrics().get("colmap_units_per_metre")
+        evidence = placement.mask_evidence(self.space, label, log=lambda text: print("    " + text))
+        box = placement.search(self.space, shapes, label, evidence, units, log=lambda text: print("    " + text))
+        sheet = self.space / f"placement-{label.replace(' ', '-')}.png"
+        self.safe(placement.evidence_sheet, evidence, box, sheet, self.space)
+        return box, len(evidence["frames"])
+
+    def place_dropped_piece(self, shapes: dict, label: str, dropped: list[tuple[str, str]]) -> list[str]:
+        """The review dropped every '{label}' box as a fragment (a door leaf, a
+        shelf) and nothing of that type is built, so the room would lose a
+        piece the frames show. Ask where the whole piece stands and add it
+        there (place_added_box); a refused spot gets one more try."""
+        applied = []
+        units = self.densify_metrics().get("colmap_units_per_metre")
+        if not units:
+            return applied
+        by_masks, evidence_frames = self.safe(self.place_by_masks, shapes, label, default=(None, 0)) or (None, 0)
+        if by_masks:
+            shapes["boxes"].append(by_masks)
+            applied.append(f"added B{len(shapes['boxes']) - 1} {label}: {by_masks['reason']}")
+            return applied
+        if evidence_frames >= placement.MIN_FRAMES:
+            # The keyframes that saw one do not agree on any box: the frames are the
+            # stronger evidence, so the piece is not guessed into the room.
+            applied.append(f"no {label} added: its masks in {evidence_frames} keyframe(s) support no box against a wall")
+            return applied
+        if not self.advisor.available:
+            return applied
+        crops = self.space / "object-frames.png"
+        plan = self.space / "plan-candidates.png"
+        images = ([plan] if plan.exists() else []) + ([crops] if crops.exists() else []) \
+            + (self.picked_frames("objects", 3) or []) + self.room_frames(2)
+        reasons = "; ".join(f"{ident}: {why}" for ident, why in dropped)
+        prompt = (
+            f"Our review of this room dropped these boxes labelled '{label}' as fragments, not the "
+            f"whole piece: {reasons}. No {label} is built now. If the frames show that this room "
+            f"really has a {label}, say where the whole piece stands so it can be built.\n"
+            "The first image is the floor plan from above: red numbered lines are the walls (W), "
+            "the blue dots joined by a line are where the phone was, and nothing solid stands on "
+            "that walk. "
+            + ("The next image shows the review's boxes outlined in the two frames where each was "
+               "seen best, the dropped ones among them. " if crops.exists() else "")
+            + "The remaining images are frames of the room. An open door lying flat along a wall "
+            "belongs to a body standing next to it, usually in the corner it swings from.\n"
+            "Give the wall the piece stands against (W id), the wall it meets at its nearest corner "
+            "(W id, or null when it stands away from the corners), offset_m from that corner to its "
+            "near side, and its width_m along the wall, depth_m into the room and height_m, judged "
+            "from the frames and from what such furniture usually measures.\n"
+            'Fields: {"add": {"against": "W<n>", "from_corner_with": "W<n>" or null, "offset_m": number, '
+            '"width_m": number, "depth_m": number, "height_m": number, "why": string}} '
+            f'or {{"none": true, "why": string}} when the frames do not show a whole {label}.')
+        for attempt in range(2):
+            verdict = self.advisor.ask_json(prompt, images, max_tokens=800)
+            if not verdict:
+                applied.append(f"asked where the {label} stands: no usable answer")
+                break
+            if verdict.get("none") or not isinstance(verdict.get("add"), dict):
+                applied.append(f"no {label} added: {verdict.get('why', 'Claude sees no whole piece')}")
+                break
+            item = {**verdict["add"], "label": label}
+            placed = place_added_box(shapes, item, units)
+            if isinstance(placed, str):
+                applied.append(f"ignored a {label} against {item.get('against')}: {placed}")
+                prompt += f"\n\nThat spot was refused: {placed}. Give another, or none."
+                continue
+            shapes["boxes"].append(placed)
+            corner = item.get("from_corner_with")
+            applied.append(f"asked where the {label} stands: added B{len(shapes['boxes']) - 1} against "
+                           f"{item.get('against')}" + (f", from its corner with {corner}" if corner else "")
+                           + f" ({item.get('why', '')})")
+            break
+        return applied
 
     def apply_structure_review(self, shapes: dict, verdict: dict) -> list[str]:
         """Apply Claude's decisions within fixed limits; report what happened."""
@@ -1118,6 +1215,13 @@ class Agent:
             self.decide("shapes", "accept",
                         f"the second review left {len(structural_problems(second))} structural "
                         f"problem(s), down from {len(problems)}")
+            return
+        if second is None and self.judgements and self.judgements[-1].get("stage") == "structure" \
+                and self.judgements[-1].get("applied"):
+            # No answer from the second check: the first room is known to be wrong and the
+            # second review changed something, so the second room is the better bet.
+            self.decide("shapes", "accept", "the second check gave no answer; keeping the second room, "
+                        "since the first was found structurally wrong and the review changed it")
             return
         for name in saved:
             shutil.copy2(kept / name, self.space / name)

@@ -105,6 +105,84 @@ def test_without_a_measured_scale_nothing_is_added():
     assert shapes["boxes"] == [] and "not measured" in applied[0]
 
 
+def test_dropping_every_wardrobe_box_asks_for_the_wardrobe_but_a_built_bed_does_not():
+    shapes = room()
+    shapes["boxes"] = [{"detected": "wardrobe", "label": "wardrobe", "build": False, "min": [0] * 3, "max": [1] * 3},
+                       {"detected": "wardrobe", "label": "wardrobe", "build": False, "min": [0] * 3, "max": [1] * 3},
+                       {"detected": "bed", "label": "bed", "build": False, "min": [0] * 3, "max": [1] * 3},
+                       {"detected": "bed", "label": "bed", "build": True, "min": [0] * 3, "max": [1] * 3}]
+    verdict = {"drop_boxes": [{"id": "B0", "why": "the room door"}, {"id": "B1", "why": "its open door leaf"},
+                              {"id": "B2", "why": "a shelf"}]}
+    asked = agent.dropped_pieces(shapes, verdict, ["dropped B0", "dropped B1", "dropped B2"])
+    assert asked == {"wardrobe": [("B0", "the room door"), ("B1", "its open door leaf")]}
+    assert agent.dropped_pieces(shapes, verdict, ["kept B0: never dropped"]) == {}      # only what was really dropped
+
+
+class Answers:
+    """A stand-in advisor that answers each question from a list."""
+    available = True
+
+    def __init__(self, *answers):
+        self.answers, self.asked = list(answers), []
+
+    def ask_json(self, prompt, images, max_tokens=0):
+        self.asked.append(prompt)
+        return self.answers.pop(0) if self.answers else None
+
+
+def stub(advisor):
+    import tempfile
+    stub = agent.Agent.__new__(agent.Agent)
+    stub.space = Path(tempfile.mkdtemp())
+    stub.advisor = advisor
+    stub.densify_metrics = lambda: {"colmap_units_per_metre": UNITS}
+    stub.picked_frames = lambda purpose, count: None
+    stub.room_frames = lambda count=3: []
+    stub.chosen = None
+    stub.place_by_masks = lambda shapes, label: (None, 0)
+    return stub
+
+
+def test_the_answer_places_the_piece_and_a_refused_spot_gets_one_more_try():
+    shapes = room()
+    shapes["cameras"] = [[-15.0, 0.0]]
+    on_the_walk = {"against": "W0", "from_corner_with": "W3", "offset_m": 0.3, "width_m": 1.0,
+                   "depth_m": 0.6, "height_m": 2.0, "why": "next to its open door"}
+    in_the_corner = {**on_the_walk, "against": "W1", "from_corner_with": "W0", "offset_m": 0.0}
+    advisor = Answers({"add": on_the_walk}, {"add": in_the_corner})
+    applied = agent.Agent.place_dropped_piece(stub(advisor), shapes, "wardrobe", [("B1", "its open door leaf")])
+    assert len(advisor.asked) == 2 and "refused" in advisor.asked[1]
+    assert applied[0].startswith("ignored a wardrobe against W0") and "phone stood" in applied[0]
+    assert applied[1].startswith("asked where the wardrobe stands: added B0 against W1, from its corner with W0")
+    assert shapes["boxes"][0]["label"] == "wardrobe" and shapes["boxes"][0]["source"] == "claude"
+
+
+def test_masks_place_the_piece_before_claude_is_asked_and_refuse_it_when_they_disagree():
+    box = {"min": [-20.0, 0.0, -11.5], "max": [-14.6, 9.0, 6.5], "label": "wardrobe", "build": True,
+           "source": "masks", "reason": "placed by its masks in 4 keyframe(s), score 0.46, against W0"}
+    advisor = Answers({"add": {"against": "W1", "width_m": 1, "depth_m": 0.6, "height_m": 2}})
+    agent_ = stub(advisor)
+    agent_.place_by_masks = lambda shapes, label: (box, 4)
+    shapes = room()
+    applied = agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
+    assert shapes["boxes"] == [box] and applied == ["added B0 wardrobe: " + box["reason"]] and advisor.asked == []
+    agent_.place_by_masks = lambda shapes, label: (None, 5)                  # masks exist but fit no box
+    shapes = room()
+    applied = agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
+    assert shapes["boxes"] == [] and "support no box" in applied[0] and advisor.asked == []
+    agent_.place_by_masks = lambda shapes, label: (None, 0)                  # no masks at all: ask Claude
+    shapes = room()
+    agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
+    assert len(advisor.asked) == 1 and len(shapes["boxes"]) == 1
+
+
+def test_no_whole_piece_means_nothing_is_added():
+    shapes = room()
+    applied = agent.Agent.place_dropped_piece(stub(Answers({"none": True, "why": "only a door"})),
+                                              shapes, "wardrobe", [("B0", "the room door")])
+    assert shapes["boxes"] == [] and applied == ["no wardrobe added: only a door"]
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):
