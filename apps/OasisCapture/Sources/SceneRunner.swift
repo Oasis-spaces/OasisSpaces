@@ -1,6 +1,7 @@
 import Accelerate
 import ARKit
 import Combine
+import CoreImage
 import CoreML
 import Vision
 import CaptureRules
@@ -31,6 +32,7 @@ final class ModelLoadState: ObservableObject {
 
     @Published var steps = [
         Step(id: "RoomObjects", title: "Furniture and objects"),
+        Step(id: "MaskEncoder", title: "Clean outlines"),
         Step(id: "RoomSegmentation", title: "Walls, floor and ceiling"),
         Step(id: "RoomDepth", title: "Depth"),
     ]
@@ -59,6 +61,9 @@ struct FrameUnderstanding {
 ///   mask per thing: this sofa, that wardrobe, each pillow;
 /// - the surface segmentation (SegFormer on ADE20K) gives the walls, floor,
 ///   ceiling, doors and windows, which a detector does not do well;
+/// - the mask refiner (MobileSAM) turns each detected thing's box into one
+///   clean whole-object mask, so the outline follows the real edges of a bed
+///   or a wardrobe instead of the detector's blocky, fragmented guess;
 /// - the depth model (Depth Anything V2) gives a value for every pixel
 ///   (relative, not metres); the tracking's feature points give the true
 ///   depth at a few dozen pixels, so a scale is fitted per frame and every
@@ -79,6 +84,17 @@ final class SceneRunner {
     private var segmentation: VNCoreMLRequest?
     private var depth: VNCoreMLRequest?
     private var detector: VNCoreMLRequest?
+    private var maskEncoder: MLModel?
+    private var maskDecoder: MLModel?
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private var refinerInput: CVPixelBuffer?
+    /// The refiner sees the upright image with its long side scaled to this, padded square.
+    private static let refinerSide = 1024
+    /// Most things refined per frame (the largest first), and the share of the image
+    /// below which a thing keeps the detector's mask (a crisp edge on a plug socket is not
+    /// worth a decode). On an iPhone 13 the encoder takes about 50 ms and each decode 12.
+    var refineLimit = 6
+    var refineMinShare: Float = 0.004
     private let queue = DispatchQueue(label: "capture.scene", qos: .userInitiated)
     private var busy = false
     private var lastRun: Double = -1
@@ -111,28 +127,83 @@ final class SceneRunner {
         queue.async { [self] in
             let began = Date()
             var loaded: [String: VNCoreMLRequest] = [:]
-            for name in ["RoomObjects", "RoomSegmentation", "RoomDepth"] {
-                let request = Self.request(name, units: [.all, .cpuAndGPU])
-                if let request { Self.warmUp(request, name: name) }
-                loaded[name] = request
+            var models: [String: MLModel] = [:]
+            func report(_ step: String, _ ok: Bool) {
                 DispatchQueue.main.async {
-                    if let i = self.loadState.steps.firstIndex(where: { $0.id == name }) {
-                        self.loadState.steps[i].done = request != nil
-                        self.loadState.steps[i].failed = request == nil
+                    if let i = self.loadState.steps.firstIndex(where: { $0.id == step }) {
+                        self.loadState.steps[i].done = ok
+                        self.loadState.steps[i].failed = !ok
                     }
+                }
+            }
+            for name in ["RoomObjects", "MaskEncoder", "MaskDecoder", "RoomSegmentation", "RoomDepth"] {
+                let model = Self.model(name, units: [.all, .cpuAndGPU])
+                if let model {
+                    if name.hasPrefix("Mask") {
+                        models[name] = model
+                    } else if let request = Self.request(model) {
+                        Self.warmUp(request, name: name)
+                        loaded[name] = request
+                    }
+                }
+                if name == "MaskDecoder" {
+                    report("MaskEncoder", models["MaskEncoder"] != nil && models["MaskDecoder"] != nil)
+                } else if !name.hasPrefix("Mask") {
+                    report(name, loaded[name] != nil)
                 }
             }
             lock.lock()
             segmentation = loaded["RoomSegmentation"]
             depth = loaded["RoomDepth"]
             detector = loaded["RoomObjects"]
+            maskEncoder = models["MaskEncoder"]
+            maskDecoder = models["MaskDecoder"]
+            refinerInput = Self.pixelBuffer(side: Self.refinerSide)
             loadSeconds = Date().timeIntervalSince(began)
             lock.unlock()
-            AppLog.write(String(format: "models ready in %.1f s (surfaces %@, depth %@, objects %@)", loadSeconds,
+            AppLog.write(String(format: "models ready in %.1f s (surfaces %@, depth %@, objects %@, refiner %@)", loadSeconds,
                                 segmentation == nil ? "missing" : "ok", depth == nil ? "missing" : "ok",
-                                detector == nil ? "missing" : "ok"))
+                                detector == nil ? "missing" : "ok",
+                                maskEncoder != nil && maskDecoder != nil ? "ok" : "missing"))
             DispatchQueue.main.async { self.loadState.ready = true }
         }
+    }
+
+    /// One model, on the first of `units` that takes it.
+    private static func model(_ name: String, units: [MLComputeUnits]) -> MLModel? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc") else {
+            AppLog.write("\(name) is not in the app bundle")
+            return nil
+        }
+        for unit in units {
+            let label = unit == .all ? "Neural Engine" : "GPU"
+            let configuration = MLModelConfiguration()
+            configuration.computeUnits = unit
+            let started = Date()
+            do {
+                let model = try MLModel(contentsOf: url, configuration: configuration)
+                AppLog.write(String(format: "%@ loaded in %.1f s (%@)", name, Date().timeIntervalSince(started), label))
+                return model
+            } catch {
+                AppLog.write("\(name) failed to load (\(label)): \(error)")
+            }
+        }
+        return nil
+    }
+
+    /// A Vision request for a model that takes the whole frame, squeezed to its input.
+    private static func request(_ model: MLModel) -> VNCoreMLRequest? {
+        guard let visionModel = try? VNCoreMLModel(for: model) else { return nil }
+        let request = VNCoreMLRequest(model: visionModel)
+        request.imageCropAndScaleOption = .scaleFill
+        return request
+    }
+
+    private static func pixelBuffer(side: Int) -> CVPixelBuffer? {
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(nil, side, side, kCVPixelFormatType_32BGRA,
+                            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer)
+        return buffer
     }
 
     private static func name(_ state: ARCamera.TrackingState) -> String {
@@ -161,31 +232,6 @@ final class SceneRunner {
         let started = Date()
         try? VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .up).perform([request])
         AppLog.write(String(format: "%@ warmed up in %.2f s", name, Date().timeIntervalSince(started)))
-    }
-
-    /// One model as a Vision request, on the first of `units` that takes it.
-    private static func request(_ name: String, units: [MLComputeUnits]) -> VNCoreMLRequest? {
-        guard let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc") else {
-            AppLog.write("\(name) is not in the app bundle")
-            return nil
-        }
-        for unit in units {
-            let label = unit == .all ? "Neural Engine" : "GPU"
-            let configuration = MLModelConfiguration()
-            configuration.computeUnits = unit
-            let started = Date()
-            do {
-                let model = try MLModel(contentsOf: url, configuration: configuration)
-                let request = VNCoreMLRequest(model: try VNCoreMLModel(for: model))
-                // The whole frame, squeezed to the model's input: results map back by scaling.
-                request.imageCropAndScaleOption = .scaleFill
-                AppLog.write(String(format: "%@ loaded in %.1f s (%@)", name, Date().timeIntervalSince(started), label))
-                return request
-            } catch {
-                AppLog.write("\(name) failed to load (\(label)): \(error)")
-            }
-        }
-        return nil
     }
 
     var isReady: Bool { lock.withLock { segmentation != nil || detector != nil } }
@@ -250,6 +296,10 @@ final class SceneRunner {
                 }
             }
             mark("decode")
+            if !instances.isEmpty {
+                instances = self.refine(instances, in: buffer)
+                mark("refine")
+            }
 
             // 3. Depth, on the sensor image as it is (landscape, like the model was trained).
             let pinhole = Self.pinhole(camera)
@@ -280,7 +330,10 @@ final class SceneRunner {
             self.runs += 1
             if [1, 3, 10].contains(self.runs) || self.runs % 20 == 0 {
                 let stages = zip(marks.dropFirst(), marks).map { String(format: "%@ %.0f", $0.0, $0.1.timeIntervalSince($1.1) * 1000) }
-                let labels = instances.prefix(6).compactMap { self.objects.info($0.classIndex)?.label }.joined(separator: ", ")
+                let labels = instances.prefix(6).compactMap { inst -> String? in
+                    guard let label = self.objects.info(inst.classIndex)?.label else { return nil }
+                    return inst.quality.map { String(format: "%@ %.2f", label, $0) } ?? label
+                }.joined(separator: ", ")
                 AppLog.write(String(format: "analysis #%d: %.0f ms (%@) · %d things [%@] · depth %@ from %d points (%d in this frame, %d remembered) · tracking %@",
                                     self.runs, took * 1000, stages.joined(separator: ", "), instances.count, labels,
                                     understanding.depthFit.map { String(format: "fit %.2f", $0.error) } ?? "none",
@@ -313,6 +366,74 @@ final class SceneRunner {
         let p = Self.floats(predictions), q = Self.floats(protos)
         return InstanceDecoder.decode(predictions: p, anchors: anchors, protos: q, maskWidth: maskWidth,
                                       maskHeight: maskHeight, spec: objects)
+    }
+
+    // MARK: The mask refiner
+
+    /// Each instance's mask redone by the refiner: the upright image, scaled to
+    /// the refiner's square, is encoded once; the detector's box of each thing
+    /// (the largest first, up to `refineLimit`) is decoded into one clean mask
+    /// at a quarter of the square, cut to the box grown by a tenth (the refiner
+    /// may run on into a neighbour) and to its largest piece.
+    private func refine(_ instances: [Instance], in buffer: CVPixelBuffer) -> [Instance] {
+        let (encoder, decoder, input) = lock.withLock { (maskEncoder, maskDecoder, refinerInput) }
+        guard let encoder, let decoder, let input else { return instances }
+        let side = CGFloat(Self.refinerSide)
+        let upright = CIImage(cvPixelBuffer: buffer).oriented(.right)
+        let scale = side / max(upright.extent.width, upright.extent.height)
+        let scaled = upright.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let square = CGRect(x: 0, y: 0, width: side, height: side)
+        // The image in the square's corner; the rest black.
+        let composed = scaled.composited(over: CIImage(color: .black).cropped(to: square))
+        ciContext.render(composed, to: input, bounds: square, colorSpace: CGColorSpaceCreateDeviceRGB())
+        let embedding: MLFeatureValue
+        do {
+            let out = try encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(pixelBuffer: input)]))
+            guard let value = out.featureValue(for: "embedding") else { return instances }
+            embedding = value
+        } catch {
+            if runs < 3 { AppLog.write("the mask encoder failed on a frame: \(error)") }
+            return instances
+        }
+        let imageWidth = Float(scaled.extent.width.rounded()), imageHeight = Float(scaled.extent.height.rounded())
+        let maskWidth = Int((imageWidth / 4).rounded()), maskHeight = Int((imageHeight / 4).rounded())
+        guard let box = try? MLMultiArray(shape: [1, 4], dataType: .float32) else { return instances }
+        var refined = instances
+        for i in refined.indices.prefix(refineLimit) where refined[i].share >= refineMinShare {
+            let inst = refined[i]
+            box[0] = NSNumber(value: inst.minX * imageWidth)
+            box[1] = NSNumber(value: inst.minY * imageHeight)
+            box[2] = NSNumber(value: inst.maxX * imageWidth)
+            box[3] = NSNumber(value: inst.maxY * imageHeight)
+            guard let out = try? decoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [
+                "embedding": embedding, "box": MLFeatureValue(multiArray: box)])),
+                  let logits = out.featureValue(for: "mask")?.multiArrayValue else { continue }
+            let full = Self.floats(logits)                       // 256 x 256 of the square
+            let rows = logits.shape[logits.shape.count - 2].intValue, cols = logits.shape[logits.shape.count - 1].intValue
+            guard rows >= maskHeight, cols >= maskWidth else { continue }
+            // Cut to the box grown by a tenth of its size.
+            let gx = (inst.maxX - inst.minX) * 0.1, gy = (inst.maxY - inst.minY) * 0.1
+            let x0 = max(0, Int((inst.minX - gx) * Float(maskWidth))), x1 = min(maskWidth - 1, Int((inst.maxX + gx) * Float(maskWidth)))
+            let y0 = max(0, Int((inst.minY - gy) * Float(maskHeight))), y1 = min(maskHeight - 1, Int((inst.maxY + gy) * Float(maskHeight)))
+            guard x1 > x0, y1 > y0 else { continue }
+            var mask = [UInt8](repeating: 0, count: maskWidth * maskHeight)
+            var area = 0
+            for y in y0...y1 {
+                for x in x0...x1 where full[y * cols + x] > 0 {
+                    mask[y * maskWidth + x] = 1
+                    area += 1
+                }
+            }
+            area = MaskOutline.keepLargestComponent(&mask, width: maskWidth, height: maskHeight)
+            // A refined mask that lost nearly everything is the refiner missing the box: keep the detector's.
+            guard Float(area) / Float(maskWidth * maskHeight) >= objects.minShare * 0.5 else { continue }
+            refined[i].mask = mask
+            refined[i].maskWidth = maskWidth
+            refined[i].maskHeight = maskHeight
+            refined[i].area = area
+            refined[i].quality = out.featureValue(for: "score")?.multiArrayValue.map { Float(truncating: $0[0]) }
+        }
+        return refined
     }
 
     /// A multi-array's values as floats, whatever it holds.

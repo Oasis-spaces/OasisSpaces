@@ -25,6 +25,10 @@ fi
 if [ ! -d Resources/RoomObjects.mlpackage ]; then
     ~/.venvs/oasis-coreml/bin/python scripts/convert_objects.py
 fi
+# The mask refiner (MobileSAM, see scripts/convert_refiner.py) is generated too.
+if [ ! -d Resources/MaskEncoder.mlpackage ] || [ ! -d Resources/MaskDecoder.mlpackage ]; then
+    ~/.venvs/oasis-coreml/bin/python scripts/convert_refiner.py
+fi
 xcodegen generate --quiet
 
 # The first paired iPhone that is connected: CoreDevice id for devicectl, UDID for xcodebuild.

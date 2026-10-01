@@ -4,3 +4,5 @@ build/
 Resources/RoomSegmentation.mlpackage/
 Resources/RoomDepth.mlpackage/
 Resources/RoomObjects.mlpackage
+Resources/MaskEncoder.mlpackage
+Resources/MaskDecoder.mlpackage

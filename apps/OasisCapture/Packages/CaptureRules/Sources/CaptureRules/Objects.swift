@@ -133,12 +133,15 @@ public struct Instance: Sendable {
     public var maskHeight: Int
     /// Mask pixels inside.
     public var area: Int
+    /// The mask refiner's own estimate of its mask (0...1), when it refined this one.
+    public var quality: Float? = nil
 
     public init(classIndex: Int, confidence: Float, minX: Float, minY: Float, maxX: Float, maxY: Float,
-                mask: [UInt8], maskWidth: Int, maskHeight: Int, area: Int) {
+                mask: [UInt8], maskWidth: Int, maskHeight: Int, area: Int, quality: Float? = nil) {
         self.classIndex = classIndex; self.confidence = confidence
         self.minX = minX; self.minY = minY; self.maxX = maxX; self.maxY = maxY
         self.mask = mask; self.maskWidth = maskWidth; self.maskHeight = maskHeight; self.area = area
+        self.quality = quality
     }
 
     /// Share of the image the mask covers.

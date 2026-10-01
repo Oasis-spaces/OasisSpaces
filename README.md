@@ -442,12 +442,17 @@ phone (no model calls, no network while recording). Build and install with
   floor never shown, walls missed), with haptics. The rules take a
   `FrameSample` per frame and know nothing about ARKit, so an Android app can
   feed them from ARCore and share the same JSON specs.
-- **What the phone sees:** three Core ML models run a few times a second.
+- **What the phone sees:** four Core ML models run a few times a second.
   An open-vocabulary detector (YOLOE-11m, prompted with the 71 room things in
   `object-classes.json`: bed, sofa, wardrobe, chest of drawers, rug, curtain,
   lamp, fridge, ... never clothes; built by `scripts/convert_objects.py`,
-  45 MB) gives one mask per thing, so each piece of furniture is one outline
-  and one box. A segmentation model (SegFormer-B2 on ADE20K, 53 MB, built by
+  45 MB) finds each thing, so each piece of furniture is one outline and one
+  box. Its own masks are blocky (a quarter of its input) and fragment on a
+  cluttered bed or desk, so a mask refiner (MobileSAM, Apache-2.0, built by
+  `scripts/convert_refiner.py`, 27 MB) takes each detected box and returns
+  one clean whole-object mask at 256×256, with a quality score: outlines
+  follow the real edges of a curtain, a monitor or a mattress. A small
+  segmentation model (SegFormer-B0 on ADE20K, 7.7 MB, built by
   `scripts/convert_segmentation.py`) keeps the walls, floor, ceiling, doors
   and windows. Each thing gets a neon outline and a label, nothing filled
   in; the outline's vertices are world points (`OutlineLift`), drawn through
