@@ -79,11 +79,16 @@ final class CaptureController: NSObject, ARSessionDelegate {
     private var lastMapBuild: Double = 0
     private var latestMap = RoomMap()
     private var labelMemory: LabelMemory
+    /// What was detected in which direction lately (used on the scene queue, in understood).
+    private var sightings: SightingMemory
+    /// Set when a recording starts; the memory is cleared where it is used.
+    private var sightingsNeedReset = false
 
     override init() {
         engine = RuleEngine(config: RuleConfig.bundled())
         mapBuilder = RoomMapBuilder(spec: ObjectSpec.bundled())
         labelMemory = LabelMemory(spec: DetectionSpec.bundled())
+        sightings = SightingMemory(spec: ObjectSpec.bundled())
         super.init()
         session.delegate = self
         session.delegateQueue = queue
@@ -123,6 +128,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
             self.engine.startRecording()
             self.mapBuilder.reset()
             self.labelMemory.reset()
+            self.sightingsNeedReset = true
             let boxes = Array(self.boxNodes.values)
             self.boxNodes = [:]
             DispatchQueue.main.async { boxes.forEach { $0.removeFromParentNode() } }
@@ -364,16 +370,41 @@ final class CaptureController: NSObject, ARSessionDelegate {
         let time = understanding.time
         let objectSpec = mapBuilder.spec
         let observations = understanding.instances.map {
-            ObjectObservation(classIndex: $0.classIndex, confidence: $0.confidence, points: $0.points)
+            ObjectObservation(classIndex: $0.classIndex, confidence: $0.confidence, points: $0.points, doubtful: $0.doubtful)
         }
         let matches = mapBuilder.observe(observations, camera: understanding.camera)
+        // What was seen in which direction lately: a thing is outlined from its second sighting
+        // (the detector's one-frame inventions never show), under its most voted name.
+        if sightingsNeedReset {
+            sightings.reset()
+            sightingsNeedReset = false
+        }
+        let camera = understanding.camera
+        let believed = understanding.instances.indices.filter { !understanding.instances[$0].doubtful }
+        var seen: [Sighting] = []
+        for i in believed {
+            let instance = understanding.instances[i]
+            let xs: [Double] = instance.outline.map(\.x), ys: [Double] = instance.outline.map(\.y)
+            let width: Double = (xs.max() ?? 0) - (xs.min() ?? 0)
+            let height: Double = (ys.max() ?? 0) - (ys.min() ?? 0)
+            let centre = SIMD2<Float>(Float(instance.centroid.x), Float(instance.centroid.y))
+            seen.append(Sighting(classIndex: instance.classIndex, confidence: instance.confidence, centre: centre,
+                                 size: SIMD2<Float>(Float(width), Float(height)), camera: camera, sensorLandscape: true))
+        }
+        let verdicts = sightings.observe(seen, eye: camera.position)
+        var verdictOf = [SightingMemory.Verdict?](repeating: nil, count: understanding.instances.count)
+        for (k, i) in believed.enumerated() { verdictOf[i] = verdicts[k] }
         // Detected things, labelled by the tracker where it knows them (so the
         // label on screen is the object's settled label, not this frame's guess).
         var regions: [Region] = []
         for (i, instance) in understanding.instances.enumerated() {
-            guard let info = objectSpec.info(instance.classIndex), instance.outline.count >= 3 else { continue }
+            guard instance.outline.count >= 3 else { continue }
             let match = matches[i]
-            regions.append(Region(classId: instance.classIndex, label: match?.label ?? info.label,
+            // Bare wall with a name shows only as the door of a wardrobe the tracker knows.
+            let shown = instance.doubtful ? match != nil
+                : objectSpec.shows(sightings: verdictOf[i]?.sightings ?? 1, tracked: match?.sightings ?? 0)
+            guard shown, let info = objectSpec.info(verdictOf[i]?.classIndex ?? instance.classIndex) else { continue }
+            regions.append(Region(classId: match?.classIndex ?? info.id, label: match?.label ?? info.label,
                                   group: match?.group ?? info.group, share: instance.share, centroid: instance.centroid,
                                   outline: instance.outline, objectId: match?.objectID,
                                   worldOutline: instance.worldOutline, worldCentroid: instance.worldCentroid))

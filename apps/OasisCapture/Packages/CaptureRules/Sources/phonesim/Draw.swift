@@ -56,7 +56,7 @@ enum Draw {
     /// The frame with every instance's outline (solid), the detector's box
     /// (dashed) and "label confidence [quality] track" in the box's corner.
     static func frame(_ image: CIImage, context: CIContext, instances: [Instance], matches: [ObservationMatch?],
-                      notes: [String] = [], spec: ObjectSpec, to url: URL, maxWidth: Int = 720, plain: Bool = false) {
+                      notes: [String] = [], names: [String] = [], spec: ObjectSpec, to url: URL, maxWidth: Int = 720, plain: Bool = false) {
         guard let cg = context.createCGImage(image, from: image.extent) else { return }
         let scale = min(1, CGFloat(maxWidth) / CGFloat(cg.width))
         let w = Int(CGFloat(cg.width) * scale), h = Int(CGFloat(cg.height) * scale)
@@ -87,7 +87,7 @@ enum Draw {
             let label = spec.info(inst.classIndex)?.label ?? "?"
             if plain {
                 // As the phone shows it: the outline and the name (the tracker's settled one when it knows the thing).
-                let shown = i < matches.count ? matches[i]?.label ?? label : label
+                let shown = i < names.count ? names[i] : i < matches.count ? matches[i]?.label ?? label : label
                 text(shown, at: CGPoint(x: Double(inst.minX) * Double(w) + 4, y: (1 - Double(inst.minY)) * Double(h) - 20), in: ctx, color: color, size: 17)
                 continue
             }

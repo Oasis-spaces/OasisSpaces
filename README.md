@@ -476,7 +476,14 @@ phone (no model calls, no network while recording). Build and install with
   two models check each other: a piece of furniture, a window or a curtain
   whose mask lies 90% on what the surface model calls bare wall, floor or
   ceiling is the detector seeing things (a "fridge" that is a stretch of
-  white wall, a "bathtub" on a bedroom wall) and is neither shown nor placed.
+  white wall, a "bathtub" on a bedroom wall) and is neither shown nor placed,
+  unless the tracker finds it to be a door of a wardrobe it knows. A thing
+  is outlined from its second sighting, under its most voted name
+  (`SightingMemory`): the detector's one-frame inventions never show, and a
+  wardrobe one frame called a shelf stays a wardrobe. Sightings are matched
+  by the direction they were seen in, which the phone always knows, not by
+  place in the image: between two analyses the picture slides by more than
+  a laptop's width, and a laptop at 94% confidence did not overlap itself.
 - **The room map:** MoGe-2 small (MIT, built by `scripts/convert_depth_moge.py`,
   66 MB) gives every pixel a place in metres on its own: a point map plus a
   metric scale, with one depth offset recovered from the camera's known focal
@@ -499,18 +506,34 @@ phone (no model calls, no network while recording). Build and install with
   connected to it, across gaps up to 15 cm, so a bed is as long as all of it
   that was seen, and the wall behind a mask's edge, beyond a gap, is not the
   bed. (A first version trimmed around the median instead and kept only the
-  face seen most: every box came out a sliver, a bed 9 cm tall.) Beds and
-  wardrobes are seen in parts, so parts of one family that adjoin are one
-  object. The tracker votes the label (a bed one frame called a sofa stays a
-  bed), eases the box, shows it after two sightings and keeps it while it is
-  out of view. The map then settles each box the way furniture stands
+  face seen most: every box came out a sliver, a bed 9 cm tall.) Once an
+  object is established a voxel must have been seen more than in one
+  glimpse: at length, or again on a later pass, or most of the times the
+  object was. A mask that is wrong for a moment (the room's door called a
+  wardrobe) is wrong for two or three frames running and never again; a
+  hit count alone cannot tell that from a wardrobe's door seen twice. Beds
+  and wardrobes are seen in parts, so parts of one family that adjoin are
+  one object; for storage they must share a front plane, or the wardrobe on
+  one wall and the cabinet on the next, which meet in the corner, become
+  one. A curtain, window or mirror lying over a standing wardrobe in the
+  plane of its front is one of its doors (a patterned sliding door is a
+  curtain to the detector, and more prompt words for it only made the room's
+  own door a "wardrobe door"): it joins the wardrobe whichever was seen
+  first, and is outlined as "wardrobe" from then on. A standing piece's
+  footprint is its lower body's: cabinets that run on over a doorway at
+  head height belong to the wardrobe, not to the floor it covers. The
+  tracker votes the label (a bed one frame called a sofa stays a bed), eases
+  the box, shows it after two sightings and keeps it while it is out of
+  view. The map then settles each box the way furniture stands
   (`RoomMapBuilder.settle`): what stands on the floor reaches the floor
   (always for a wardrobe or a bed, whose bottom is often hidden; not for
   what rests on another piece), furniture a hand from a wall reaches the
   wall, a wardrobe or an appliance, only ever seen from the front, reaches
   the wall behind it and is no deeper than wardrobes are, a box that pokes
-  through a wall is cut at it, and anything too small to be furniture (a
-  switch plate called a heater) is left out. Boxes are turned to the room's
+  through a wall is cut at it, anything too small to be furniture (a switch
+  plate called a heater) is left out, and so is a piece whose top is not
+  where its name says (`minTop`, `maxTop` in `object-classes.json`: a
+  "desk" with a knee-high top is a padded stool). Boxes are turned to the room's
   walls (from ARKit's wall planes). The mini map shows floor, walls,
   furniture, path and phone; tap it for the full floor plan. `capture.json`
   records the map.
@@ -530,12 +553,13 @@ phone (no model calls, no network while recording). Build and install with
   `hstack`). `phonesim --video videos/<file>.MOV --dump <folder> --fps 3`
   needs no processed space: it runs the detector, the refiner and the wall
   check straight over a video at the phone's rate and writes the outlined
-  frames (no camera poses, so no map and no settled names). Changes to the
-  phone's perception are checked there
-  before they go on a phone: on the two test rooms the map went from 22
-  slivers with the bed at 0.13 footprint overlap to 9 pieces of furniture
-  with the bed at 0.57 in one, and to the bed at 0.90 and the wardrobe with
-  nothing spurious in the other.
+  frames (no camera poses, so no map and no settled names). `--trace`
+  prints every merge the tracker makes. Changes to the phone's perception
+  are checked there before they go on a phone: on the two test rooms the
+  map went from 22 slivers with the bed at 0.13 footprint overlap to 8
+  pieces, all real, in one (bed 0.78, wardrobe 0.76 and 1.54 m wide where
+  the measured one is 1.56, desk 0.63), and to the bed at 0.88 and the
+  wardrobe with nothing spurious in the other.
 - **Logs:** the app writes `Documents/oasis-capture.log` (model load times,
   analysis ms per frame); read it with
   `xcrun devicectl device copy from --domain-type appDataContainer --domain-identifier com.oasisspaces.capture --source Documents/oasis-capture.log --destination oasis-capture.log`.

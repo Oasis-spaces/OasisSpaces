@@ -91,8 +91,8 @@ final class RoomMapTests: XCTestCase {
 
     func testAnObjectSeenFromTwoSidesIsOneBoxOfItsFullSize() {
         let builder = RoomMapBuilder(spec: spec)
-        // The front half of a 2 m long bed, then (walking round) the back half.
-        for _ in 0..<3 { _ = builder.observe([observation("bed", from: SIMD3(0, 0, 0), to: SIMD3(1.4, 0.5, 1.2))], camera: nil) }
+        // The front half of a 2 m long bed, looked at for a moment or two, then (walking round) the back half.
+        for _ in 0..<5 { _ = builder.observe([observation("bed", from: SIMD3(0, 0, 0), to: SIMD3(1.4, 0.5, 1.2))], camera: nil) }
         let before = builder.build().objects[0]
         XCTAssertEqual(before.size.z, 1.2, accuracy: 0.12)
         for _ in 0..<3 { _ = builder.observe([observation("bed", from: SIMD3(0, 0, 0.8), to: SIMD3(1.4, 0.5, 2.0))], camera: nil) }
@@ -236,7 +236,7 @@ final class RoomMapTests: XCTestCase {
         // Three doors, each seen on its own, with a hand's width of frame between them.
         for door in 0..<3 {
             let x = Float(door) * 0.6
-            for _ in 0..<(door == 2 ? 12 : 3) { _ = builder.observe([observation("wardrobe", from: SIMD3(x, 0.1, 0), to: SIMD3(x + 0.45, 2.0, 0.08))], camera: nil) }
+            for _ in 0..<(door == 2 ? 12 : 5) { _ = builder.observe([observation("wardrobe", from: SIMD3(x, 0.1, 0), to: SIMD3(x + 0.45, 2.0, 0.08))], camera: nil) }
         }
         let objects = builder.build().objects
         XCTAssertEqual(objects.count, 1, "\(objects.map { "\($0.label) \($0.size)" })")
@@ -317,6 +317,146 @@ final class RoomMapTests: XCTestCase {
         XCTAssertFalse(seeingThings(instance("television", columns: 2..<14)), "a screen hangs on a wall")
         XCTAssertFalse(seeingThings(instance("door", columns: 2..<14)), "a door is often wall to the surface model")
         XCTAssertFalse(seeingThings(instance("rug", columns: 2..<14)))
+    }
+
+    /// A wall along x at z = 2 (so the room's direction is known), and optionally one along z at x = 2 and the floor.
+    private func room(_ builder: RoomMapBuilder, secondWall: Bool = false, floor: Bool = false) {
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(0.5, 1.2, 2), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 1, 0), extent: SIMD2(5, 2.4)))
+        if secondWall {
+            builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(2, 1.2, 0.5), xAxis: SIMD3(0, 0, 1),
+                                            zAxis: SIMD3(0, 1, 0), extent: SIMD2(3, 2.4)))
+        }
+        if floor {
+            builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
+                                            zAxis: SIMD3(0, 0, 1), extent: SIMD2(6, 6)))
+        }
+    }
+
+    func testAGlimpseOfSomethingWrongDoesNotStickAndASecondLookDoes() {
+        let builder = RoomMapBuilder(spec: spec)
+        let cabinet = observation("cabinet", from: SIMD3(0, 1.4, 0), to: SIMD3(0.6, 1.95, 0.3))
+        // For two frames running the detector also takes the door below and beside it for a wardrobe.
+        let wrong = observation("wardrobe", from: SIMD3(0, 0.1, 0), to: SIMD3(1.4, 1.9, 0.3))
+        for _ in 0..<4 { _ = builder.observe([cabinet], camera: nil) }
+        for _ in 0..<2 { _ = builder.observe([cabinet, wrong], camera: nil) }
+        for _ in 0..<8 { _ = builder.observe([cabinet], camera: nil) }
+        var objects = builder.build().objects
+        XCTAssertEqual(objects.map(\.label), ["cabinet"])
+        XCTAssertEqual(objects[0].min.y, 1.4, accuracy: 0.06, "two frames running are one glimpse")
+        XCTAssertEqual(objects[0].size.x, 0.6, accuracy: 0.11)
+        // Seen again on a later pass, it is there after all.
+        for _ in 0..<2 { _ = builder.observe([cabinet, wrong], camera: nil) }
+        for _ in 0..<8 { _ = builder.observe([cabinet], camera: nil) }
+        objects = builder.build().objects
+        XCTAssertEqual(objects.count, 1)
+        XCTAssertEqual(objects[0].size.x, 1.4, accuracy: 0.15)
+    }
+
+    func testAWardrobeTakesThePatternedDoorsTheDetectorCallsCurtains() {
+        let builder = RoomMapBuilder(spec: spec)
+        room(builder)
+        // The patterned sliding door, seen first and called a curtain; then the open section, called a wardrobe.
+        let door = observation("curtain", from: SIMD3(0.5, 0.1, 1.36), to: SIMD3(1.4, 2.0, 1.4))
+        let body = observation("wardrobe", from: SIMD3(0, 0.1, 1.36), to: SIMD3(0.7, 2.0, 1.4))
+        // A real curtain at the wall beside it, and a cloth hung next to it in the plane of its doors.
+        let curtain = observation("curtain", from: SIMD3(1.5, 0.3, 1.94), to: SIMD3(2.4, 2.2, 1.98))
+        let cloth = observation("curtain", from: SIMD3(-0.5, 0.5, 1.36), to: SIMD3(-0.1, 1.8, 1.4))
+        for _ in 0..<2 { _ = builder.observe([door, curtain, cloth], camera: nil) }
+        XCTAssertTrue(builder.build().objects.isEmpty, "curtains are outlined, not placed")
+        var matches: [ObservationMatch?] = []
+        for _ in 0..<10 { matches = builder.observe([body, door, curtain, cloth], camera: nil) }   // (the box eases to its size)
+        let objects = builder.build().objects
+        XCTAssertEqual(objects.map(\.label), ["wardrobe"])
+        XCTAssertEqual(objects[0].min.x, 0, accuracy: 0.06)
+        XCTAssertEqual(objects[0].max.x, 1.4, accuracy: 0.11, "the wardrobe is as wide as its body and its door")
+        XCTAssertEqual(matches[1]?.label, "wardrobe", "the door is outlined as the wardrobe it belongs to")
+        XCTAssertEqual(matches[2]?.label, "curtain", "a curtain at the wall, a wardrobe's depth behind its front, is a curtain")
+        XCTAssertEqual(matches[3]?.label, "curtain", "a cloth hung beside the wardrobe does not lie over it")
+    }
+
+    func testBareWallWithANameIsNothingUnlessItIsAWardrobesDoor() {
+        let builder = RoomMapBuilder(spec: spec)
+        room(builder)
+        let body = observation("wardrobe", from: SIMD3(0, 0.1, 1.36), to: SIMD3(0.7, 2.0, 1.4))
+        // The surface model saw bare wall in both; one lies over the wardrobe's front, the other nowhere near.
+        let panel = ObjectObservation(classIndex: cls("refrigerator"), confidence: 0.6,
+                                      points: points(from: SIMD3(0.5, 0.1, 1.36), to: SIMD3(1.4, 2.0, 1.4)), doubtful: true)
+        let elsewhere = ObjectObservation(classIndex: cls("refrigerator"), confidence: 0.6,
+                                          points: points(from: SIMD3(-2, 0.1, 0), to: SIMD3(-1.96, 2.0, 0.9)), doubtful: true)
+        var matches = builder.observe([panel, elsewhere], camera: nil)
+        XCTAssertEqual(matches, [nil, nil])
+        XCTAssertEqual(builder.tracker.count, 0, "nothing is kept of it")
+        for _ in 0..<3 { matches = builder.observe([body, panel, elsewhere], camera: nil) }
+        XCTAssertEqual(matches[1]?.label, "wardrobe")
+        XCTAssertNil(matches[2])
+        XCTAssertEqual(builder.build().objects.map(\.label), ["wardrobe"])
+        XCTAssertEqual(builder.tracker.count, 1)
+    }
+
+    func testTwoUnitsThatMeetInACornerOfTheRoomAreTwo() {
+        let builder = RoomMapBuilder(spec: spec)
+        room(builder, secondWall: true)
+        // A wardrobe's doors along one wall, a cabinet's front along the next, a hand apart in the corner.
+        let wardrobe = observation("wardrobe", from: SIMD3(0, 0.1, 1.36), to: SIMD3(1.7, 2.0, 1.4))
+        let cabinet = observation("cabinet", from: SIMD3(1.66, 1.3, 0.4), to: SIMD3(1.7, 1.9, 1.3))
+        for _ in 0..<5 { _ = builder.observe([wardrobe, cabinet], camera: nil) }
+        let objects = builder.build().objects
+        XCTAssertEqual(Set(objects.map(\.label)), ["wardrobe", "cabinet"], "\(objects.map { "\($0.label) \($0.size)" })")
+    }
+
+    func testADeskWhoseTopIsKneeHighIsNotADesk() {
+        let builder = RoomMapBuilder(spec: spec)
+        room(builder, floor: true)
+        // A padded stool the detector calls a desk, and a desk.
+        let stool = observation("desk", from: SIMD3(-2, 0.1, -1), to: SIMD3(-1.5, 0.45, -0.5))
+        let desk = observation("desk", from: SIMD3(0, 0.1, -1), to: SIMD3(1.2, 0.74, -0.4))
+        for _ in 0..<4 { _ = builder.observe([stool, desk], camera: nil) }
+        let objects = builder.build().objects
+        XCTAssertEqual(objects.count, 1)
+        XCTAssertEqual(objects[0].min.x, 0, accuracy: 0.06)
+        XCTAssertEqual(objects[0].top ?? 0, 0.75, accuracy: 0.051)
+    }
+
+    func testAThingIsOutlinedFromItsSecondSightingUnderItsMostVotedName() {
+        var memory = SightingMemory(spec: spec)
+        let eye = SIMD3<Float>(0, 1.4, 0)
+        func sighting(_ name: String, _ confidence: Float, at degrees: Float, radius: Float = 0.2) -> Sighting {
+            let a = degrees * .pi / 180
+            return Sighting(classIndex: cls(name), confidence: confidence, direction: SIMD3(sin(a), 0, -cos(a)), radius: radius)
+        }
+        var verdicts = memory.observe([sighting("wardrobe", 0.5, at: 0), sighting("bathtub", 0.6, at: 60)], eye: eye)
+        XCTAssertEqual(verdicts.map(\.sightings), [1, 1])
+        XCTAssertFalse(spec.shows(sightings: 1, tracked: 0), "seen once: not outlined yet")
+        // The wardrobe again, called a shelf this time, a little aside (the phone turned and took a step).
+        // The bathtub was the detector's invention for one frame, and never shows.
+        verdicts = memory.observe([sighting("shelf", 0.45, at: 4)], eye: eye + SIMD3(0.1, 0, 0))
+        XCTAssertEqual(verdicts[0].sightings, 2)
+        XCTAssertEqual(spec.info(verdicts[0].classIndex)?.label, "wardrobe", "the most voted name, not this frame's")
+        XCTAssertTrue(spec.shows(sightings: 2, tracked: 0))
+        // Something small of the same kin somewhere else is another thing.
+        verdicts = memory.observe([sighting("cabinet", 0.5, at: 90, radius: 0.05)], eye: eye)
+        XCTAssertEqual(verdicts[0].sightings, 1)
+        // A piece the room map already knows is outlined at once.
+        XCTAssertTrue(spec.shows(sightings: 1, tracked: 5))
+        // What has not been seen for a while is forgotten.
+        for _ in 0...spec.screen.forgetAnalyses { _ = memory.observe([], eye: eye) }
+        verdicts = memory.observe([sighting("wardrobe", 0.5, at: 0)], eye: eye)
+        XCTAssertEqual(verdicts[0].sightings, 1)
+    }
+
+    func testADirectionIsWhereAPixelLooks() {
+        // A camera turned a quarter turn to the left about the vertical: its centre looks along -x.
+        var transform = simd_float4x4(simd_quatf(angle: .pi / 2, axis: SIMD3(0, 1, 0)))
+        transform.columns.3 = SIMD4(1, 1.4, 2, 1)
+        let camera = PinholeCamera(fx: 1000, fy: 1000, cx: 960, cy: 720, width: 1920, height: 1440, transform: transform)
+        let d = camera.direction(u: 960, v: 720)
+        XCTAssertEqual(d.x, -1, accuracy: 1e-4)
+        XCTAssertEqual(camera.position, SIMD3(1, 1.4, 2))
+        // The same thing, in upright image coordinates, through the phone's landscape sensor.
+        let s = Sighting(classIndex: 0, confidence: 1, centre: SIMD2(0.5, 0.5), size: SIMD2(0.2, 0.2), camera: camera, sensorLandscape: true)
+        XCTAssertEqual(s.direction.x, -1, accuracy: 1e-4)
+        XCTAssertEqual(s.radius, atan(sqrt(288 * 288 + 384 * 384) / 2 / 1000), accuracy: 1e-4)
     }
 
     func testBoxesTurnWithTheRoomsWalls() {

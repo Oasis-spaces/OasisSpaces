@@ -19,6 +19,8 @@ struct InstanceRegion {
     /// The outline and centre in the room, for drawing through the live camera.
     var worldOutline: [SIMD3<Float>]
     var worldCentroid: SIMD3<Float>
+    /// The surface model saw bare wall here: not a thing of its own, unless it is a wardrobe's door.
+    var doubtful = false
 }
 
 /// How far the models have loaded, for the preparing screen. Changed on the main queue.
@@ -307,12 +309,14 @@ final class SceneRunner {
                 }
             }
             mark("decode")
+            var bare: [Bool] = []
             if !instances.isEmpty {
                 instances = self.refine(instances, in: buffer)
                 mark("refine")
-                // Furniture the surface model sees as bare wall is the detector seeing things.
-                let bare = self.spec.bareSurfaces
-                instances.removeAll { self.objects.isOnBareSurface($0, bare: bare, classes: classes, width: width, height: height) }
+                // Furniture the surface model sees as bare wall is the detector seeing things:
+                // it is not shown or placed, unless the tracker finds it to be a wardrobe's door.
+                let surfaces = self.spec.bareSurfaces
+                bare = instances.map { self.objects.isOnBareSurface($0, bare: surfaces, classes: classes, width: width, height: height) }
             }
 
             // 3. Depth in metres, on the sensor image as it is (landscape).
@@ -334,7 +338,11 @@ final class SceneRunner {
                 depthValues = inverse.scaled(correction.fit)
             }
             mark("depth")
-            understanding.instances = instances.map { self.region($0, depth: depthValues, pinhole: pinhole, place: trusted) }
+            understanding.instances = instances.enumerated().map { i, instance in
+                var region = self.region(instance, depth: depthValues, pinhole: pinhole, place: trusted)
+                region.doubtful = i < bare.count && bare[i]
+                return region
+            }
             // The surfaces' outlines go into the room too, so they follow the camera like the things do.
             for i in understanding.segmentation.regions.indices {
                 let region = understanding.segmentation.regions[i]

@@ -1,5 +1,5 @@
 {
- "comment": "Classes of the on-device object detector (YOLOE-11m segmentation, prompted with these names; the class index is the row's position). Each detection is one whole thing with its own mask, which is what makes one box per piece of furniture. label: shown on screen. group: colour (see detection-classes.json). family: look-alikes that vote together on one object. boxed: placed as a box in the room map (wall-mounted and small things are outlined only). onFloor: always stands on the floor, so its box reaches the floor even when its bottom was hidden (a cabinet or a shelf may hang on a wall and has no such flag). Clothes are not in the list on purpose.",
+ "comment": "Classes of the on-device object detector (YOLOE-11m segmentation, prompted with these names; the class index is the row's position). Each detection is one whole thing with its own mask, which is what makes one box per piece of furniture. label: shown on screen. group: colour (see detection-classes.json). family: look-alikes that vote together on one object. boxed: placed as a box in the room map (wall-mounted and small things are outlined only). onFloor: always stands on the floor, so its box reaches the floor even when its bottom was hidden (a cabinet or a shelf may hang on a wall and has no such flag). minTop / maxTop: its top layer is at least, or at most, this many metres above the floor, or it is not placed under that name (a desk whose top is knee-high is a stool). Clothes are not in the list on purpose.",
  "model": "yoloe-11m-seg",
  "inputSize": [
   480,
@@ -37,6 +37,11 @@
    "bin"
   ]
  },
+ "screen": {
+  "showSightings": 2,
+  "forgetAnalyses": 6,
+  "minAngleDegrees": 6
+ },
  "tracker": {
   "voxelMetres": 0.05,
   "confirmObservations": 2,
@@ -48,6 +53,8 @@
   "adjoinMetres": 0.25,
   "snapMetres": 0.5,
   "floorReachMetres": 1.0,
+  "bodyMetres": 1.5,
+  "glimpseAnalyses": 4,
   "wallSnapMetres": 0.2,
   "unitDepthMetres": 0.7,
   "minBoxMetres": 0.25,
@@ -122,7 +129,8 @@
    "group": "furniture",
    "family": "seating",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "maxTop": 0.9
   },
   {
    "id": 7,
@@ -140,7 +148,8 @@
    "group": "furniture",
    "family": "seating",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "maxTop": 0.9
   },
   {
    "id": 9,
@@ -167,7 +176,8 @@
    "group": "furniture",
    "family": "table",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "maxTop": 0.7
   },
   {
    "id": 12,
@@ -176,7 +186,8 @@
    "group": "furniture",
    "family": "table",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "minTop": 0.65
   },
   {
    "id": 13,
@@ -185,7 +196,8 @@
    "group": "furniture",
    "family": "table",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "minTop": 0.65
   },
   {
    "id": 14,
@@ -281,7 +293,8 @@
    "group": "storage",
    "family": "counter",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "minTop": 0.6
   },
   {
    "id": 25,
@@ -479,7 +492,8 @@
    "group": "fixture",
    "family": "bathroom",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "maxTop": 1.2
   },
   {
    "id": 49,
@@ -488,7 +502,8 @@
    "group": "fixture",
    "family": "bathroom",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "maxTop": 0.9
   },
   {
    "id": 50,

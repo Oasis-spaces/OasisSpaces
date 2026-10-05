@@ -58,11 +58,14 @@ public struct ObjectBox: Identifiable, Sendable, Equatable {
     /// Turn about the vertical, radians, of the box's own x axis from world x.
     public var yaw: Float
     public var points: Int
+    /// Height of the object's top layer: the highest level with a good share of
+    /// what was seen (a table's top, whatever lies on it). Nil when not measured.
+    public var top: Float?
 
     public init(id: String, classId: Int, label: String, group: String, family: String,
-                center: SIMD3<Float>, size: SIMD3<Float>, yaw: Float, points: Int) {
+                center: SIMD3<Float>, size: SIMD3<Float>, yaw: Float, points: Int, top: Float? = nil) {
         self.id = id; self.classId = classId; self.label = label; self.group = group; self.family = family
-        self.center = center; self.size = size; self.yaw = yaw; self.points = points
+        self.center = center; self.size = size; self.yaw = yaw; self.points = points; self.top = top
     }
 
     /// The box's own axes on the floor (x, z).
@@ -207,7 +210,7 @@ public final class RoomMapBuilder {
             lastYaw = yaw
             let floor = map.floorHeight, walls = map.walls
             let possible = observations.map { Self.withinRoom($0, floor: floor, walls: walls, camera: camera) }
-            return tracker.observe(possible, yaw: yaw, camera: camera)
+            return tracker.observe(possible, yaw: yaw, floor: floor, camera: camera)
         }
     }
 
@@ -296,6 +299,12 @@ public final class RoomMapBuilder {
     static func settle(_ box: ObjectBox, floor: Float?, walls: [WallSegment], spec: ObjectSpec) -> ObjectBox? {
         let t = spec.tracker
         var box = box
+        // A desk whose top is knee-high is not a desk (a padded stool, to the detector);
+        // a bathtub that stands head-high is not a bathtub.
+        if let floor, let top = box.top, let info = spec.info(box.classId) {
+            if let least = info.minTop, top - floor < least { return nil }
+            if let most = info.maxTop, top - floor > most { return nil }
+        }
         if let floor, floorStanding.contains(box.family) {
             let bottom = box.center.y - box.size.y / 2, top = box.center.y + box.size.y / 2
             // A wardrobe always stands on the floor, however much of its bottom the bed hid.

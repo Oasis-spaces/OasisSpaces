@@ -194,6 +194,7 @@ func surfaceClasses(_ r: VNCoreMLRequest) -> (classes: [Int32], width: Int, heig
     return (contiguousFloats(array).map { Int32($0) }, width, height)
 }
 let structure = spec.bareSurfaces
+let doorClasses: Set<Int32> = Set(spec.classes.filter { $0.name == "door" || $0.name == "screen door" }.map { Int32($0.id) })
 var onBareSurface = 0
 
 let refinerSide: CGFloat = 1024
@@ -300,6 +301,8 @@ func fitScale(_ depth: (data: [Float], width: Int, height: Int), camera: Pinhole
     return DepthScale.fit(predicted: seenPredicted, metres: seenMetres) ?? first
 }
 
+var records: [String] = []
+
 // MARK: Over a video: what the screen would show
 
 if let videoURL {
@@ -320,6 +323,15 @@ if let videoURL {
         try? VNImageRequestHandler(ciImage: image, orientation: .up).perform([detector, surfaces])
         var instances = refine(decodeDetections(detector), image: image)
         if let map = surfaceClasses(surfaces) {
+            if dumpFolder != nil {
+                let items = instances.map { inst in
+                    String(format: "{\"label\":\"%@\",\"conf\":%.2f,\"box\":[%.3f,%.3f,%.3f,%.3f],\"structure\":%.2f,\"bare\":%@}",
+                           objects.info(inst.classIndex)?.label ?? "?", inst.confidence, inst.minX, inst.minY, inst.maxX, inst.maxY,
+                           inst.share(on: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height),
+                           objects.isOnBareSurface(inst, bare: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height) ? "true" : "false")
+                }
+                records.append("{\"frame\":\(n + 1),\"instances\":[\(items.joined(separator: ","))]}")
+            }
             let before = instances.count
             instances.removeAll { objects.isOnBareSurface($0, bare: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height) }
             dropped += before - instances.count
@@ -340,12 +352,14 @@ if let videoURL {
     print(String(format: "\n%@: %d frames at %.0f a second, %.0f ms a frame on this Mac; %.1f things outlined a frame, %d dropped as bare wall",
                  videoURL.lastPathComponent, run, rate, analysis / Double(max(1, run)) * 1000, Double(things) / Double(max(1, run)), dropped))
     print("labels: \(labels.sorted { $0.value > $1.value }.prefix(16).map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
+    if let dumpFolder { try? (records.joined(separator: "\n") + "\n").write(to: dumpFolder.appendingPathComponent("detections.jsonl"), atomically: true, encoding: .utf8) }
     exit(0)
 }
 
 // MARK: Run
 
 let builder = RoomMapBuilder(spec: objects)
+if arguments.contains("--trace") { builder.tracker.trace = { print("  " + $0) } }
 for wall in truth.walls {
     builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(wall.center[0], wall.center[1], wall.center[2]),
                                     xAxis: SIMD3(wall.along[0], wall.along[1], wall.along[2]), zAxis: SIMD3(0, 1, 0), extent: SIMD2(2 * wall.half, wall.height)))
@@ -353,10 +367,12 @@ for wall in truth.walls {
 // The floor, as the phone's tracking would have found it.
 builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
                                 zAxis: SIMD3(0, 0, 1), extent: SIMD2(truth.room.width, truth.room.depth)))
+var memory = SightingMemory(spec: objects)
+var outlinesShown = 0, heldBack = 0
+var namesShown: [String: Int] = [:]
 var recent: [SIMD3<Float>] = []
 var framesRun = 0, framesWithDepth = 0, framesWithFit = 0, observationsTotal = 0, analysisTime = 0.0
 var labelsSeen: [String: Int] = [:]
-var records: [String] = []
 let frames = Array(truth.frames.enumerated().filter { $0.offset % every == 0 }.map(\.element).prefix(limit))
 for (n, frame) in frames.enumerated() {
     guard let (image, camera) = upright(frame) else { continue }
@@ -365,14 +381,24 @@ for (n, frame) in frames.enumerated() {
     try? handler.perform([detector, surfaces])
     var instances = decodeDetections(detector)
     instances = refine(instances, image: image)
-    // Furniture the surface model sees as bare wall is not shown or placed, as on the phone.
+    // Furniture the surface model sees as bare wall is not a thing of its own, as on the phone
+    // (it may still turn out to be a door of a wardrobe the tracker knows).
     let surfaceMap = surfaceClasses(surfaces)
-    if let surfaceMap {
-        let before = instances.count
-        instances.removeAll { objects.isOnBareSurface($0, bare: structure, classes: surfaceMap.classes, width: surfaceMap.width, height: surfaceMap.height) }
-        onBareSurface += before - instances.count
+    let bare = instances.map { inst in
+        surfaceMap.map { objects.isOnBareSurface(inst, bare: structure, classes: $0.classes, width: $0.width, height: $0.height) } ?? false
     }
+    onBareSurface += bare.filter { $0 }.count
     let onStructure = instances.map { inst in surfaceMap.map { inst.share(on: structure, classes: $0.classes, width: $0.width, height: $0.height) } ?? 0 }
+    let onDoor = instances.map { inst in surfaceMap.map { inst.share(on: doorClasses, classes: $0.classes, width: $0.width, height: $0.height) } ?? 0 }
+    // What was seen in which direction lately: a thing is outlined from its second sighting, under its most voted name.
+    let believed = instances.indices.filter { !bare[$0] }
+    let verdicts = memory.observe(believed.map { i in
+        let inst = instances[i]
+        return Sighting(classIndex: inst.classIndex, confidence: inst.confidence, centre: SIMD2((inst.minX + inst.maxX) / 2, (inst.minY + inst.maxY) / 2),
+                        size: SIMD2(inst.maxX - inst.minX, inst.maxY - inst.minY), camera: camera, sensorLandscape: false)
+    }, eye: camera.position)
+    var verdictOf = [SightingMemory.Verdict?](repeating: nil, count: instances.count)
+    for (k, i) in believed.enumerated() { verdictOf[i] = verdicts[k] }
     let fresh = frame.points.map { SIMD3<Float>($0[0], $0[1], $0[2]) }
     recent.append(contentsOf: fresh)
     if recent.count > 4000 { recent.removeFirst(recent.count - 4000) }
@@ -413,7 +439,7 @@ for (n, frame) in frames.enumerated() {
         let (used, trusted) = DepthScale.correction(for: fitted)
         if trusted { framesWithFit += 1 }
         fit = used
-        for inst in instances {
+        for (i, inst) in instances.enumerated() {
             let w = inst.maskWidth, h = inst.maskHeight
             var points: [SIMD3<Float>] = []
             // Things are placed only from depth the tracking points have corrected, as on the phone.
@@ -423,7 +449,7 @@ for (n, frame) in frames.enumerated() {
                     points.append(camera.worldPoint(u: sample.x * Float(camera.width), v: sample.y * Float(camera.height), depth: z))
                 }
             }
-            observations.append(ObjectObservation(classIndex: inst.classIndex, confidence: inst.confidence, points: points))
+            observations.append(ObjectObservation(classIndex: inst.classIndex, confidence: inst.confidence, points: points, doubtful: bare[i]))
             if debug, let label = objects.info(inst.classIndex)?.label {
                 let xs = points.map(\.x), ys = points.map(\.y), zs = points.map(\.z)
                 print(String(format: "  %@ (%.2f, mask %dx%d area %d): %d world points%@", label, inst.confidence, w, h, inst.area, points.count,
@@ -434,6 +460,19 @@ for (n, frame) in frames.enumerated() {
     }
     let matches = builder.observe(observations, camera: camera)
     observationsTotal += observations.count
+    // What goes on the screen, and under which name.
+    var shown = [Bool](repeating: false, count: instances.count)
+    var names = [String](repeating: "?", count: instances.count)
+    for i in instances.indices {
+        let match = i < matches.count ? matches[i] : nil
+        if bare[i] {
+            shown[i] = match != nil                                  // only as the door of a wardrobe
+        } else {
+            shown[i] = objects.shows(sightings: verdictOf[i]?.sightings ?? 1, tracked: match?.sightings ?? 0)
+        }
+        names[i] = match?.label ?? objects.info(verdictOf[i]?.classIndex ?? instances[i].classIndex)?.label ?? "?"
+        if shown[i] { outlinesShown += 1; namesShown[names[i], default: 0] += 1 } else if !bare[i] { heldBack += 1 }
+    }
     if dumpFolder != nil {
         var items: [String] = []
         for (i, o) in observations.enumerated() {
@@ -441,8 +480,9 @@ for (n, frame) in frames.enumerated() {
             let xs = o.points.map(\.x), ys = o.points.map(\.y), zs = o.points.map(\.z)
             let bounds = o.points.isEmpty ? "null" : String(format: "[[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f]]", xs.min()!, ys.min()!, zs.min()!, xs.max()!, ys.max()!, zs.max()!)
             let m = i < matches.count ? matches[i] : nil
-            items.append(String(format: "{\"label\":\"%@\",\"conf\":%.2f,\"quality\":%@,\"share\":%.4f,\"structure\":%.2f,\"points\":%d,\"bounds\":%@,\"track\":%@,\"placed\":%@}",
-                                objects.info(o.classIndex)?.label ?? "?", o.confidence, inst.quality.map { String(format: "%.2f", $0) } ?? "null", inst.share, onStructure[i], o.points.count, bounds,
+            items.append(String(format: "{\"label\":\"%@\",\"name\":\"%@\",\"shown\":%@,\"bare\":%@,\"conf\":%.2f,\"quality\":%@,\"share\":%.4f,\"structure\":%.2f,\"door\":%.2f,\"points\":%d,\"bounds\":%@,\"track\":%@,\"placed\":%@}",
+                                objects.info(o.classIndex)?.label ?? "?", names[i], shown[i] ? "true" : "false", bare[i] ? "true" : "false",
+                                o.confidence, inst.quality.map { String(format: "%.2f", $0) } ?? "null", inst.share, onStructure[i], onDoor[i], o.points.count, bounds,
                                 m.map { "\"\($0.objectID)\"" } ?? "null", m?.placed == true ? "true" : "false"))
         }
         let fitText = fit.map { String(format: "{\"a\":%.3f,\"b\":%.3f,\"samples\":%d,\"error\":%.3f}", $0.a, $0.b, $0.samples, $0.error) } ?? "null"
@@ -452,11 +492,12 @@ for (n, frame) in frames.enumerated() {
     }
     if let dumpFolder {
         Draw.frame(image, context: context, instances: instances, matches: matches,
-                   notes: onStructure.map { String(format: "s%.0f", $0 * 100) }, spec: objects,
+                   notes: instances.indices.map { String(format: "s%.0f%@", onStructure[$0] * 100, shown[$0] ? "" : bare[$0] ? " BARE" : " HELD") }, spec: objects,
                    to: dumpFolder.appendingPathComponent((frame.name as NSString).deletingPathExtension + ".jpg"))
         // For a video of the run: the screen as the phone would show it, and the map so far.
         for sub in ["screen", "map"] { try? FileManager.default.createDirectory(at: dumpFolder.appendingPathComponent(sub), withIntermediateDirectories: true) }
-        Draw.frame(image, context: context, instances: instances, matches: matches, spec: objects,
+        Draw.frame(image, context: context, instances: instances.indices.filter { shown[$0] }.map { instances[$0] }, matches: [],
+                   names: instances.indices.filter { shown[$0] }.map { names[$0] }, spec: objects,
                    to: dumpFolder.appendingPathComponent(String(format: "screen/%05d.jpg", n + 1)), plain: true)
         Draw.map(builder.build(), truth: truth.objects, walls: truth.walls, to: dumpFolder.appendingPathComponent(String(format: "map/%05d.png", n + 1)),
                  roomOnly: true, camera: camera, caption: "the room map so far (dashed: measured afterwards on the Mac)")
@@ -477,7 +518,8 @@ for (n, frame) in frames.enumerated() {
 let map = builder.build()
 print(String(format: "\n%@: %d frames, %.0f ms a frame on this Mac, depth on %d, fitted on %d; %d observations",
              truth.space, framesRun, analysisTime / Double(max(1, framesRun)) * 1000, framesWithDepth, framesWithFit, observationsTotal))
-print("\(onBareSurface) detections were on bare wall, floor or ceiling and dropped")
+print("\(outlinesShown) outlines shown; \(heldBack) detections held back as seen only once; \(onBareSurface) on bare wall, floor or ceiling")
+print("names shown: \(namesShown.sorted { $0.value > $1.value }.prefix(16).map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
 print("placed \(map.objects.count) objects; room yaw \(map.roomYaw.map { String(format: "%.2f", $0) } ?? "none")")
 func overlap(_ aMin: SIMD3<Float>, _ aMax: SIMD3<Float>, _ bMin: SIMD3<Float>, _ bMax: SIMD3<Float>) -> Float {
     let w = max(0, min(aMax.x, bMax.x) - max(aMin.x, bMin.x)), d = max(0, min(aMax.z, bMax.z) - max(aMin.z, bMin.z))
@@ -505,8 +547,8 @@ for object in truth.objects {
 }
 print("placed:")
 for o in map.objects {
-    print(String(format: "  %-5@ %-16@ x %+.2f..%+.2f  y %.2f..%.2f  z %+.2f..%+.2f  (%.2f x %.2f x %.2f)", o.id, o.label,
-                 o.min.x, o.max.x, o.min.y, o.max.y, o.min.z, o.max.z, o.max.x - o.min.x, o.size.y, o.max.z - o.min.z))
+    print(String(format: "  %-5@ %-16@ x %+.2f..%+.2f  y %.2f..%.2f  z %+.2f..%+.2f  (%.2f x %.2f x %.2f)  top layer %.2f", o.id, o.label,
+                 o.min.x, o.max.x, o.min.y, o.max.y, o.min.z, o.max.z, o.max.x - o.min.x, o.size.y, o.max.z - o.min.z, o.top ?? -1))
 }
 let extra = map.objects.filter { !matchedPlaced.contains($0.id) }
 print("  \(extra.count) placed objects match nothing measured: \(extra.map { "\($0.label) \(String(format: "%.1fx%.1f", $0.size.x, $0.size.z))" }.joined(separator: ", "))")

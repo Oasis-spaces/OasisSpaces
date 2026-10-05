@@ -17,6 +17,9 @@ public struct ObjectSpec: Codable, Sendable {
         public var boxed: Bool
         /// Always stands on the floor (a wardrobe, a bed; not a cabinet, which may hang on a wall).
         public var onFloor: Bool?
+        /// Its top is at least, or at most, this high above the floor (a desk's top, a bathtub's rim).
+        public var minTop: Float?
+        public var maxTop: Float?
     }
 
     public struct Tracker: Codable, Sendable {
@@ -35,6 +38,10 @@ public struct ObjectSpec: Codable, Sendable {
         public var snapMetres: Float = 0.5
         /// Furniture that always stands on the floor reaches it from this high (its bottom was hidden).
         public var floorReachMetres: Float = 1.0
+        /// A standing piece's footprint is taken from what was seen of it below this height.
+        public var bodyMetres: Float = 1.5
+        /// Hits within this many analysed frames of each other are one glimpse.
+        public var glimpseAnalyses: Int = 4
         /// Furniture whose back is this close to a wall reaches the wall.
         public var wallSnapMetres: Float = 0.2
         /// A wardrobe or appliance (seen only from the front) reaches a wall this far behind its front.
@@ -61,6 +68,8 @@ public struct ObjectSpec: Codable, Sendable {
             adjoinMetres = try c.decodeIfPresent(Float.self, forKey: .adjoinMetres) ?? adjoinMetres
             snapMetres = try c.decodeIfPresent(Float.self, forKey: .snapMetres) ?? snapMetres
             floorReachMetres = try c.decodeIfPresent(Float.self, forKey: .floorReachMetres) ?? floorReachMetres
+            bodyMetres = try c.decodeIfPresent(Float.self, forKey: .bodyMetres) ?? bodyMetres
+            glimpseAnalyses = try c.decodeIfPresent(Int.self, forKey: .glimpseAnalyses) ?? glimpseAnalyses
             wallSnapMetres = try c.decodeIfPresent(Float.self, forKey: .wallSnapMetres) ?? wallSnapMetres
             unitDepthMetres = try c.decodeIfPresent(Float.self, forKey: .unitDepthMetres) ?? unitDepthMetres
             minBoxMetres = try c.decodeIfPresent(Float.self, forKey: .minBoxMetres) ?? minBoxMetres
@@ -69,6 +78,25 @@ public struct ObjectSpec: Codable, Sendable {
             forgetObservations = try c.decodeIfPresent(Int.self, forKey: .forgetObservations) ?? forgetObservations
             maxSizeMetres = try c.decodeIfPresent(Float.self, forKey: .maxSizeMetres) ?? maxSizeMetres
             depthMetres = try c.decodeIfPresent([Float].self, forKey: .depthMetres) ?? depthMetres
+        }
+    }
+
+    /// What it takes for a detection to be outlined on the screen (see SightingMemory).
+    public struct Screen: Codable, Sendable {
+        /// A thing is outlined from this many sightings on.
+        public var showSightings: Int = 2
+        /// A thing not seen for this many analysed frames is forgotten.
+        public var forgetAnalyses: Int = 6
+        /// Two sightings this close in direction are the same thing, however small it is.
+        public var minAngleDegrees: Float = 6
+
+        public init() {}
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            showSightings = try c.decodeIfPresent(Int.self, forKey: .showSightings) ?? showSightings
+            forgetAnalyses = try c.decodeIfPresent(Int.self, forKey: .forgetAnalyses) ?? forgetAnalyses
+            minAngleDegrees = try c.decodeIfPresent(Float.self, forKey: .minAngleDegrees) ?? minAngleDegrees
         }
     }
 
@@ -85,10 +113,11 @@ public struct ObjectSpec: Codable, Sendable {
     public var bareSurfaceShare: Float
     public var kin: [String: [String]]
     public var tracker: Tracker
+    public var screen: Screen
     public var classes: [ClassInfo]
 
     private enum CodingKeys: String, CodingKey {
-        case model, inputSize, confidence, iou, maskThreshold, minShare, bareSurfaceShare, kin, tracker, classes
+        case model, inputSize, confidence, iou, maskThreshold, minShare, bareSurfaceShare, kin, tracker, screen, classes
     }
 
     public init(from decoder: Decoder) throws {
@@ -101,6 +130,7 @@ public struct ObjectSpec: Codable, Sendable {
         minShare = try c.decodeIfPresent(Float.self, forKey: .minShare) ?? 0.002
         bareSurfaceShare = try c.decodeIfPresent(Float.self, forKey: .bareSurfaceShare) ?? 0.9
         tracker = try c.decodeIfPresent(Tracker.self, forKey: .tracker) ?? Tracker()
+        screen = try c.decodeIfPresent(Screen.self, forKey: .screen) ?? Screen()
         classes = try c.decode([ClassInfo].self, forKey: .classes)
         // The kin dictionary carries a comment string beside the lists.
         kin = [:]

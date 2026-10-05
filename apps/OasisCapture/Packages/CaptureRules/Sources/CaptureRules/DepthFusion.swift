@@ -106,6 +106,15 @@ public struct PinholeCamera: Sendable {
         return SIMD3(p.x, p.y, p.z)
     }
 
+    /// Where the camera is.
+    public var position: SIMD3<Float> { SIMD3(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z) }
+
+    /// The direction pixel (u, v) looks in, in the world: a unit vector.
+    public func direction(u: Float, v: Float) -> SIMD3<Float> {
+        let d = transform * SIMD4((u - cx) / fx, -(v - cy) / fy, -1, 0)
+        return simd_normalize(SIMD3(d.x, d.y, d.z))
+    }
+
     /// The pixel a world point lands on, and its depth; nil when behind the camera.
     public func project(_ world: SIMD3<Float>) -> (u: Float, v: Float, depth: Float)? {
         let c = transform.inverse * SIMD4(world, 1)
