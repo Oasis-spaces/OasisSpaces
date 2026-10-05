@@ -524,7 +524,14 @@ phone (no model calls, no network while recording). Build and install with
   what matched nothing). `--dump <folder>` writes every frame with its
   outlines and labels, a map of the placed boxes over the measured ones, and
   `frames.jsonl` (each detection's extent in the room, the depth fit, the
-  share on bare wall). Changes to the phone's perception are checked there
+  share on bare wall), plus `screen/` and `map/`: the screen as the phone
+  would show it and the map so far, frame by frame, which `ffmpeg` puts side
+  by side into a video of the scan (`-i screen/%05d.jpg -i map/%05d.png`,
+  `hstack`). `phonesim --video videos/<file>.MOV --dump <folder> --fps 3`
+  needs no processed space: it runs the detector, the refiner and the wall
+  check straight over a video at the phone's rate and writes the outlined
+  frames (no camera poses, so no map and no settled names). Changes to the
+  phone's perception are checked there
   before they go on a phone: on the two test rooms the map went from 22
   slivers with the bed at 0.13 footprint overlap to 9 pieces of furniture
   with the bed at 0.57 in one, and to the bed at 0.90 and the wardrobe with

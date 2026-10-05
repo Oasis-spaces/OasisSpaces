@@ -56,7 +56,7 @@ enum Draw {
     /// The frame with every instance's outline (solid), the detector's box
     /// (dashed) and "label confidence [quality] track" in the box's corner.
     static func frame(_ image: CIImage, context: CIContext, instances: [Instance], matches: [ObservationMatch?],
-                      notes: [String] = [], spec: ObjectSpec, to url: URL, maxWidth: Int = 720) {
+                      notes: [String] = [], spec: ObjectSpec, to url: URL, maxWidth: Int = 720, plain: Bool = false) {
         guard let cg = context.createCGImage(image, from: image.extent) else { return }
         let scale = min(1, CGFloat(maxWidth) / CGFloat(cg.width))
         let w = Int(CGFloat(cg.width) * scale), h = Int(CGFloat(cg.height) * scale)
@@ -68,7 +68,7 @@ enum Draw {
         for (i, inst) in instances.enumerated() {
             let color = Self.color(inst.classIndex)
             ctx.setStrokeColor(color)
-            ctx.setLineWidth(2.5)
+            ctx.setLineWidth(plain ? 3.5 : 2.5)
             let polygon = MaskOutline.polygon(of: inst.mask, width: inst.maskWidth, height: inst.maskHeight, epsilon: 1.0)
             if polygon.count >= 3 {
                 ctx.beginPath()
@@ -77,12 +77,20 @@ enum Draw {
                 ctx.closePath()
                 ctx.strokePath()
             }
-            ctx.setLineWidth(1)
-            ctx.setLineDash(phase: 0, lengths: [4, 4])
-            ctx.stroke(CGRect(x: Double(inst.minX) * Double(w), y: (1 - Double(inst.maxY)) * Double(h),
-                              width: Double(inst.maxX - inst.minX) * Double(w), height: Double(inst.maxY - inst.minY) * Double(h)))
-            ctx.setLineDash(phase: 0, lengths: [])
+            if !plain {
+                ctx.setLineWidth(1)
+                ctx.setLineDash(phase: 0, lengths: [4, 4])
+                ctx.stroke(CGRect(x: Double(inst.minX) * Double(w), y: (1 - Double(inst.maxY)) * Double(h),
+                                  width: Double(inst.maxX - inst.minX) * Double(w), height: Double(inst.maxY - inst.minY) * Double(h)))
+                ctx.setLineDash(phase: 0, lengths: [])
+            }
             let label = spec.info(inst.classIndex)?.label ?? "?"
+            if plain {
+                // As the phone shows it: the outline and the name (the tracker's settled one when it knows the thing).
+                let shown = i < matches.count ? matches[i]?.label ?? label : label
+                text(shown, at: CGPoint(x: Double(inst.minX) * Double(w) + 4, y: (1 - Double(inst.minY)) * Double(h) - 20), in: ctx, color: color, size: 17)
+                continue
+            }
             var caption = String(format: "%@ %.0f%%", label, inst.confidence * 100)
             if let q = inst.quality { caption += String(format: " q%.2f", q) }
             if i < notes.count { caption += " " + notes[i] }
@@ -97,14 +105,19 @@ enum Draw {
 
     /// The room from above: walls grey, measured furniture green, placed boxes
     /// in their class colour with "label height".
-    static func map(_ map: RoomMap, truth: [Truth.Object], walls: [Truth.Wall], to url: URL, pixelsPerMetre: CGFloat = 160) {
+    /// `roomOnly` keeps the picture to the walls (the same size for every frame of a video) and
+    /// labels the boxes with their names alone; `camera` draws where the phone is and looks.
+    static func map(_ map: RoomMap, truth: [Truth.Object], walls: [Truth.Wall], to url: URL, pixelsPerMetre: CGFloat = 160,
+                    roomOnly: Bool = false, camera: PinholeCamera? = nil, caption: String? = nil) {
         var lo = SIMD2<Float>(repeating: .greatestFiniteMagnitude), hi = -lo
         for wall in walls {
             let c = SIMD2(wall.center[0], wall.center[2]), d = SIMD2(wall.along[0], wall.along[2]) * wall.half
             lo = simd_min(lo, simd_min(c - d, c + d)); hi = simd_max(hi, simd_max(c - d, c + d))
         }
-        for o in truth { lo = simd_min(lo, SIMD2(o.min[0], o.min[2])); hi = simd_max(hi, SIMD2(o.max[0], o.max[2])) }
-        for o in map.objects { lo = simd_min(lo, o.footprintMin); hi = simd_max(hi, o.footprintMax) }
+        if !roomOnly {
+            for o in truth { lo = simd_min(lo, SIMD2(o.min[0], o.min[2])); hi = simd_max(hi, SIMD2(o.max[0], o.max[2])) }
+            for o in map.objects { lo = simd_min(lo, o.footprintMin); hi = simd_max(hi, o.footprintMax) }
+        }
         guard lo.x < hi.x else { return }
         lo -= 0.4; hi += 0.4
         let w = Int(CGFloat(hi.x - lo.x) * pixelsPerMetre), h = Int(CGFloat(hi.y - lo.y) * pixelsPerMetre)
@@ -128,11 +141,15 @@ enum Draw {
         ctx.strokePath()
         let green = CGColor(colorSpace: rgb, components: [0.1, 0.6, 0.2, 1])!
         ctx.setStrokeColor(green); ctx.setLineWidth(2)
+        if roomOnly { ctx.setLineDash(phase: 0, lengths: [6, 5]) }
         for o in truth {
             let a = at(SIMD2(o.min[0], o.min[2])), b = at(SIMD2(o.max[0], o.max[2]))
             ctx.stroke(CGRect(x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y))
-            text(String(format: "%@ %@ h%.1f", o.id, o.label, o.max[1] - o.min[1]), at: CGPoint(x: a.x + 3, y: b.y - 15), in: ctx, color: green, size: 11)
+            if !roomOnly {
+                text(String(format: "%@ %@ h%.1f", o.id, o.label, o.max[1] - o.min[1]), at: CGPoint(x: a.x + 3, y: b.y - 15), in: ctx, color: green, size: 11)
+            }
         }
+        ctx.setLineDash(phase: 0, lengths: [])
         for o in map.objects {
             let color = Self.color(o.classId)
             ctx.setStrokeColor(color); ctx.setFillColor(Self.color(o.classId, alpha: 0.15)); ctx.setLineWidth(2)
@@ -141,8 +158,27 @@ enum Draw {
             for c in corners.dropFirst() { ctx.addLine(to: c) }
             ctx.closePath(); ctx.drawPath(using: .fillStroke)
             let centre = at(SIMD2(o.center.x, o.center.z))
-            text(String(format: "%@ h%.1f %@", o.label, o.size.y, o.id), at: CGPoint(x: centre.x - 20, y: centre.y - 5), in: ctx, color: color, size: 11)
+            if roomOnly {
+                text(String(format: "%@ %.1f m", o.label, o.size.y), at: CGPoint(x: centre.x - 28, y: centre.y - 5), in: ctx, color: color, size: 13)
+            } else {
+                text(String(format: "%@ h%.1f %@", o.label, o.size.y, o.id), at: CGPoint(x: centre.x - 20, y: centre.y - 5), in: ctx, color: color, size: 11)
+            }
         }
+        if let camera {
+            // The phone: a dot, and the two edges of what it sees.
+            let t = camera.transform
+            let eye = SIMD2(t.columns.3.x, t.columns.3.z)
+            let forward = simd_normalize(SIMD2(-t.columns.2.x, -t.columns.2.z)), side = SIMD2(-forward.y, forward.x)
+            let spread = Float(camera.width) / (2 * camera.fx)
+            ctx.setStrokeColor(gray(0.1)); ctx.setFillColor(gray(0.1)); ctx.setLineWidth(1.5)
+            for edge in [forward + side * spread, forward - side * spread] {
+                ctx.move(to: at(eye)); ctx.addLine(to: at(eye + simd_normalize(edge) * 0.8))
+            }
+            ctx.strokePath()
+            let p = at(eye)
+            ctx.fillEllipse(in: CGRect(x: p.x - 6, y: p.y - 6, width: 12, height: 12))
+        }
+        if let caption { text(caption, at: CGPoint(x: 8, y: CGFloat(h) - 22), in: ctx, color: gray(1), size: 13) }
         write(ctx, to: url, jpeg: false)
     }
 }

@@ -8,6 +8,12 @@
 //   swift run -c release phonesim ../../../../spaces/<name> [--every 2] [--frames 80] [--debug] [--dump folder]
 //
 // Needs tools/phone_sim_export.py to have written spaces/<name>/phone-sim/frames.json.
+//
+// Or straight over a video, a few frames a second like the phone, for what the screen
+// would show (outlines and labels; no camera poses, so nothing is placed):
+//
+//   swift run -c release phonesim --video ../../../../videos/<file>.MOV --dump <folder> [--fps 3]
+import AVFoundation
 import CoreImage
 import CoreML
 import ImageIO
@@ -39,10 +45,12 @@ struct Truth: Decodable {
 
 let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
-    print("usage: phonesim <space folder> [--every n] [--frames n] [--debug] [--dump folder]")
+    print("usage: phonesim <space folder> [--every n] [--frames n] [--debug] [--dump folder]\n       phonesim --video <file> --dump <folder> [--fps n] [--frames n]")
     exit(2)
 }
-let space = URL(fileURLWithPath: arguments[1]).standardizedFileURL
+/// A video to run the on-screen part over (--video <file>), instead of a processed space.
+let videoURL: URL? = arguments.firstIndex(of: "--video").flatMap { i in i + 1 < arguments.count ? URL(fileURLWithPath: arguments[i + 1]) : nil }
+let space = URL(fileURLWithPath: videoURL == nil ? arguments[1] : ".").standardizedFileURL
 func option(_ name: String, _ fallback: Int) -> Int {
     guard let i = arguments.firstIndex(of: name), i + 1 < arguments.count, let v = Int(arguments[i + 1]) else { return fallback }
     return v
@@ -56,8 +64,11 @@ let dumpFolder: URL? = arguments.firstIndex(of: "--dump").flatMap { i in
     try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
-let truth = try JSONDecoder().decode(Truth.self, from: Data(contentsOf: space.appendingPathComponent("phone-sim/frames.json")))
-let resources = space.appendingPathComponent("../../apps/OasisCapture/Resources").standardizedFileURL
+let truth: Truth = try videoURL.map {
+    Truth(space: $0.lastPathComponent, images: "", room: .init(width: 0, depth: 0, height: 0), walls: [], objects: [], frames: [])
+} ?? JSONDecoder().decode(Truth.self, from: Data(contentsOf: space.appendingPathComponent("phone-sim/frames.json")))
+// The app's model packages, beside this package: apps/OasisCapture/Resources.
+let resources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../../Resources").standardizedFileURL
 let spec = DetectionSpec.bundled(), objects = ObjectSpec.bundled()
 
 // MARK: Models (compiled from the app's packages)
@@ -142,14 +153,20 @@ func pixelBuffer(width: Int, height: Int) -> CVPixelBuffer {
 
 /// The frame as the phone's camera would hold it: cropped to 3:4 about the centre
 /// (the video is 9:16; the sensor is 4:3), upright.
-func upright(_ frame: Frame) -> (CIImage, PinholeCamera)? {
-    let url = space.appendingPathComponent(truth.images).appendingPathComponent(frame.name)
-    guard let image = CIImage(contentsOf: url) else { return nil }
+func cropped34(_ image: CIImage) -> (image: CIImage, top: CGFloat) {
     let w = image.extent.width, h = (image.extent.width * 4 / 3).rounded()
     let top = ((image.extent.height - h) / 2).rounded()
     // Core Image's origin is bottom-left: the crop's y runs from the bottom.
     let cropped = image.cropped(to: CGRect(x: 0, y: image.extent.height - top - h, width: w, height: h))
         .transformed(by: CGAffineTransform(translationX: 0, y: -(image.extent.height - top - h)))
+    return (cropped, top)
+}
+
+func upright(_ frame: Frame) -> (CIImage, PinholeCamera)? {
+    let url = space.appendingPathComponent(truth.images).appendingPathComponent(frame.name)
+    guard let image = CIImage(contentsOf: url) else { return nil }
+    let (cropped, top) = cropped34(image)
+    let w = cropped.extent.width, h = cropped.extent.height
     var transform = simd_float4x4()
     for c in 0..<4 { for r in 0..<4 { transform[c][r] = frame.transform[c * 4 + r] } }
     let camera = PinholeCamera(fx: frame.fx, fy: frame.fy, cx: frame.cx, cy: frame.cy - Float(top),
@@ -283,6 +300,49 @@ func fitScale(_ depth: (data: [Float], width: Int, height: Int), camera: Pinhole
     return DepthScale.fit(predicted: seenPredicted, metres: seenMetres) ?? first
 }
 
+// MARK: Over a video: what the screen would show
+
+if let videoURL {
+    let rate = Double(option("--fps", 3))
+    let asset = AVURLAsset(url: videoURL)
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true                    // upright, as it was held
+    generator.maximumSize = CGSize(width: 1920, height: 1920)
+    generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 30)
+    generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 30)
+    let count = min(limit, Int(CMTimeGetSeconds(asset.duration) * rate))
+    var things = 0, dropped = 0, analysis = 0.0, run = 0
+    var labels: [String: Int] = [:]
+    for n in 0..<count {
+        guard let frame = try? generator.copyCGImage(at: CMTime(seconds: Double(n) / rate, preferredTimescale: 600), actualTime: nil) else { continue }
+        let image = cropped34(CIImage(cgImage: frame)).image
+        let t = Date()
+        try? VNImageRequestHandler(ciImage: image, orientation: .up).perform([detector, surfaces])
+        var instances = refine(decodeDetections(detector), image: image)
+        if let map = surfaceClasses(surfaces) {
+            let before = instances.count
+            instances.removeAll { objects.isOnBareSurface($0, bare: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height) }
+            dropped += before - instances.count
+        }
+        analysis += Date().timeIntervalSince(t)
+        run += 1
+        things += instances.count
+        for inst in instances { if let label = objects.info(inst.classIndex)?.label { labels[label, default: 0] += 1 } }
+        if let dumpFolder {
+            Draw.frame(image, context: context, instances: instances, matches: [], spec: objects,
+                       to: dumpFolder.appendingPathComponent(String(format: "frame_%05d.jpg", n + 1)), plain: true)
+        }
+        if n % 30 == 0 || n == count - 1 {
+            print(String(format: "%5.1f s  frame %3d/%d: %@", Double(n) / rate, n + 1, count,
+                         instances.compactMap { objects.info($0.classIndex)?.label }.joined(separator: ", ")))
+        }
+    }
+    print(String(format: "\n%@: %d frames at %.0f a second, %.0f ms a frame on this Mac; %.1f things outlined a frame, %d dropped as bare wall",
+                 videoURL.lastPathComponent, run, rate, analysis / Double(max(1, run)) * 1000, Double(things) / Double(max(1, run)), dropped))
+    print("labels: \(labels.sorted { $0.value > $1.value }.prefix(16).map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
+    exit(0)
+}
+
 // MARK: Run
 
 let builder = RoomMapBuilder(spec: objects)
@@ -394,6 +454,12 @@ for (n, frame) in frames.enumerated() {
         Draw.frame(image, context: context, instances: instances, matches: matches,
                    notes: onStructure.map { String(format: "s%.0f", $0 * 100) }, spec: objects,
                    to: dumpFolder.appendingPathComponent((frame.name as NSString).deletingPathExtension + ".jpg"))
+        // For a video of the run: the screen as the phone would show it, and the map so far.
+        for sub in ["screen", "map"] { try? FileManager.default.createDirectory(at: dumpFolder.appendingPathComponent(sub), withIntermediateDirectories: true) }
+        Draw.frame(image, context: context, instances: instances, matches: matches, spec: objects,
+                   to: dumpFolder.appendingPathComponent(String(format: "screen/%05d.jpg", n + 1)), plain: true)
+        Draw.map(builder.build(), truth: truth.objects, walls: truth.walls, to: dumpFolder.appendingPathComponent(String(format: "map/%05d.png", n + 1)),
+                 roomOnly: true, camera: camera, caption: "the room map so far (dashed: measured afterwards on the Mac)")
     }
     analysisTime += Date().timeIntervalSince(t)
     framesRun += 1
