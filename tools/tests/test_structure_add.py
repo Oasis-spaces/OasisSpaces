@@ -183,6 +183,23 @@ def test_no_whole_piece_means_nothing_is_added():
     assert shapes["boxes"] == [] and applied == ["no wardrobe added: only a door"]
 
 
+def test_a_misplacement_claim_the_masks_contradict_becomes_minor():
+    agent_ = stub(Answers())
+    agent_.box_mask_score = lambda label: {"bed": (0.65, 8), "wardrobe": (0.27, 2)}.get(label)
+    verdict = {"plausible": False, "problems": [
+        {"what": "misplaced: bed, set far back in the room", "severity": "structural"},
+        {"what": "misplaced: wardrobe, standing in the doorway", "severity": "structural"},
+        {"what": "misplaced: lamp, floating", "severity": "structural"},            # no masks: untouched
+        {"what": "pillow off-centre", "severity": "minor"}]}
+    notes = agent.Agent.overrule_misplacements(agent_, verdict)
+    assert notes == ["bed stays, score 0.65 in 8 frames"]
+    assert [p["severity"] for p in verdict["problems"]] == ["minor", "structural", "structural", "minor"]
+    assert "overruled" in verdict["problems"][0]["what"] and verdict["plausible"] is False
+    only_bed = {"plausible": False, "problems": [{"what": "misplaced: bed, too far", "severity": "structural"}]}
+    agent.Agent.overrule_misplacements(agent_, only_bed)
+    assert only_bed["plausible"] is True                                             # nothing structural is left
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

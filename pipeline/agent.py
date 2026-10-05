@@ -54,6 +54,7 @@ from object_frames import draw_object_frames  # noqa: E402
 from semantics import MAX_OBJECTS, ROLES, Vocabulary, clean_name, room_vocabulary  # noqa: E402
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
 from pointcloud import space_model_dir  # noqa: E402
+import numpy as np  # noqa: E402
 import placement  # noqa: E402
 from reconstruct import (  # noqa: E402
     MAX_PATH_JUMP, camera_path_jump, mean_reprojection, registered_images, solved_models,
@@ -1184,6 +1185,9 @@ class Agent:
             print(f"    claude (blender): no usable answer"
                   + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
             return None
+        overruled = self.safe(self.overrule_misplacements, verdict, default=[]) or []
+        if overruled:
+            print("    claude (blender): overruled by the frames' masks: " + "; ".join(overruled))
         self.judged("blender", verdict,
                     ("plausible room" if verdict.get("plausible") else "not a plausible room")
                     + (f" - wrong: {', '.join(problem_text(p) for p in verdict['problems'][:3])}"
@@ -1191,6 +1195,51 @@ class Agent:
                     + (f"; missing: {', '.join(verdict.get('missing', [])[:3])}"
                        if verdict.get("missing") else ""))
         return verdict
+
+    def box_mask_score(self, label: str) -> tuple[float, int] | None:
+        """How well the built box(es) labelled `label` agree with the label's
+        own masks in the keyframes (pipeline/placement.py): (best score,
+        agreeing frames), or None when no keyframe detected it."""
+        shapes = json.loads((self.space / "shapes.json").read_text())
+        boxes = [b for b in shapes["boxes"] if b.get("build", True)
+                 and label in (b.get("label"), b.get("detected"))]
+        if not boxes:
+            return None
+        evidence = placement.mask_evidence(self.space, label, log=lambda text: print("    " + text))
+        if len(evidence["frames"]) < placement.MIN_FRAMES:
+            return None
+        best = None
+        for b in boxes:
+            total, per_frame = placement.score(np.array(b["min"]), np.array(b["max"]), evidence)
+            agreeing = sum(1 for v in per_frame.values() if v >= 0.2)
+            if best is None or total > best[0]:
+                best = (total, agreeing)
+        return best
+
+    def overrule_misplacements(self, verdict: dict) -> list[str]:
+        """A structural 'misplaced: <piece>' claim is checked against the
+        piece's own masks: where they agree with its box, the claim becomes
+        minor. The same rows have drawn opposite verdicts on the same bed;
+        the masks do not change their mind."""
+        notes = []
+        for problem in verdict.get("problems") or []:
+            if not isinstance(problem, dict) or problem.get("severity") != "structural":
+                continue
+            what = str(problem.get("what", ""))
+            if not what.lower().startswith("misplaced:"):
+                continue
+            label = what.split(":", 1)[1].split(",")[0].strip().lower()
+            scored = self.box_mask_score(label)
+            if scored is None:
+                continue
+            total, agreeing = scored
+            if total >= placement.ACCEPT_SCORE and agreeing >= placement.MIN_FRAMES:
+                problem["severity"] = "minor"
+                problem["what"] = f"{what} (overruled: its masks in {agreeing} keyframes agree with the box, score {total:.2f})"
+                notes.append(f"{label} stays, score {total:.2f} in {agreeing} frames")
+        if notes and not structural_problems(verdict):
+            verdict["plausible"] = True
+        return notes
 
     def recheck_structure(self, first: dict) -> None:
         """The render check found the built room structurally wrong: run the
