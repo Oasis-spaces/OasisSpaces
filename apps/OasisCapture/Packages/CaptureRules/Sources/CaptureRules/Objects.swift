@@ -15,15 +15,32 @@ public struct ObjectSpec: Codable, Sendable {
         public var family: String
         /// Placed as a box in the room map (wall-mounted and small things are only outlined).
         public var boxed: Bool
+        /// Always stands on the floor (a wardrobe, a bed; not a cabinet, which may hang on a wall).
+        public var onFloor: Bool?
     }
 
     public struct Tracker: Codable, Sendable {
         public var voxelMetres: Float = 0.05
         public var confirmObservations: Int = 2
         public var matchOverlap: Float = 0.25
-        public var mergeOverlap: Float = 0.6
+        public var mergeOverlap: Float = 0.4
         public var easing: Float = 0.35
-        public var trimShare: Float = 0.04
+        /// A bin on an axis counts towards the extent with this share of the busiest bin's hits.
+        public var binShare: Float = 0.05
+        /// The extent runs across empty gaps up to this long.
+        public var gapMetres: Float = 0.15
+        /// A part of a bed or wardrobe this close to the tracked one joins it.
+        public var adjoinMetres: Float = 0.25
+        /// Floor-standing furniture whose bottom is this close above the floor reaches it.
+        public var snapMetres: Float = 0.5
+        /// Furniture that always stands on the floor reaches it from this high (its bottom was hidden).
+        public var floorReachMetres: Float = 1.0
+        /// Furniture whose back is this close to a wall reaches the wall.
+        public var wallSnapMetres: Float = 0.2
+        /// A wardrobe or appliance (seen only from the front) reaches a wall this far behind its front.
+        public var unitDepthMetres: Float = 0.7
+        /// Smaller than this on the floor (and under 0.4 m tall): not furniture, not placed.
+        public var minBoxMetres: Float = 0.25
         public var minPoints: Int = 25
         public var staleObservations: Int = 6
         public var forgetObservations: Int = 24
@@ -39,7 +56,14 @@ public struct ObjectSpec: Codable, Sendable {
             matchOverlap = try c.decodeIfPresent(Float.self, forKey: .matchOverlap) ?? matchOverlap
             mergeOverlap = try c.decodeIfPresent(Float.self, forKey: .mergeOverlap) ?? mergeOverlap
             easing = try c.decodeIfPresent(Float.self, forKey: .easing) ?? easing
-            trimShare = try c.decodeIfPresent(Float.self, forKey: .trimShare) ?? trimShare
+            binShare = try c.decodeIfPresent(Float.self, forKey: .binShare) ?? binShare
+            gapMetres = try c.decodeIfPresent(Float.self, forKey: .gapMetres) ?? gapMetres
+            adjoinMetres = try c.decodeIfPresent(Float.self, forKey: .adjoinMetres) ?? adjoinMetres
+            snapMetres = try c.decodeIfPresent(Float.self, forKey: .snapMetres) ?? snapMetres
+            floorReachMetres = try c.decodeIfPresent(Float.self, forKey: .floorReachMetres) ?? floorReachMetres
+            wallSnapMetres = try c.decodeIfPresent(Float.self, forKey: .wallSnapMetres) ?? wallSnapMetres
+            unitDepthMetres = try c.decodeIfPresent(Float.self, forKey: .unitDepthMetres) ?? unitDepthMetres
+            minBoxMetres = try c.decodeIfPresent(Float.self, forKey: .minBoxMetres) ?? minBoxMetres
             minPoints = try c.decodeIfPresent(Int.self, forKey: .minPoints) ?? minPoints
             staleObservations = try c.decodeIfPresent(Int.self, forKey: .staleObservations) ?? staleObservations
             forgetObservations = try c.decodeIfPresent(Int.self, forKey: .forgetObservations) ?? forgetObservations
@@ -56,12 +80,15 @@ public struct ObjectSpec: Codable, Sendable {
     public var maskThreshold: Float
     /// A detection whose mask covers less of the image than this is dropped.
     public var minShare: Float
+    /// A piece of furniture, a window or a curtain whose mask lies this much on what the
+    /// surface model calls bare wall, floor or ceiling is the detector seeing things.
+    public var bareSurfaceShare: Float
     public var kin: [String: [String]]
     public var tracker: Tracker
     public var classes: [ClassInfo]
 
     private enum CodingKeys: String, CodingKey {
-        case model, inputSize, confidence, iou, maskThreshold, minShare, kin, tracker, classes
+        case model, inputSize, confidence, iou, maskThreshold, minShare, bareSurfaceShare, kin, tracker, classes
     }
 
     public init(from decoder: Decoder) throws {
@@ -72,6 +99,7 @@ public struct ObjectSpec: Codable, Sendable {
         iou = try c.decode(Float.self, forKey: .iou)
         maskThreshold = try c.decode(Float.self, forKey: .maskThreshold)
         minShare = try c.decodeIfPresent(Float.self, forKey: .minShare) ?? 0.002
+        bareSurfaceShare = try c.decodeIfPresent(Float.self, forKey: .bareSurfaceShare) ?? 0.9
         tracker = try c.decodeIfPresent(Tracker.self, forKey: .tracker) ?? Tracker()
         classes = try c.decode([ClassInfo].self, forKey: .classes)
         // The kin dictionary carries a comment string beside the lists.
@@ -108,6 +136,19 @@ public struct ObjectSpec: Codable, Sendable {
 
     public func index(of name: String) -> Int? {
         classes.firstIndex { $0.prompt == name || $0.label == name }
+    }
+
+    /// Whether a detection is the detector seeing things on a bare surface: a
+    /// fridge that is a stretch of white wall, a window on a plain wall, a
+    /// curtain on a cupboard door. The surface model (`classes`, its class per
+    /// pixel of the same upright image; `bare`, its wall, floor and ceiling
+    /// classes) is asked what is under the mask. Only furniture, windows and
+    /// curtains are checked: screens, pictures, lights and rugs lie flat on a
+    /// surface by nature, and a door is often wall to the surface model.
+    public func isOnBareSurface(_ instance: Instance, bare: Set<Int32>, classes: [Int32], width: Int, height: Int) -> Bool {
+        guard let info = info(instance.classIndex) else { return false }
+        let checked = (info.boxed && !["rug", "screen"].contains(info.family)) || ["window", "curtain"].contains(info.family)
+        return checked && instance.share(on: bare, classes: classes, width: width, height: height) >= bareSurfaceShare
     }
 
     /// The kin group a family belongs to (the family itself when it has none):
@@ -149,6 +190,51 @@ public struct Instance: Sendable {
 
     public func inside(x: Int, y: Int) -> Bool {
         x >= 0 && y >= 0 && x < maskWidth && y < maskHeight && mask[y * maskWidth + x] != 0
+    }
+}
+
+extension Instance {
+    /// Places to read the depth of this thing: a grid of about `budget`
+    /// samples, as normalised upright image coordinates, none within `margin`
+    /// mask pixels of the mask's edge. The depth map is soft at an edge (a
+    /// pixel there is somewhere between the thing and the wall behind it),
+    /// and those in-between points stretch a box towards the wall.
+    public func interiorSamples(budget: Int, margin: Int = 2) -> [SIMD2<Float>] {
+        let step = max(1, Int((Double(area) / Double(max(1, budget))).squareRoot().rounded(.up)))
+        var out: [SIMD2<Float>] = []
+        out.reserveCapacity(area / (step * step) + 1)
+        var y = step / 2
+        while y < maskHeight {
+            var x = step / 2
+            while x < maskWidth {
+                if inside(x: x, y: y), inside(x: x - 1, y: y), inside(x: x + 1, y: y), inside(x: x, y: y - 1), inside(x: x, y: y + 1),
+                   inside(x: x - margin, y: y), inside(x: x + margin, y: y), inside(x: x, y: y - margin), inside(x: x, y: y + margin) {
+                    out.append(SIMD2((Float(x) + 0.5) / Float(maskWidth), (Float(y) + 0.5) / Float(maskHeight)))
+                }
+                x += step
+            }
+            y += step
+        }
+        return out
+    }
+}
+
+extension Instance {
+    /// Share of this thing's mask that lies on pixels the surface model calls
+    /// one of `surfaces` (bare wall, floor, ceiling). `classes` is the surface
+    /// model's class per pixel of the same upright image, row-major.
+    public func share(on surfaces: Set<Int32>, classes: [Int32], width: Int, height: Int) -> Float {
+        guard area > 0, width > 0, height > 0, classes.count >= width * height else { return 0 }
+        var on = 0, all = 0
+        for y in 0..<maskHeight {
+            let cy = min(height - 1, Int((Float(y) + 0.5) / Float(maskHeight) * Float(height)))
+            for x in 0..<maskWidth where mask[y * maskWidth + x] != 0 {
+                let cx = min(width - 1, Int((Float(x) + 0.5) / Float(maskWidth) * Float(width)))
+                all += 1
+                if surfaces.contains(classes[cy * width + cx]) { on += 1 }
+            }
+        }
+        return all > 0 ? Float(on) / Float(all) : 0
     }
 }
 

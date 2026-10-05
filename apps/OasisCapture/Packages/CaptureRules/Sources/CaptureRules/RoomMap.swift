@@ -118,6 +118,12 @@ public struct RoomMap: Sendable, Equatable {
 
     public var floors: [PlaneInfo] { planes.filter { !$0.vertical && $0.kind == .floor } }
 
+    /// Height of the floor: the median of the floor planes' centres. Nil without any.
+    public var floorHeight: Float? {
+        let ys = floors.map(\.center.y).sorted()
+        return ys.isEmpty ? nil : ys[ys.count / 2]
+    }
+
     /// The direction the room's walls run, radians in 0..<pi/2: the longest
     /// walls' directions folded into one quarter turn and averaged. Furniture
     /// boxes are turned to it. Nil without walls.
@@ -194,12 +200,57 @@ public final class RoomMapBuilder {
     @discardableResult
     public func observe(_ observations: [ObjectObservation], camera: PinholeCamera?) -> [ObservationMatch?] {
         lock.withLock {
-            let yaw = RoomMap(planes: Array(planes.values)).roomYaw ?? 0
+            let map = RoomMap(planes: Array(planes.values))
+            let yaw = map.roomYaw ?? 0
             // Walls found later turn every box already placed.
             if let last = lastYaw, abs(last - yaw) > 0.05 { tracker.reorient(yaw: yaw) }
             lastYaw = yaw
-            return tracker.observe(observations, yaw: yaw, camera: camera)
+            let floor = map.floorHeight, walls = map.walls
+            let possible = observations.map { Self.withinRoom($0, floor: floor, walls: walls, camera: camera) }
+            return tracker.observe(possible, yaw: yaw, camera: camera)
         }
+    }
+
+    /// An observation without the points that cannot be: under the floor, or
+    /// behind a wall from where the camera stands (a wall hides what is behind
+    /// it). Depth that is far out puts a thing through the floor or a wall;
+    /// when most of it lands there, none of it is kept.
+    static func withinRoom(_ observation: ObjectObservation, floor: Float?, walls: [WallSegment],
+                           camera: PinholeCamera?) -> ObjectObservation {
+        let eye = camera.map { SIMD2($0.transform.columns.3.x, $0.transform.columns.3.z) }
+        // Each wall as a line: where it starts, its direction and length, its normal turned to the camera.
+        struct Line { var origin: SIMD2<Float>; var along: SIMD2<Float>; var length: Float; var normal: SIMD2<Float>; var eyeSide: Float }
+        var lines: [Line] = []
+        if let eye {
+            for wall in walls {
+                let d = wall.to - wall.from, length = simd_length(d)
+                guard length > 0.5 else { continue }
+                let along = d / length
+                var normal = SIMD2(-along.y, along.x)
+                var side = simd_dot(eye - wall.from, normal)
+                guard abs(side) > 0.1 else { continue }          // standing in the wall's plane: no telling
+                if side < 0 { normal = -normal; side = -side }
+                lines.append(Line(origin: wall.from, along: along, length: length, normal: normal, eyeSide: side))
+            }
+        }
+        guard floor != nil || !lines.isEmpty else { return observation }
+        let kept = observation.points.filter { p in
+            if let floor, p.y < floor - 0.25 { return false }
+            guard let eye else { return true }
+            let flat = SIMD2(p.x, p.z)
+            for line in lines {
+                let behind = -simd_dot(flat - line.origin, line.normal)
+                guard behind > 0.25 else { continue }
+                // Where the sight line from the camera to the point passes the wall's line.
+                let crossing = eye + (flat - eye) * (line.eyeSide / (line.eyeSide + behind))
+                let run = simd_dot(crossing - line.origin, line.along)
+                if run > -0.1, run < line.length + 0.1 { return false }
+            }
+            return true
+        }
+        var out = observation
+        out.points = kept.count * 2 >= observation.points.count ? kept : []
+        return out
     }
 
     /// The map as it stands.
@@ -207,9 +258,89 @@ public final class RoomMapBuilder {
         lock.withLock {
             var map = RoomMap()
             map.planes = planes.values.sorted { $0.id.uuidString < $1.id.uuidString }
-            map.objects = tracker.objects
+            let floor = map.floorHeight, walls = map.walls
+            let seen = tracker.objects
+            map.objects = seen.compactMap { box in
+                // What rests on another piece (a box on a stool) does not reach the floor.
+                let resting = seen.contains { $0.id != box.id && Self.rests(box, on: $0) }
+                return Self.settle(box, floor: resting ? nil : floor, walls: walls, spec: spec)
+            }
             return map
         }
+    }
+
+    /// Whether `box` sits on top of `other`: mostly within its footprint, its bottom at the other's top.
+    static func rests(_ box: ObjectBox, on other: ObjectBox) -> Bool {
+        let bottom = box.center.y - box.size.y / 2, top = other.center.y + other.size.y / 2
+        guard bottom - top > -0.25, bottom - top < 0.15, box.size.x * box.size.z < other.size.x * other.size.z else { return false }
+        return footprintOverlap(box.min, box.max, other.min, other.max) >= 0.5
+    }
+
+    /// Families that stand on the floor; those that stand against a wall; and
+    /// of those, the ones only ever seen from the front (their depth is the
+    /// distance from the front to the wall).
+    static let floorStanding: Set<String> = ["bed", "seating", "table", "storage", "counter", "fridge", "washer", "cooker",
+                                             "bathroom", "box", "basket", "suitcase", "bin", "bicycle", "instrument", "ladder",
+                                             "rug", "heater", "lamp", "plant", "fan"]
+    static let againstWall: Set<String> = ["bed", "seating", "storage", "table", "counter", "fridge", "washer", "cooker",
+                                           "bathroom", "instrument"]
+    static let seenFromTheFront: Set<String> = ["storage", "fridge", "washer", "cooker"]
+
+    /// A placed box as the map shows it. The camera sees tops and fronts:
+    /// floor-standing furniture whose bottom is near the floor reaches the
+    /// floor (from higher up for what always stands on it); furniture whose back is a hand's width from a wall reaches the
+    /// wall, and a wardrobe or an appliance, of which only the front is ever
+    /// seen, reaches the wall from as far as it can be deep; a box that pokes
+    /// through a wall is cut at it. A box too small to be furniture (a switch
+    /// plate called a heater) is left out.
+    static func settle(_ box: ObjectBox, floor: Float?, walls: [WallSegment], spec: ObjectSpec) -> ObjectBox? {
+        let t = spec.tracker
+        var box = box
+        if let floor, floorStanding.contains(box.family) {
+            let bottom = box.center.y - box.size.y / 2, top = box.center.y + box.size.y / 2
+            // A wardrobe always stands on the floor, however much of its bottom the bed hid.
+            let reach = spec.info(box.classId)?.onFloor == true ? t.floorReachMetres : t.snapMetres
+            if bottom - floor <= reach, bottom - floor >= -0.3, top > floor + 0.05 {
+                box.size.y = top - floor
+                box.center.y = (top + floor) / 2
+            }
+        }
+        if againstWall.contains(box.family) {
+            for wall in walls where simd_distance(wall.from, wall.to) > 0.3 {
+                // The wall in the box's own floor axes, about the box's centre.
+                let c = SIMD2(box.center.x, box.center.z)
+                let a = Self.local(wall.from - c, box), b = Self.local(wall.to - c, box)
+                let dir = simd_normalize(b - a)
+                // Only a wall running along one of the box's sides (within about ten degrees).
+                let alongX = abs(dir.x) > 0.985, alongZ = abs(dir.y) > 0.985
+                guard alongX || alongZ else { continue }
+                // Along the wall the box must lie within the wall's run; across it, the wall sits just behind a face.
+                let run = alongX ? (a.x, b.x) : (a.y, b.y), half = alongX ? box.size.x / 2 : box.size.z / 2
+                guard max(run.0, run.1) > -half, min(run.0, run.1) < half else { continue }
+                let offset = alongX ? (a.y + b.y) / 2 : (a.x + b.x) / 2
+                let across = alongX ? box.size.z / 2 : box.size.x / 2
+                // A wardrobe's depth is its thin side: only there is the wall far behind the face.
+                let reach = seenFromTheFront.contains(box.family) && across <= half ? t.unitDepthMetres : t.wallSnapMetres
+                // The wall is behind that face, or cuts through the box's outer part (furniture stops at a wall).
+                guard abs(offset) - across <= reach, abs(offset) >= across * 0.25 else { continue }
+                // That face moves to the wall; the opposite one stays, unless that makes a wardrobe
+                // deeper than wardrobes are (things in front of it were taken for part of it).
+                var lo = offset > 0 ? -across : offset, hi = offset > 0 ? offset : across
+                if seenFromTheFront.contains(box.family), across <= half, hi - lo > t.unitDepthMetres {
+                    if offset > 0 { lo = hi - t.unitDepthMetres } else { hi = lo + t.unitDepthMetres }
+                }
+                let mid = (lo + hi) / 2
+                let axis = alongX ? box.axisZ : box.axisX
+                box.center += SIMD3(axis.x * mid, 0, axis.y * mid)
+                if alongX { box.size.z = hi - lo } else { box.size.x = hi - lo }
+            }
+        }
+        guard max(box.size.x, box.size.z) >= t.minBoxMetres || box.size.y >= 0.4 else { return nil }
+        return box
+    }
+
+    private static func local(_ p: SIMD2<Float>, _ box: ObjectBox) -> SIMD2<Float> {
+        SIMD2(simd_dot(p, box.axisX), simd_dot(p, box.axisZ))
     }
 
     /// Share of the smaller footprint the two boxes share, seen from above.

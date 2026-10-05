@@ -1,5 +1,5 @@
 {
- "comment": "Classes of the on-device object detector (YOLOE-11m segmentation, prompted with these names; the class index is the row's position). Each detection is one whole thing with its own mask, which is what makes one box per piece of furniture. label: shown on screen. group: colour (see detection-classes.json). family: look-alikes that vote together on one object. boxed: placed as a box in the room map (wall-mounted and small things are outlined only). Clothes are not in the list on purpose.",
+ "comment": "Classes of the on-device object detector (YOLOE-11m segmentation, prompted with these names; the class index is the row's position). Each detection is one whole thing with its own mask, which is what makes one box per piece of furniture. label: shown on screen. group: colour (see detection-classes.json). family: look-alikes that vote together on one object. boxed: placed as a box in the room map (wall-mounted and small things are outlined only). onFloor: always stands on the floor, so its box reaches the floor even when its bottom was hidden (a cabinet or a shelf may hang on a wall and has no such flag). Clothes are not in the list on purpose.",
  "model": "yoloe-11m-seg",
  "inputSize": [
   480,
@@ -9,6 +9,7 @@
  "iou": 0.55,
  "maskThreshold": 0.5,
  "minShare": 0.002,
+ "bareSurfaceShare": 0.9,
  "kin": {
   "comment": "Families the detector confuses on one object: they match one tracked object, whose label is the most-voted class with hysteresis.",
   "sitting": [
@@ -18,7 +19,8 @@
   "unit": [
    "storage",
    "table",
-   "counter"
+   "counter",
+   "fridge"
   ],
   "flat": [
    "screen",
@@ -29,15 +31,26 @@
    "cooker",
    "microwave",
    "washer"
+  ],
+  "holder": [
+   "basket",
+   "bin"
   ]
  },
  "tracker": {
   "voxelMetres": 0.05,
   "confirmObservations": 2,
   "matchOverlap": 0.25,
-  "mergeOverlap": 0.6,
+  "mergeOverlap": 0.4,
   "easing": 0.35,
-  "trimShare": 0.01,
+  "binShare": 0.05,
+  "gapMetres": 0.15,
+  "adjoinMetres": 0.25,
+  "snapMetres": 0.5,
+  "floorReachMetres": 1.0,
+  "wallSnapMetres": 0.2,
+  "unitDepthMetres": 0.7,
+  "minBoxMetres": 0.25,
   "minPoints": 25,
   "staleObservations": 6,
   "maxSizeMetres": 4.0,
@@ -54,7 +67,8 @@
    "label": "bed",
    "group": "furniture",
    "family": "bed",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 1,
@@ -62,7 +76,8 @@
    "label": "mattress",
    "group": "furniture",
    "family": "bed",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 2,
@@ -70,7 +85,8 @@
    "label": "crib",
    "group": "furniture",
    "family": "bed",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 3,
@@ -78,7 +94,8 @@
    "label": "sofa",
    "group": "furniture",
    "family": "seating",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 4,
@@ -86,7 +103,8 @@
    "label": "armchair",
    "group": "furniture",
    "family": "seating",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 5,
@@ -94,7 +112,8 @@
    "label": "chair",
    "group": "furniture",
    "family": "seating",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 6,
@@ -102,7 +121,8 @@
    "label": "stool",
    "group": "furniture",
    "family": "seating",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 7,
@@ -110,7 +130,8 @@
    "label": "bench",
    "group": "furniture",
    "family": "seating",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 8,
@@ -118,7 +139,8 @@
    "label": "ottoman",
    "group": "furniture",
    "family": "seating",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 9,
@@ -126,7 +148,8 @@
    "label": "beanbag",
    "group": "furniture",
    "family": "seating",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 10,
@@ -134,7 +157,8 @@
    "label": "table",
    "group": "furniture",
    "family": "table",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 11,
@@ -142,7 +166,8 @@
    "label": "coffee table",
    "group": "furniture",
    "family": "table",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 12,
@@ -150,7 +175,8 @@
    "label": "dining table",
    "group": "furniture",
    "family": "table",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 13,
@@ -158,7 +184,8 @@
    "label": "desk",
    "group": "furniture",
    "family": "table",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 14,
@@ -166,7 +193,8 @@
    "label": "nightstand",
    "group": "furniture",
    "family": "table",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 15,
@@ -174,7 +202,8 @@
    "label": "wardrobe",
    "group": "storage",
    "family": "storage",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 16,
@@ -198,7 +227,8 @@
    "label": "dresser",
    "group": "storage",
    "family": "storage",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 19,
@@ -206,7 +236,8 @@
    "label": "chest of drawers",
    "group": "storage",
    "family": "storage",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 20,
@@ -214,7 +245,8 @@
    "label": "bookshelf",
    "group": "storage",
    "family": "storage",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 21,
@@ -230,7 +262,8 @@
    "label": "TV stand",
    "group": "storage",
    "family": "storage",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 23,
@@ -238,7 +271,8 @@
    "label": "shoe rack",
    "group": "storage",
    "family": "storage",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 24,
@@ -246,7 +280,8 @@
    "label": "counter",
    "group": "storage",
    "family": "counter",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 25,
@@ -278,7 +313,8 @@
    "label": "fridge",
    "group": "appliance",
    "family": "fridge",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 29,
@@ -286,7 +322,8 @@
    "label": "washing machine",
    "group": "appliance",
    "family": "washer",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 30,
@@ -294,7 +331,8 @@
    "label": "dishwasher",
    "group": "appliance",
    "family": "washer",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 31,
@@ -302,7 +340,8 @@
    "label": "oven",
    "group": "appliance",
    "family": "cooker",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 32,
@@ -310,7 +349,8 @@
    "label": "stove",
    "group": "appliance",
    "family": "cooker",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 33,
@@ -438,7 +478,8 @@
    "label": "toilet",
    "group": "fixture",
    "family": "bathroom",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 49,
@@ -446,7 +487,8 @@
    "label": "bathtub",
    "group": "fixture",
    "family": "bathroom",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 50,
@@ -582,7 +624,8 @@
    "label": "bicycle",
    "group": "furniture",
    "family": "bicycle",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 67,
@@ -598,7 +641,8 @@
    "label": "piano",
    "group": "furniture",
    "family": "instrument",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 69,
@@ -606,7 +650,8 @@
    "label": "ladder",
    "group": "furniture",
    "family": "ladder",
-   "boxed": true
+   "boxed": true,
+   "onFloor": true
   },
   {
    "id": 70,

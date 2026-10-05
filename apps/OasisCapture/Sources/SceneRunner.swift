@@ -310,6 +310,9 @@ final class SceneRunner {
             if !instances.isEmpty {
                 instances = self.refine(instances, in: buffer)
                 mark("refine")
+                // Furniture the surface model sees as bare wall is the detector seeing things.
+                let bare = self.spec.bareSurfaces
+                instances.removeAll { self.objects.isOnBareSurface($0, bare: bare, classes: classes, width: width, height: height) }
             }
 
             // 3. Depth in metres, on the sensor image as it is (landscape).
@@ -317,25 +320,21 @@ final class SceneRunner {
             var understanding = FrameUnderstanding(time: time, segmentation: result, depthFit: nil,
                                                    instances: [], camera: pinhole)
             var depthValues: DepthValues?
+            var trusted = false
             if let depthModel, let depthBuffer, let metric = self.metricDepth(depthModel, into: depthBuffer, from: buffer, pinhole: pinhole) {
                 // Inverse depth, so the tracking points can correct it with the same line fit as before.
                 var inverse = metric
                 for i in inverse.indices { inverse[i] = metric.data[i] > 0 ? 1 / metric.data[i] : .nan }
                 // With enough tracking points in view the fit corrects the model (measured: 6.6% error
-                // instead of 11.7%); a correction borrowed from other frames was worse than none, so
-                // without points the model's own metres stand.
-                let fit = Self.fitScale(inverse, pinhole: pinhole, points: points)
-                let used: DepthScale.Fit
-                if let fit, fit.error < 0.2, fit.a > 0.4, fit.a < 2.5 {
-                    used = fit
-                } else {
-                    used = .identity                                           // the model's own metres
-                }
-                understanding.depthFit = used
-                depthValues = inverse.scaled(used)
+                // instead of 11.7%) and things are placed in the room; without, the model's own metres
+                // hang the outlines, and nothing is placed (see DepthScale.correction).
+                let correction = DepthScale.correction(for: Self.fitScale(inverse, pinhole: pinhole, points: points))
+                understanding.depthFit = correction.fit
+                trusted = correction.trusted
+                depthValues = inverse.scaled(correction.fit)
             }
             mark("depth")
-            understanding.instances = instances.map { self.region($0, depth: depthValues, pinhole: pinhole) }
+            understanding.instances = instances.map { self.region($0, depth: depthValues, pinhole: pinhole, place: trusted) }
             // The surfaces' outlines go into the room too, so they follow the camera like the things do.
             for i in understanding.segmentation.regions.indices {
                 let region = understanding.segmentation.regions[i]
@@ -383,7 +382,7 @@ final class SceneRunner {
             return []
         }
         let maskHeight = protos.shape[2].intValue, maskWidth = protos.shape[3].intValue
-        let p = Self.floats(predictions), q = Self.floats(protos)
+        let p = Self.contiguousFloats(predictions), q = Self.contiguousFloats(protos)
         return InstanceDecoder.decode(predictions: p, anchors: anchors, protos: q, maskWidth: maskWidth,
                                       maskHeight: maskHeight, spec: objects)
     }
@@ -409,7 +408,7 @@ final class SceneRunner {
         guard let pointArray = out.featureValue(for: "points")?.multiArrayValue,
               let maskArray = out.featureValue(for: "mask")?.multiArrayValue,
               let scaleArray = out.featureValue(for: "metric_scale")?.multiArrayValue else { return nil }
-        let points = Self.floats(pointArray), mask = Self.floats(maskArray)
+        let points = Self.contiguousFloats(pointArray), mask = Self.contiguousFloats(maskArray)
         guard points.count == width * height * 3, mask.count == width * height else {
             if runs < 3 { AppLog.write("the depth model's outputs have an unexpected shape: \(pointArray.shape) \(maskArray.shape)") }
             return nil
@@ -469,7 +468,7 @@ final class SceneRunner {
             guard let out = try? decoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [
                 "embedding": embedding, "box": MLFeatureValue(multiArray: box)])),
                   let logits = out.featureValue(for: "mask")?.multiArrayValue else { continue }
-            let full = Self.floats(logits)                       // 256 x 256 of the square
+            let full = Self.contiguousFloats(logits)                       // 256 x 256 of the square
             let rows = logits.shape[logits.shape.count - 2].intValue, cols = logits.shape[logits.shape.count - 1].intValue
             guard rows >= maskHeight, cols >= maskWidth else { continue }
             // Cut to the box grown by a tenth of its size.
@@ -497,57 +496,72 @@ final class SceneRunner {
         return refined
     }
 
-    /// A multi-array's values as floats, whatever it holds.
-    private static func floats(_ array: MLMultiArray) -> [Float] {
-        let count = array.count
+    /// A multi-array's values as a contiguous row-major float array in its shape's
+    /// order, whatever it holds and however it is laid out: Core ML pads some
+    /// outputs (a 3-channel point map stored 32 wide, a 518-pixel row stored 544
+    /// wide), so the strides must be honoured, not assumed.
+    private static func contiguousFloats(_ array: MLMultiArray) -> [Float] {
+        let shape = array.shape.map(\.intValue), strides = array.strides.map(\.intValue)
+        let count = shape.reduce(1, *)
         var out = [Float](repeating: 0, count: count)
+        let dims = shape.count
+        // Fast path: already contiguous.
+        var expected = 1
+        var contiguous = true
+        for d in stride(from: dims - 1, through: 0, by: -1) {
+            if strides[d] != expected { contiguous = false; break }
+            expected *= shape[d]
+        }
+        func read(_ body: (Int) -> Float) {
+            if contiguous {
+                for i in 0..<count { out[i] = body(i) }
+                return
+            }
+            var index = [Int](repeating: 0, count: dims)
+            for i in 0..<count {
+                var offset = 0
+                for d in 0..<dims { offset += index[d] * strides[d] }
+                out[i] = body(offset)
+                var d = dims - 1
+                while d >= 0 {
+                    index[d] += 1
+                    if index[d] < shape[d] { break }
+                    index[d] = 0
+                    d -= 1
+                }
+            }
+        }
         switch array.dataType {
         case .float32:
-            let p = array.dataPointer.bindMemory(to: Float.self, capacity: count)
-            out.withUnsafeMutableBufferPointer { $0.baseAddress!.update(from: p, count: count) }
+            let p = array.dataPointer.bindMemory(to: Float.self, capacity: count * 2)
+            read { p[$0] }
         case .float16:
-            var source = vImage_Buffer(data: array.dataPointer, height: 1, width: vImagePixelCount(count), rowBytes: count * 2)
-            out.withUnsafeMutableBytes { raw in
-                var target = vImage_Buffer(data: raw.baseAddress, height: 1, width: vImagePixelCount(count), rowBytes: count * 4)
-                vImageConvert_Planar16FtoPlanarF(&source, &target, 0)
-            }
+            let p = array.dataPointer.bindMemory(to: Float16.self, capacity: count * 2)
+            read { Float(p[$0]) }
         case .double:
-            let p = array.dataPointer.bindMemory(to: Double.self, capacity: count)
-            for i in 0..<count { out[i] = Float(p[i]) }
+            let p = array.dataPointer.bindMemory(to: Double.self, capacity: count * 2)
+            read { Float(p[$0]) }
         default:
             for i in 0..<count { out[i] = array[i].floatValue }
         }
         return out
     }
 
-    /// An instance as an outline for the screen and world points for the room.
-    private func region(_ instance: Instance, depth: DepthValues?, pinhole: PinholeCamera) -> InstanceRegion {
+    /// An instance as an outline for the screen and, when the depth can be
+    /// trusted to `place` things, world points for the room.
+    private func region(_ instance: Instance, depth: DepthValues?, pinhole: PinholeCamera, place: Bool) -> InstanceRegion {
         let w = instance.maskWidth, h = instance.maskHeight
         let outline = MaskOutline.polygon(of: instance.mask, width: w, height: h, epsilon: 1.0)
         let centroid = MaskOutline.centroid(of: instance.mask, width: w, height: h)
         var points: [SIMD3<Float>] = []
-        if let depth {
+        if let depth, place {
             let near = objects.tracker.depthMetres.first ?? 0.3, far = objects.tracker.depthMetres.last ?? 6
-            // Sample the mask on a grid coarse enough to stay under the point budget.
-            let step = max(1, Int((Double(instance.area) / Double(pointsPerInstance)).squareRoot().rounded(.up)))
-            points.reserveCapacity(instance.area / (step * step) + 1)
-            var y = step / 2
-            while y < h {
-                var x = step / 2
-                while x < w {
-                    // Only well inside the mask: its edge pixels are as likely to be what is behind.
-                    if instance.inside(x: x, y: y), instance.inside(x: x - 1, y: y), instance.inside(x: x + 1, y: y),
-                       instance.inside(x: x, y: y - 1), instance.inside(x: x, y: y + 1) {
-                        let xu = (Float(x) + 0.5) / Float(w), yu = (Float(y) + 0.5) / Float(h)
-                        // Upright to the sensor's landscape image.
-                        let xs = yu, ys = 1 - xu
-                        if let z = depth.metres(x: xs, y: ys), z >= near, z <= far {
-                            points.append(pinhole.worldPoint(u: xs * Float(pinhole.width), v: ys * Float(pinhole.height), depth: z))
-                        }
-                    }
-                    x += step
+            for sample in instance.interiorSamples(budget: pointsPerInstance) {
+                // Upright to the sensor's landscape image.
+                let xs = sample.y, ys = 1 - sample.x
+                if let z = depth.metres(x: xs, y: ys), z >= near, z <= far {
+                    points.append(pinhole.worldPoint(u: xs * Float(pinhole.width), v: ys * Float(pinhole.height), depth: z))
                 }
-                y += step
             }
         }
         // Where the thing is, for a vertex the depth map cannot answer: the middle of its own points.

@@ -87,6 +87,11 @@ public struct DetectionSpec: Codable, Sendable {
         return spec
     }
 
+    /// The classes that are bare structure: wall, floor, ceiling.
+    public var bareSurfaces: Set<Int32> {
+        Set(classes.filter { ["wall", "floor", "ceiling"].contains($0.name) }.map { Int32($0.id) })
+    }
+
     public func info(_ id: Int) -> ClassInfo? {
         id >= 0 && id < classes.count && classes[id].id == id ? classes[id] : classes.first { $0.id == id }
     }

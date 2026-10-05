@@ -28,17 +28,23 @@ public struct ObservationMatch: Sendable, Equatable {
 /// Keeps the room's objects across frames.
 ///
 /// Every observation is a cloud of world points with a class. An observation
-/// joins the tracked object of the same kin whose footprint it overlaps most,
-/// or starts a new one. An object remembers every voxel its observations
-/// covered, with a hit count, so its box is the extent of everything seen of
-/// it from every angle, not of the current view; a voxel needs two hits once
-/// the object is established, which drops the stray points of one bad depth
-/// frame. Labels are votes weighted by confidence, and the shown label only
-/// changes with a clear lead. Boxes ease towards new measurements. An object
-/// shows after confirmObservations, is forgotten if it never confirms, and
-/// once confirmed stays as long as it is out of view; only when the camera
-/// looks straight at where it should be, from a sensible distance, and does
-/// not find it for forgetObservations frames does it go.
+/// joins the tracked object of the same kin whose footprint it overlaps most
+/// at a similar height (a cabinet above a desk is not the desk), or starts a
+/// new one; a part of a bed or a wardrobe that adjoins one already tracked
+/// joins it too, since those are seen in parts (a door, one end). An object
+/// remembers every voxel its observations covered, with a hit count, so its
+/// box is the extent of everything seen of it from every angle, not of the
+/// current view; a voxel needs two hits once the object is established (three
+/// when well established), which drops the stray points of a bad depth frame
+/// or a mask that was wrong for a moment, and the extent on each axis
+/// runs out from the busiest part over everything connected to it (see
+/// hitBounds), so a bed is as long as all of it that was seen, not just the
+/// side seen most. Labels are votes weighted by confidence, and the shown
+/// label only changes with a clear lead. Boxes ease towards new measurements.
+/// An object shows after confirmObservations, is forgotten if it never
+/// confirms, and once confirmed stays as long as it is out of view; only when
+/// the camera looks straight at where it should be, from a sensible distance,
+/// and does not find it for forgetObservations frames does it go.
 public final class ObjectTracker {
     public let spec: ObjectSpec
     private var tracks: [Track] = []
@@ -99,30 +105,38 @@ public final class ObjectTracker {
             var min: SIMD3<Float>
             var max: SIMD3<Float>
             var kin: String
+            var family: String
         }
         var prepared: [Prepared] = []
         for (i, o) in observations.enumerated() {
             guard let info = spec.info(o.classIndex), info.group != "person", o.points.count >= t.minPoints else { continue }
             var voxels = Set<SIMD3<Int32>>()
             for p in o.points { voxels.insert(Self.key(p, v)) }
-            guard voxels.count >= 4 else { continue }
-            let (lo, hi) = Self.trimmedBounds(voxels.map { Self.centre($0, v) }, yaw: 0, share: t.trimShare)
-            let size = hi - lo
+            guard voxels.count >= 4,
+                  let bounds = Self.hitBounds(voxels.map { (Self.centre($0, v), 1) }, yaw: 0, voxel: v, binShare: t.binShare, gap: t.gapMetres) else { continue }
+            let size = bounds.hi - bounds.lo
             // Bigger than any piece of furniture: a wall or floor with a wrong label.
             guard size.x <= t.maxSizeMetres, size.y <= t.maxSizeMetres, size.z <= t.maxSizeMetres else { continue }
-            prepared.append(Prepared(index: i, voxels: voxels, min: lo, max: hi, kin: spec.kinGroup(of: info.family)))
+            prepared.append(Prepared(index: i, voxels: voxels, min: bounds.lo, max: bounds.hi, kin: spec.kinGroup(of: info.family), family: info.family))
         }
 
         // Match observations to tracks, best overlap first, one observation per track.
         struct Pair { var observation: Int; var track: Int; var score: Float }
         var pairs: [Pair] = []
         for (pi, p) in prepared.enumerated() {
+            let (pMin, pMax) = Self.thickened(p.min, p.max)
             for (ti, track) in tracks.enumerated() {
-                guard spec.kinGroup(track.classIndex) == p.kin, let box = track.measured else { continue }
-                let overlap = RoomMapBuilder.footprintOverlap(box.min, box.max, p.min, p.max)
-                // Things stacked on each other (a pillow on a bed) are different kin, so
-                // height does not need checking; a thin overlap from above is enough.
-                if overlap >= t.matchOverlap { pairs.append(Pair(observation: pi, track: ti, score: overlap)) }
+                guard spec.kinGroup(track.classIndex) == p.kin, let box = track.measured,
+                      Self.heightsNear(box.min.y, box.max.y, p.min.y, p.max.y) else { continue }
+                let (bMin, bMax) = Self.thickened(box.min, box.max)
+                let overlap = RoomMapBuilder.footprintOverlap(bMin, bMax, pMin, pMax)
+                // Beds and storage are seen in parts: a part that adjoins one of its own family joins it.
+                let reach: Float = Self.seenInParts.contains(p.family) && box.family == p.family ? t.adjoinMetres : 0
+                if overlap >= t.matchOverlap {
+                    pairs.append(Pair(observation: pi, track: ti, score: overlap))
+                } else if reach > 0, RoomMapBuilder.footprintOverlap(box.min, box.max, p.min - SIMD3(reach, 0, reach), p.max + SIMD3(reach, 0, reach)) > 0 {
+                    pairs.append(Pair(observation: pi, track: ti, score: 0.01))
+                }
             }
         }
         pairs.sort { $0.score > $1.score }
@@ -194,15 +208,14 @@ public final class ObjectTracker {
     private func measure(_ track: inout Track, yaw: Float, jump: Bool = false) {
         let t = spec.tracker
         let v = t.voxelMetres
-        // Established objects ignore voxels hit only once; young ones cannot afford to.
-        var minHits = track.observations >= 3 ? 2 : 1
-        var centres: [SIMD3<Float>] = []
+        // Established objects ignore voxels hit only once or twice (a wrong mask lasts a frame
+        // or two; what is there is seen every time it is looked at); young ones cannot afford to.
+        var minHits = track.observations >= 30 ? 3 : track.observations >= 3 ? 2 : 1
         var box: ObjectBox?
         while minHits <= 4 {
-            centres = track.voxels.filter { $0.value >= minHits }.map { Self.centre($0.key, v) }
-            guard centres.count >= 4 else { break }
-            let (lo, hi) = Self.trimmedBounds(centres, yaw: yaw, share: t.trimShare)
-            let size = simd_max(hi - lo, SIMD3(repeating: v))
+            let hits = track.voxels.filter { $0.value >= minHits }.map { (Self.centre($0.key, v), $0.value) }
+            guard hits.count >= 4, let (lo, hi) = Self.hitBounds(hits, yaw: yaw, voxel: v, binShare: t.binShare, gap: t.gapMetres) else { break }
+            let size = hi - lo
             if size.x <= t.maxSizeMetres && size.y <= t.maxSizeMetres && size.z <= t.maxSizeMetres {
                 let mid = (lo + hi) / 2
                 let ax = SIMD2(cos(yaw), sin(yaw)), az = SIMD2(-sin(yaw), cos(yaw))
@@ -210,7 +223,7 @@ public final class ObjectTracker {
                 guard let info = spec.info(track.classIndex) else { return }
                 box = ObjectBox(id: track.id, classId: track.classIndex, label: info.label, group: info.group,
                                 family: info.family, center: SIMD3(flat.x, mid.y, flat.y), size: size, yaw: yaw,
-                                points: centres.count)
+                                points: hits.count)
                 break
             }
             minHits += 1   // too big: demand more agreement
@@ -233,29 +246,48 @@ public final class ObjectTracker {
         }
     }
 
-    /// Bounds in the frame turned by `yaw`, ignoring outliers: on each axis
-    /// the points more than 3.5 median absolute deviations from the median
-    /// (the edge pixels of a mask land on the wall behind, metres away), then
-    /// `share` of what is left at each end.
-    static func trimmedBounds(_ points: [SIMD3<Float>], yaw: Float, share: Float) -> (SIMD3<Float>, SIMD3<Float>) {
+    /// Families whose objects are seen in parts (a door at a time, one end of a bed).
+    static let seenInParts: Set<String> = ["bed", "storage"]
+
+    /// Bounds in the frame turned by `yaw` from hits per voxel centre: on
+    /// each axis the hits are binned at the voxel size, and the extent runs
+    /// outward from the busiest bin over every bin with at least `binShare`
+    /// of the typical (median) bin's hits, across gaps of up to `gap` metres.
+    /// Left out: bins far emptier than the rest, and the wall behind a mask's
+    /// edge, which lies beyond a gap; kept: everything connected to the
+    /// object, like the side of a bed, though its top (one bin of height)
+    /// holds a hundred times the hits. Nil without hits.
+    static func hitBounds(_ hits: [(centre: SIMD3<Float>, hits: Int)], yaw: Float, voxel v: Float, binShare: Float,
+                          gap: Float) -> (lo: SIMD3<Float>, hi: SIMD3<Float>)? {
+        guard !hits.isEmpty else { return nil }
         let ax = SIMD2(cos(yaw), sin(yaw)), az = SIMD2(-sin(yaw), cos(yaw))
-        var axes: [[Float]] = [[], [], []]
-        for i in 0..<3 { axes[i].reserveCapacity(points.count) }
-        for p in points {
-            let flat = SIMD2(p.x, p.z)
-            axes[0].append(simd_dot(flat, ax)); axes[1].append(p.y); axes[2].append(simd_dot(flat, az))
+        var bins: [[Int: Int]] = [[:], [:], [:]]
+        for (c, n) in hits {
+            let flat = SIMD2(c.x, c.z)
+            let coords = [simd_dot(flat, ax), c.y, simd_dot(flat, az)]
+            for i in 0..<3 { bins[i][Int((coords[i] / v).rounded(.down)), default: 0] += n }
         }
+        let gapBins = Int((gap / v).rounded())
         var lo = SIMD3<Float>(repeating: 0), hi = SIMD3<Float>(repeating: 0)
         for i in 0..<3 {
-            let sorted = axes[i].sorted()
-            let n = sorted.count
-            let median = sorted[n / 2]
-            let mad = axes[i].map { abs($0 - median) }.sorted()[n / 2]
-            let reach = max(3.5 * mad, 0.05)
-            let kept = sorted.filter { abs($0 - median) <= reach }
-            let drop = min(max(0, kept.count / 2 - 1), Int((Float(kept.count) * share).rounded()))
-            lo[i] = kept[drop]
-            hi[i] = kept[kept.count - 1 - drop]
+            let axis = bins[i]
+            guard let busiest = axis.max(by: { $0.value < $1.value }) else { return nil }
+            let typical = axis.values.sorted()[axis.count / 2]
+            let needed = max(1, Int((binShare * Float(typical)).rounded(.up)))
+            let minKey = axis.keys.min()!, maxKey = axis.keys.max()!
+            var first = busiest.key, last = busiest.key
+            var b = last + 1, empty = 0
+            while b <= maxKey && empty <= gapBins {
+                if (axis[b] ?? 0) >= needed { last = b; empty = 0 } else { empty += 1 }
+                b += 1
+            }
+            b = first - 1; empty = 0
+            while b >= minKey && empty <= gapBins {
+                if (axis[b] ?? 0) >= needed { first = b; empty = 0 } else { empty += 1 }
+                b -= 1
+            }
+            lo[i] = Float(first) * v
+            hi[i] = Float(last + 1) * v
         }
         return (lo, hi)
     }
@@ -287,8 +319,8 @@ public final class ObjectTracker {
             while j < tracks.count {
                 let a = tracks[i], b = tracks[j]
                 if spec.kinGroup(a.classIndex) == spec.kinGroup(b.classIndex), let ba = a.measured, let bb = b.measured,
-                   RoomMapBuilder.footprintOverlap(ba.min, ba.max, bb.min, bb.max) >= spec.tracker.mergeOverlap,
-                   Self.heightsOverlap(ba, bb) {
+                   Self.heightsOverlap(ba, bb),
+                   Self.thickOverlap(ba, bb) >= spec.tracker.mergeOverlap || Self.adjoin(ba, bb, within: spec.tracker.adjoinMetres) {
                     // The older keeps its identity.
                     let (keep, drop) = a.born <= b.born ? (i, j) : (j, i)
                     var survivor = tracks[keep]
@@ -313,9 +345,39 @@ public final class ObjectTracker {
     }
 
     private static func heightsOverlap(_ a: ObjectBox, _ b: ObjectBox) -> Bool {
-        let lo = max(a.center.y - a.size.y / 2, b.center.y - b.size.y / 2)
-        let hi = min(a.center.y + a.size.y / 2, b.center.y + b.size.y / 2)
-        return hi - lo > -0.3   // touching or nearly so (a wardrobe seen top and bottom)
+        heightsNear(a.min.y, a.max.y, b.min.y, b.max.y)
+    }
+
+    /// Two height ranges that overlap or nearly touch (a wardrobe seen top and
+    /// bottom, a desk's top and what stands under it), but not a cabinet on
+    /// the wall and the furniture under it.
+    static func heightsNear(_ aLo: Float, _ aHi: Float, _ bLo: Float, _ bHi: Float) -> Bool {
+        min(aHi, bHi) - max(aLo, bLo) > -0.3
+    }
+
+    /// Bounds with a footprint at least 0.3 m each way. A screen or a door is
+    /// a slab a few centimetres thick, and two sightings of it a hand apart
+    /// in depth would otherwise share no floor at all.
+    static func thickened(_ lo: SIMD3<Float>, _ hi: SIMD3<Float>, to minimum: Float = 0.3) -> (SIMD3<Float>, SIMD3<Float>) {
+        var lo = lo, hi = hi
+        for i in [0, 2] where hi[i] - lo[i] < minimum {
+            let mid = (lo[i] + hi[i]) / 2
+            lo[i] = mid - minimum / 2
+            hi[i] = mid + minimum / 2
+        }
+        return (lo, hi)
+    }
+
+    /// Two parts of one bed or one wardrobe: the same family, seen in parts, touching or nearly.
+    private static func adjoin(_ a: ObjectBox, _ b: ObjectBox, within reach: Float) -> Bool {
+        guard a.family == b.family, seenInParts.contains(a.family) else { return false }
+        let grow = SIMD3(reach, 0, reach)
+        return RoomMapBuilder.footprintOverlap(a.min - grow, a.max + grow, b.min, b.max) > 0
+    }
+
+    private static func thickOverlap(_ a: ObjectBox, _ b: ObjectBox) -> Float {
+        let (aMin, aMax) = thickened(a.min, a.max), (bMin, bMax) = thickened(b.min, b.max)
+        return RoomMapBuilder.footprintOverlap(aMin, aMax, bMin, bMax)
     }
 
     private func match(_ track: Track) -> ObservationMatch {

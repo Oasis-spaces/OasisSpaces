@@ -55,6 +55,18 @@ public enum DepthScale {
         return Fit(a: fit.a, b: fit.b, samples: pairs.count, error: errors[errors.count / 2])
     }
 
+    /// The correction a frame's depth gets, and whether the result may place
+    /// things in the room. A sound fit to the tracking points is used and
+    /// trusted. Without one the model's own metres stand: good enough to hang
+    /// an outline on, but on frames of a bare wall they were measured
+    /// anywhere from a fifth of the truth to twice it, so nothing is placed
+    /// from them. (A correction borrowed from another frame measured worse
+    /// than none.)
+    public static func correction(for fit: Fit?) -> (fit: Fit, trusted: Bool) {
+        if let fit, fit.samples > 0, fit.error < 0.2, fit.a > 0.4, fit.a < 2.5 { return (fit, true) }
+        return (.identity, false)
+    }
+
     private static func solve(_ pairs: [(Float, Float)]) -> Fit {
         // y = 1/z against x = predicted.
         var sx: Double = 0, sy: Double = 0, sxx: Double = 0, sxy: Double = 0

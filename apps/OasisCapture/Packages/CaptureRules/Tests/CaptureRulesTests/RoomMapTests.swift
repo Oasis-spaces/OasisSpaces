@@ -170,6 +170,155 @@ final class RoomMapTests: XCTestCase {
         XCTAssertEqual(objects[0].size.x, 1.5, accuracy: 0.15)
     }
 
+    func testAnExtentCoversEverythingConnectedAndStopsAtAGap() {
+        // A bed's top seen a lot, its side seen a little, and a mask's edge that landed on the wall a metre behind.
+        var hits: [(centre: SIMD3<Float>, hits: Int)] = []
+        var x: Float = 0.025
+        while x < 2 {
+            var z: Float = 0.025
+            while z < 1.4 { hits.append((SIMD3(x, 0.475, z), 20)); z += 0.05 }   // the top, busy
+            var y: Float = 0.025
+            while y < 0.45 { hits.append((SIMD3(x, y, 0.025), 2)); y += 0.05 }   // one side, thin
+            x += 0.05
+        }
+        x = 0.025
+        while x < 0.4 { hits.append((SIMD3(x, 0.475, 2.525), 3)); x += 0.05 }    // the wall behind, beyond a gap
+        let bounds = ObjectTracker.hitBounds(hits, yaw: 0, voxel: 0.05, binShare: 0.05, gap: 0.15)!
+        XCTAssertEqual(bounds.lo.y, 0, accuracy: 0.051, "the side counts, though the top was seen ten times more")
+        XCTAssertEqual(bounds.hi.y, 0.5, accuracy: 0.051)
+        XCTAssertEqual(bounds.hi.z, 1.4, accuracy: 0.051, "what lies beyond a gap is not the object")
+        XCTAssertEqual(bounds.hi.x - bounds.lo.x, 2.0, accuracy: 0.051)
+    }
+
+    func testFurnitureReachesTheFloorAndAWardrobeTheWallBehindIt() {
+        let builder = RoomMapBuilder(spec: spec)
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 0, 1), extent: SIMD2(4, 4)))
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(0, 1.2, 2), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 1, 0), extent: SIMD2(4, 2.4)))
+        // Only the wardrobe's doors are seen (0.6 m in front of the wall), from knee height up;
+        // a bed's top from 0.3 m up; a wall cabinet at head height; a table half a metre off the wall.
+        let doors = observation("wardrobe", from: SIMD3(-0.5, 0.3, 1.36), to: SIMD3(0.5, 2.0, 1.4))
+        let bed = observation("bed", from: SIMD3(-1.9, 0.3, -1.5), to: SIMD3(-0.5, 0.5, 0.4))
+        let cabinet = observation("cabinet", from: SIMD3(1.2, 1.5, 1.7), to: SIMD3(1.9, 2.1, 1.95))
+        let table = observation("table", from: SIMD3(0.9, 0.7, 0.5), to: SIMD3(1.9, 0.75, 1.5))
+        for _ in 0..<3 { _ = builder.observe([doors, bed, cabinet, table], camera: nil) }
+        let objects = builder.build().objects
+        let wardrobe = objects.first { $0.label == "wardrobe" }!
+        XCTAssertEqual(wardrobe.min.y, 0, accuracy: 0.01, "down to the floor")
+        XCTAssertEqual(wardrobe.max.z, 2.0, accuracy: 0.01, "back to the wall")
+        XCTAssertEqual(wardrobe.size.z, 0.65, accuracy: 0.06)
+        XCTAssertEqual(wardrobe.size.x, 1.0, accuracy: 0.11, "its width is what was seen")
+        let placedBed = objects.first { $0.label == "bed" }!
+        XCTAssertEqual(placedBed.min.y, 0, accuracy: 0.01)
+        XCTAssertEqual(placedBed.size.y, 0.5, accuracy: 0.06)
+        let wallCabinet = objects.first { $0.label == "cabinet" }!
+        XCTAssertEqual(wallCabinet.min.y, 1.5, accuracy: 0.06, "a cabinet on the wall stays on the wall")
+        XCTAssertEqual(wallCabinet.max.z, 2.0, accuracy: 0.06)
+        let placedTable = objects.first { $0.label == "table" }!
+        XCTAssertEqual(placedTable.max.z, 1.5, accuracy: 0.06, "a table half a metre off the wall is not pushed against it")
+        XCTAssertEqual(placedTable.min.y, 0, accuracy: 0.01, "a table stands on the floor, though only its top was seen")
+    }
+
+    func testACabinetAboveADeskIsNotTheDeskAndASwitchPlateIsNotPlaced() {
+        let builder = RoomMapBuilder(spec: spec)
+        let desk = observation("desk", from: SIMD3(0, 0, 0), to: SIMD3(1.2, 0.75, 0.6))
+        let cabinet = observation("cabinet", from: SIMD3(0, 1.5, 0), to: SIMD3(1.2, 2.1, 0.35))
+        let plate = observation("heater", from: SIMD3(2, 1.2, 0), to: SIMD3(2.16, 1.28, 0.04))
+        for _ in 0..<4 { _ = builder.observe([desk, cabinet, plate], camera: nil) }
+        let objects = builder.build().objects
+        XCTAssertEqual(Set(objects.map(\.label)), ["desk", "cabinet"], "\(objects.map { "\($0.label) \($0.size)" })")
+        XCTAssertEqual(objects.first { $0.label == "desk" }!.size.y, 0.75, accuracy: 0.11)
+    }
+
+    func testThePartsOfAWardrobeSeenOneDoorAtATimeAreOneWardrobe() {
+        let builder = RoomMapBuilder(spec: spec)
+        // Three doors, each seen on its own, with a hand's width of frame between them.
+        for door in 0..<3 {
+            let x = Float(door) * 0.6
+            for _ in 0..<(door == 2 ? 12 : 3) { _ = builder.observe([observation("wardrobe", from: SIMD3(x, 0.1, 0), to: SIMD3(x + 0.45, 2.0, 0.08))], camera: nil) }
+        }
+        let objects = builder.build().objects
+        XCTAssertEqual(objects.count, 1, "\(objects.map { "\($0.label) \($0.size)" })")
+        XCTAssertEqual(objects[0].size.x, 1.65, accuracy: 0.16)
+        // Two chairs side by side stay two chairs.
+        let chairs = RoomMapBuilder(spec: spec)
+        for _ in 0..<3 {
+            _ = chairs.observe([observation("chair", from: SIMD3(0, 0, 0), to: SIMD3(0.45, 0.9, 0.45)),
+                                observation("chair", from: SIMD3(0.6, 0, 0), to: SIMD3(1.05, 0.9, 0.45))], camera: nil)
+        }
+        XCTAssertEqual(chairs.build().objects.count, 2)
+    }
+
+    func testWhatLandsUnderTheFloorOrBehindAWallIsNotPlaced() {
+        let builder = RoomMapBuilder(spec: spec)
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 0, 1), extent: SIMD2(4, 4)))
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(0, 1.2, -2), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 1, 0), extent: SIMD2(4, 2.4)))
+        let eye = camera(at: SIMD3(0, 1.4, 1))
+        // Depth gone wrong: a chest of drawers under the floor, a wardrobe two metres behind the wall.
+        let sunk = observation("chest of drawers", from: SIMD3(-1, -1.6, -1), to: SIMD3(0, -0.4, -0.6))
+        let beyond = observation("wardrobe", from: SIMD3(0.2, 0, -4.5), to: SIMD3(1.2, 2, -4))
+        // A desk against the wall whose mask's edge ran 0.4 m through it: the desk stays, cut at the wall.
+        let desk = observation("desk", from: SIMD3(-1.9, 0, -2.4), to: SIMD3(-0.9, 0.75, -1.4))
+        for _ in 0..<4 { _ = builder.observe([sunk, beyond, desk], camera: eye) }
+        let objects = builder.build().objects
+        XCTAssertEqual(objects.map(\.label), ["desk"])
+        XCTAssertEqual(objects[0].min.z, -2.0, accuracy: 0.06, "furniture stops at the wall")
+        XCTAssertEqual(objects[0].max.z, -1.4, accuracy: 0.06)
+    }
+
+    func testTwoSightingsOfAScreenAHandApartAreOneScreen() {
+        let builder = RoomMapBuilder(spec: spec)
+        let near = observation("television", from: SIMD3(0, 0.9, 0), to: SIMD3(0.6, 1.25, 0.04))
+        let far = observation("television", from: SIMD3(0.04, 0.9, 0.12), to: SIMD3(0.64, 1.25, 0.16))
+        for _ in 0..<3 { _ = builder.observe([near], camera: nil) }
+        for _ in 0..<3 { _ = builder.observe([far], camera: nil) }
+        XCTAssertEqual(builder.build().objects.count, 1)
+    }
+
+    func testWhatRestsOnFurnitureStaysThereAndAWardrobeIsNoDeeperThanWardrobesAre() {
+        let builder = RoomMapBuilder(spec: spec)
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 0, 1), extent: SIMD2(4, 4)))
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(0, 1.2, 2), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 1, 0), extent: SIMD2(4, 2.4)))
+        // A box lying on a stool; a wardrobe on the wall with a chair's worth of clutter in front taken for part of it.
+        let stool = observation("stool", from: SIMD3(-1.5, 0, 0), to: SIMD3(-1.0, 0.45, 0.5))
+        let box = observation("box", from: SIMD3(-1.4, 0.47, 0.1), to: SIMD3(-1.1, 0.75, 0.4))
+        let wardrobe = observation("wardrobe", from: SIMD3(0, 0, 1.0), to: SIMD3(1.6, 2.0, 1.45))
+        for _ in 0..<3 { _ = builder.observe([stool, box, wardrobe], camera: nil) }
+        let objects = builder.build().objects
+        let placedBox = objects.first { $0.label == "box" }!
+        XCTAssertEqual(placedBox.min.y, 0.45, accuracy: 0.06, "the box is on the stool, not a column down to the floor")
+        let placedWardrobe = objects.first { $0.label == "wardrobe" }!
+        XCTAssertEqual(placedWardrobe.max.z, 2.0, accuracy: 0.01)
+        XCTAssertEqual(placedWardrobe.size.z, spec.tracker.unitDepthMetres, accuracy: 0.01)
+    }
+
+    func testFurnitureOnBareWallIsTheDetectorSeeingThings() {
+        // A surface map whose left half is wall and right half is wardrobe.
+        let wall = Int32(0), wardrobe = Int32(35)
+        var classes = [Int32](repeating: wall, count: 64 * 64)
+        for y in 0..<64 { for x in 32..<64 { classes[y * 64 + x] = wardrobe } }
+        func instance(_ name: String, columns: Range<Int>) -> Instance {
+            var mask = [UInt8](repeating: 0, count: 32 * 32)
+            for y in 4..<28 { for x in columns { mask[y * 32 + x] = 1 } }
+            return Instance(classIndex: cls(name), confidence: 0.6, minX: 0, minY: 0, maxX: 1, maxY: 1, mask: mask,
+                            maskWidth: 32, maskHeight: 32, area: 24 * columns.count)
+        }
+        func seeingThings(_ i: Instance) -> Bool { spec.isOnBareSurface(i, bare: [wall], classes: classes, width: 64, height: 64) }
+        XCTAssertEqual(instance("refrigerator", columns: 2..<14).share(on: [wall], classes: classes, width: 64, height: 64), 1, accuracy: 0.01)
+        XCTAssertTrue(seeingThings(instance("refrigerator", columns: 2..<14)), "a fridge that is a stretch of wall")
+        XCTAssertTrue(seeingThings(instance("window", columns: 2..<14)))
+        XCTAssertFalse(seeingThings(instance("wardrobe", columns: 18..<30)), "furniture where the surface model sees furniture")
+        XCTAssertFalse(seeingThings(instance("wardrobe", columns: 12..<30)), "partly on wall is not on bare wall")
+        XCTAssertFalse(seeingThings(instance("television", columns: 2..<14)), "a screen hangs on a wall")
+        XCTAssertFalse(seeingThings(instance("door", columns: 2..<14)), "a door is often wall to the surface model")
+        XCTAssertFalse(seeingThings(instance("rug", columns: 2..<14)))
+    }
+
     func testBoxesTurnWithTheRoomsWalls() {
         let builder = RoomMapBuilder(spec: spec)
         // A wall running 30 degrees off the world x axis.
