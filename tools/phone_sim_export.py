@@ -88,7 +88,9 @@ def main() -> None:
         world = np.array([(TO_VIEWER @ (c - origin_scene)) / m for c in corners])
         objects.append({"id": f"B{i}", "label": box.get("detected") or box.get("label"),
                         "min": world.min(axis=0).round(3).tolist(), "max": world.max(axis=0).round(3).tolist()})
-    planes = [p for p in room.shapes["planes"] if p.get("label") == "wall"]
+    # Only walls the room keeps: a plane the review dropped (a diagonal through the room, a
+    # curtain's plane) is no wall, and the phone holds back what it sees on a bare wall.
+    planes = [p for p in room.shapes["planes"] if p.get("label") == "wall" and p.get("build", True)]
     walls = []
     for p in planes:
         c = (TO_VIEWER @ (np.array(p["center"]) - origin_scene)) / m

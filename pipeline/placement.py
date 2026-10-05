@@ -67,6 +67,22 @@ FAMILY_WORDS = {"table": ("table", "desk"), "seat": ("chair", "stool", "sofa", "
                 "bed": ("bed", "mattress"), "wardrobe": ("wardrobe", "cupboard", "almirah", "cabinet", "drawers", "shelf")}
 
 
+def furniture_family(space: Path, label: str) -> str | None:
+    """The furniture family a label belongs to, or None when it names no
+    furniture (a fridge, a TV, a basket): the object list's build_as, else
+    the name's words. Unlike size_family, nothing is assumed."""
+    try:
+        for o in json.loads((Path(space) / "objects.json").read_text()).get("objects") or []:
+            if o.get("name") == label and o.get("build_as") in SIZES_M:
+                return o["build_as"]
+    except (OSError, ValueError):
+        pass
+    for family, words in FAMILY_WORDS.items():
+        if any(w in label for w in words):
+            return family
+    return None
+
+
 def size_family(space: Path, label: str) -> str:
     """Which SIZES_M entry fits `label`: the object list's build_as (objects.json,
     the pipeline's own mapping) when it has one, else by the name's words."""

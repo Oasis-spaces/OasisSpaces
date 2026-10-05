@@ -236,6 +236,26 @@ the agent's judgement:
    and the masks only for pieces that have none. Below the acceptance score
    nothing is placed, and Claude is asked only when no keyframe saw the piece
    at all.
+
+   **The phone's second opinion** (`tools/phone_objects.py`, on a Mac). Oasis
+   Capture's own detector, depth and tracker, run over the space's frames by
+   the app's `phonesim` tool, are a different model with a different
+   vocabulary, run on every frame. Once the room is finished, what the phone
+   placed is compared with what was measured. Where the two coincide nothing
+   changes, and that agreement is evidence: a "misplaced" claim from the
+   render check is overruled for a piece the phone also places there, and a
+   review may not drop a measured box the phone vouches for. Where the phone
+   placed large furniture the room lacks (a wardrobe at least 1.4 m tall, a
+   bed), it is added: back on the nearest wall, the phone's own extent and
+   height, the usual depth for the type, but never where the phone walked and
+   never so deep that it enters frames that look past it. Low cabinets,
+   baskets and screens the phone names are left out: its boxes are coarse and
+   its labels noisy. On the pan this placed the wardrobe that no other method
+   could (mirror front, seen at a grazing angle, labelled "hanging cloth" by
+   the Mac's detector): 0.66 x 0.35 x 1.72 m against the south wall, in view
+   of frames 1-8 only, which are the frames that show it. See
+   `docs/research-weaknesses-2026-10.md` for why measurements, not a model's
+   judgement, decide geometry here.
 4. `tools/blender_room.py` — a parametric Blender room.
 5. `pipeline/splat_seed.py` then `tools/opensplat` — a Gaussian splat. The
    seed is the dense cloud (voxel-downsampled to 250k points), not COLMAP's

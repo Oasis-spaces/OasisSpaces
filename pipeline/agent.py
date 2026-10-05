@@ -197,6 +197,8 @@ FURNITURE_TYPES = {"bed", "seat", "table", "wardrobe", "block"}
 ADDED_SIZE_M = {"width": (0.3, 4.0), "depth": (0.2, 2.0), "height": (0.2, 3.0)}   # sanity limits, metres
 CAMERA_CLEARANCE_M = 0.1         # an added box this close to where the phone was cannot be there
 ASKABLE_PIECES = {"bed", "wardrobe", "table", "seat"}   # a review that drops every box of one of these is asked where it stands
+PHONE_ADDS_M = {"wardrobe": 1.4, "bed": 0.3}     # the phone's second opinion adds only large furniture: family -> least height
+FRAGMENT_DEPTH_M = 0.25          # a measured box thinner than this, against a wall, may be a piece's fragment (an open door leaf)
 
 
 def dropped_pieces(shapes: dict, verdict: dict, applied: list[str]) -> dict[str, list[tuple[str, str]]]:
@@ -923,6 +925,8 @@ class Agent:
                   + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
             return
         applied = self.apply_structure_review(shapes, verdict)
+        # On disk as reviewed before any piece is placed, so nothing downstream reads the candidates.
+        shapes_path.write_text(json.dumps(shapes, indent=1) + "\n")
         for label, dropped in dropped_pieces(shapes, verdict, applied).items():
             applied += self.safe(self.place_dropped_piece, shapes, label, dropped, default=[]) or []
         shapes_path.write_text(json.dumps(shapes, indent=1) + "\n")
@@ -940,11 +944,116 @@ class Agent:
         self.safe(placement.evidence_sheet, evidence, found[0] if found else None, sheet, self.space)
         return found, len(evidence["frames"])
 
+    def phone_objects(self) -> list[dict]:
+        """What the phone's own perception places in this space
+        (tools/phone_objects.py), once per run; [] where it cannot run."""
+        if getattr(self, "_phone_objects", None) is None:
+            import phone_objects
+
+            self._phone_objects = self.safe(phone_objects.run, self.space,
+                                            lambda text: print("    " + text), default=[]) or []
+        return self._phone_objects
+
+    def all_views(self) -> dict:
+        """Pose and lens of every registered frame (placement.views_of), once per run."""
+        if getattr(self, "_all_views", None) is None:
+            images = sorted(p.name for p in (self.space / "workspace" / "images").glob("*.jpg"))
+            self._all_views = placement.views_of(self.space, images)
+        return self._all_views
+
+    def phone_second_opinion(self, shapes: dict, limit: int = 2) -> list[str]:
+        """Large furniture the phone placed that the room does not have as
+        such. Where it overlaps a thin measured box of the same family the two
+        are one piece seen two ways (the pan's wardrobe: the Mac measured its
+        open door leaf, the phone its body), so that box grows to cover both;
+        where nothing of the family stands there, it is added. A phone object
+        that coincides with a measured box changes nothing: the measurement
+        stands, and agreement is not a reason to move it. Small things the
+        phone names (a low cabinet, a basket, a TV) are left out: its boxes are
+        coarse and its labels noisy, so only pieces a room cannot do without
+        are taken on its word. The outcome then does not hang on whether the
+        review kept or dropped a fragment."""
+        import phone_objects
+
+        units = self.densify_metrics().get("colmap_units_per_metre")
+        if not units:
+            return []
+        notes = []
+        for obj in self.phone_objects():
+            family = placement.furniture_family(self.space, obj["label"])
+            if family not in PHONE_ADDS_M or obj.get("matches") or len(notes) >= limit:
+                continue
+            if obj["size_m"][2] < PHONE_ADDS_M[family]:
+                continue                                              # a low cabinet is not a wardrobe
+            box = phone_objects.candidate(shapes, obj, units, label=family,
+                                          typical_depth_m=placement.TYPICAL_M[family][1], views=self.all_views())
+            if isinstance(box, str):
+                continue
+            built = [(i, b) for i, b in enumerate(shapes["boxes"]) if b.get("build", True)]
+            overlaps = [(phone_objects.plan_iou(box["min"], box["max"], b["min"], b["max"]), i, b) for i, b in built]
+            # Only a thin measured box grows: a box Claude or the phone added is a guess already,
+            # and a full-depth measured piece is not a fragment.
+            def thin(b):
+                return min(b["max"][0] - b["min"][0], b["max"][1] - b["min"][1]) < FRAGMENT_DEPTH_M * units
+
+            same = [(v, i, b) for v, i, b in overlaps
+                    if v > 0.02 and placement.furniture_family(self.space, b.get("label") or "") == family
+                    and b.get("source") not in ("claude", "phone", "masks") and thin(b)]
+            if same:
+                _, i, target = max(same, key=lambda item: item[0])
+                grown_min = [min(target["min"][k], box["min"][k]) for k in range(3)]
+                grown_max = [max(target["max"][k], box["max"][k]) for k in range(3)]
+                if grown_min != target["min"] or grown_max != target["max"]:
+                    target["min"], target["max"] = grown_min, grown_max
+                    target["reason"] = (str(target.get("reason", "")) + "; grown to what the phone's detector "
+                                        f"placed as a {obj['label']} ({obj['size_m'][0]} m wide)").lstrip("; ")
+                    notes.append(f"grew B{i} {target.get('label')} to the phone's {obj['label']}")
+            elif not any(v > 0.3 for v, _, _ in overlaps):          # nothing else already stands there
+                shapes["boxes"].append(box)
+                notes.append(f"added B{len(shapes['boxes']) - 1} {family}: {box['reason']}")
+        return notes
+
+    def settle_pieces(self) -> None:
+        """On the finished room: the phone's second opinion on large furniture
+        (its tracker needs closed walls and a floor to ground what it sees,
+        which the candidates mid-review are not: asked then, it reported the
+        pan's wardrobe 1.14 m tall, asked now 1.70), then, for a furniture
+        type the review dropped whole that still has nothing built, Claude's
+        answer where no keyframe detected it. The room is finished again
+        around whatever was added."""
+        pending = getattr(self, "_pending_pieces", None) or {}
+        self._pending_pieces = {}
+        self._phone_objects = None                        # the room has changed: the phone is asked afresh
+        shapes_path = self.space / "shapes.json"
+        shapes = json.loads(shapes_path.read_text())
+        before = len(shapes["boxes"])
+        notes = self.safe(self.phone_second_opinion, shapes, default=[]) or []
+        for label, piece in pending.items():
+            family = placement.furniture_family(self.space, label)
+            if any(b.get("build", True) and placement.furniture_family(self.space, b.get("label") or "") == family
+                   for b in shapes["boxes"]):
+                continue
+            if piece["evidence_frames"] >= placement.MIN_FRAMES:
+                # The keyframes that saw one agree on no box and the phone placed none:
+                # the piece is not guessed into the room.
+                notes.append(f"no {label} added: its masks in {piece['evidence_frames']} keyframe(s) "
+                             "support no box against a wall")
+            else:
+                notes += self.safe(self.ask_where_piece_stands, shapes, label, piece["dropped"], default=[]) or []
+        if not notes:
+            return
+        shapes_path.write_text(json.dumps(shapes, indent=1) + "\n")
+        self.judged("structure", {"second_opinion": notes, "applied": notes}, "; ".join(notes))
+        if len(shapes["boxes"]) != before or any(note.startswith("grew") for note in notes):
+            self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"), str(self.space), "--finish-only"],
+                     "finish", "around what the second opinion added")
+
     def place_dropped_piece(self, shapes: dict, label: str, dropped: list[tuple[str, str]]) -> list[str]:
         """The review dropped every '{label}' box as a fragment (a door leaf, a
         shelf) and nothing of that type is built, so the room would lose a
-        piece the frames show. Ask where the whole piece stands and add it
-        there (place_added_box); a refused spot gets one more try."""
+        piece the frames show. Its own masks in the keyframes place it where
+        they can (place_by_masks); otherwise it waits for settle_pieces, on the
+        finished room."""
         applied = []
         units = self.densify_metrics().get("colmap_units_per_metre")
         if not units:
@@ -955,12 +1064,19 @@ class Agent:
                 shapes["boxes"].append(box)
                 applied.append(f"added B{len(shapes['boxes']) - 1} {label}: {box['reason']}")
             return applied
-        if evidence_frames >= placement.MIN_FRAMES:
-            # The keyframes that saw one do not agree on any box: the frames are the
-            # stronger evidence, so the piece is not guessed into the room.
-            applied.append(f"no {label} added: its masks in {evidence_frames} keyframe(s) support no box against a wall")
-            return applied
-        if not self.advisor.available:
+        if getattr(self, "_pending_pieces", None) is None:
+            self._pending_pieces = {}
+        self._pending_pieces[label] = {"dropped": dropped, "evidence_frames": evidence_frames}
+        return applied
+
+    def ask_where_piece_stands(self, shapes: dict, label: str, dropped: list[tuple[str, str]]) -> list[str]:
+        """Claude says where a piece the review dropped whole stands, and it is
+        added there (place_added_box); a refused spot gets one more try. The
+        last resort: only where no keyframe detected the piece and the phone
+        placed none."""
+        applied = []
+        units = self.densify_metrics().get("colmap_units_per_metre")
+        if not units or not self.advisor.available:
             return applied
         crops = self.space / "object-frames.png"
         plan = self.space / "plan-candidates.png"
@@ -1042,6 +1158,7 @@ class Agent:
                 can_drop -= 1
                 applied.append(f"dropped {ident}")
         boxes = shapes["boxes"]
+        vouched = self.safe(self.phone_matches, default={}) or {}
         detected = [i for i, b in enumerate(boxes) if b.get("detected") and b.get("build", True)]
         main_object = max(detected, key=lambda i: boxes[i]["points"]) if detected else None
         for item in verdict.get("drop_boxes") or []:
@@ -1053,6 +1170,11 @@ class Agent:
             if i == main_object:
                 applied.append(f"kept {ident}: the room's largest detected object "
                                f"({boxes[i]['detected']}) is never dropped")
+                continue
+            if ident in vouched and boxes[i].get("source") not in ("claude", "phone", "masks"):
+                # Two independent measurements agree on it: one opinion does not remove it.
+                applied.append(f"kept {ident}: the phone's own detector places a "
+                               f"{vouched[ident]['label']} on the same spot")
                 continue
             boxes[i]["build"] = False
             boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
@@ -1119,6 +1241,38 @@ class Agent:
         return (f"W{i} is a furniture front: moved it back {shown} and built "
                 f"B{len(shapes['boxes']) - 1} wardrobe in front of it")
 
+    def frames_showing_added_pieces(self, limit: int = 2) -> list[str]:
+        """For each piece the review added rather than measured (by its masks,
+        by the phone, by Claude), the frame that shows most of it: the room
+        frames may all look elsewhere, and a piece judged without a frame that
+        sees it is judged from an arbitrary angle."""
+        shapes = json.loads((self.space / "shapes.json").read_text())
+        added = [b for b in shapes["boxes"] if b.get("build", True) and b.get("source") in ("masks", "phone", "claude")]
+        if not added:
+            return []
+        images = sorted(p.name for p in (self.space / "workspace" / "images").glob("*.jpg"))
+        views = placement.views_of(self.space, images)
+        chosen = []
+        for box in added[:limit]:
+            lo, hi = np.array(box["min"]), np.array(box["max"])
+            corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+
+            def seen(name: str) -> float:
+                """The share of the frame the piece fills, for a frame that has all of it in front of
+                the lens and is not filled by it (a camera standing against the piece shows nothing)."""
+                view = views[name]
+                ahead = ((view["R"] @ (corners @ view["world"]).T).T + view["t"])[:, 2]
+                if ahead.min() <= 0.3 * (hi - lo).max():
+                    return 0.0
+                share = float(placement.silhouette(lo, hi, view, (view["height"] // placement.GRID,
+                                                                  view["width"] // placement.GRID)).mean())
+                return share if share <= 0.6 else 0.0
+
+            best = max(views, default=None, key=seen)
+            if best is not None and seen(best) > 0.01 and best not in chosen:
+                chosen.append(best)
+        return chosen
+
     def view_sheet(self) -> Path | None:
         """The built room rendered from three of the video's own cameras, each
         beside its frame (tools/room_views.py): a misplaced piece shows as an
@@ -1126,6 +1280,9 @@ class Agent:
         from room_views import pairs_sheet, render_views
 
         names = [p.name for p in self.room_frames(3)]
+        for name in self.safe(self.frames_showing_added_pieces, default=[]) or []:
+            if name not in names:
+                names.append(name)
         pairs = render_views(self.space, names, self.space / "room-views", blender=BLENDER)
         return pairs_sheet(pairs, self.space / "room-views.png") if pairs else None
 
@@ -1196,6 +1353,28 @@ class Agent:
                        if verdict.get("missing") else ""))
         return verdict
 
+    def phone_matches(self) -> dict[str, dict]:
+        """Built boxes the phone's own perception placed an object on in this
+        run (phone-objects.json): {box id: the phone's object}."""
+        path = self.space / "phone-objects.json"
+        if not path.exists():
+            return {}
+        return {o["matches"]: o for o in json.loads(path.read_text()).get("objects", []) if o.get("matches")}
+
+    def phone_corroborates(self, label: str) -> str | None:
+        """What the phone placed on a built box labelled `label`, if it placed
+        something of the same furniture family there."""
+        family = placement.furniture_family(self.space, label)
+        if family is None:
+            return None
+        shapes = json.loads((self.space / "shapes.json").read_text())
+        for ident, obj in self.phone_matches().items():
+            box = shapes["boxes"][int(ident[1:])]
+            if (box.get("build", True) and label in (box.get("label"), box.get("detected"))
+                    and placement.furniture_family(self.space, obj["label"]) == family):
+                return f"{obj['label']} {obj['size_m'][0]} x {obj['size_m'][1]} x {obj['size_m'][2]} m on {ident}"
+        return None
+
     def box_mask_score(self, label: str) -> tuple[float, int] | None:
         """How well the built box(es) labelled `label` agree with the label's
         own masks in the keyframes (pipeline/placement.py): (best score,
@@ -1217,10 +1396,14 @@ class Agent:
         return best
 
     def overrule_misplacements(self, verdict: dict) -> list[str]:
-        """A structural 'misplaced: <piece>' claim is checked against the
-        piece's own masks: where they agree with its box, the claim becomes
-        minor. The same rows have drawn opposite verdicts on the same bed;
-        the masks do not change their mind."""
+        """A structural 'misplaced: <piece>' claim is checked against
+        measurements: where the piece's own masks agree with its box, or the
+        phone's own detector places the same kind of piece on the same box,
+        the claim becomes minor. The same rows have drawn opposite verdicts on
+        the same bed, and a judge has had a measured wardrobe replaced by a
+        guess; measurements do not change their mind. (Frontier models asked
+        which of two reconstructions is better agree with the true geometric
+        metric 45.8% of the time: docs/research-weaknesses-2026-10.md.)"""
         notes = []
         for problem in verdict.get("problems") or []:
             if not isinstance(problem, dict) or problem.get("severity") != "structural":
@@ -1229,14 +1412,19 @@ class Agent:
             if not what.lower().startswith("misplaced:"):
                 continue
             label = what.split(":", 1)[1].split(",")[0].strip().lower()
-            scored = self.box_mask_score(label)
-            if scored is None:
-                continue
-            total, agreeing = scored
-            if total >= placement.ACCEPT_SCORE and agreeing >= placement.MIN_FRAMES:
+            scored = self.safe(self.box_mask_score, label, default=None)
+            if scored and scored[0] >= placement.ACCEPT_SCORE and scored[1] >= placement.MIN_FRAMES:
+                total, agreeing = scored
                 problem["severity"] = "minor"
                 problem["what"] = f"{what} (overruled: its masks in {agreeing} keyframes agree with the box, score {total:.2f})"
                 notes.append(f"{label} stays, score {total:.2f} in {agreeing} frames")
+                continue
+            # A second, independent measurement of the same piece on the same spot.
+            seen = self.safe(self.phone_corroborates, label, default=None)
+            if seen:
+                problem["severity"] = "minor"
+                problem["what"] = f"{what} (overruled: the phone's own detector places a {seen})"
+                notes.append(f"{label} stays, the phone places a {seen}")
         if notes and not structural_problems(verdict):
             verdict["plausible"] = True
         return notes
@@ -1259,6 +1447,7 @@ class Agent:
         self.structure_review(feedback=problems)
         self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"),
                   str(self.space), "--finish-only"], "finish", "after the second review")
+        self.safe(self.settle_pieces)
         self.build_room()
         second = self.safe(self.render_verdict)
         if second is not None and len(structural_problems(second)) < len(problems):
@@ -1480,6 +1669,9 @@ class Agent:
         return True
 
     def step_shapes(self) -> bool:
+        # The phone's second opinion names boxes by index: one from an earlier run would
+        # vouch for the wrong boxes.
+        (self.space / "phone-objects.json").unlink(missing_ok=True)
         ok, _ = self.run([sys.executable, str(ROOT / "pipeline/shapes.py"),
                           str(self.space)], "shapes", "planes and labelled boxes")
         if not ok:
@@ -1493,6 +1685,7 @@ class Agent:
         self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"),
                   str(self.space), "--finish-only"], "finish",
                  "stand furniture on the floor, keep it inside the walls, close the room")
+        self.safe(self.settle_pieces)
         metrics = self.shape_metrics()
         self.decide("shapes", "accept",
                     f"{metrics.get('walls', 0)} walls"

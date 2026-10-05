@@ -87,6 +87,7 @@ def test_what_cannot_be_placed_says_why():
 def test_the_review_adds_at_most_three_and_records_each():
     stub = agent.Agent.__new__(agent.Agent)
     stub.densify_metrics = lambda: {"colmap_units_per_metre": UNITS}
+    stub.phone_matches = lambda: {}
     shapes = room()
     item = {"label": "wardrobe", "against": "W0", "from_corner_with": "W3", "offset_m": 0.3,
             "width_m": 1.0, "depth_m": 0.6, "height_m": 2.0, "why": "seen in frames 1-8"}
@@ -99,6 +100,7 @@ def test_the_review_adds_at_most_three_and_records_each():
 def test_without_a_measured_scale_nothing_is_added():
     stub = agent.Agent.__new__(agent.Agent)
     stub.densify_metrics = lambda: {}
+    stub.phone_matches = lambda: {}
     shapes = room()
     applied = agent.Agent.apply_structure_review(
         stub, shapes, {"add_boxes": [{"label": "bed", "against": "W0", "width_m": 1.4, "depth_m": 2, "height_m": 0.5}]})
@@ -140,6 +142,8 @@ def stub(advisor):
     stub.room_frames = lambda count=3: []
     stub.chosen = None
     stub.place_by_masks = lambda shapes, label: ([], 0)
+    stub._phone_objects = []                       # tests never launch the phone simulator
+    stub._all_views = {}                           # nor read a solve
     return stub
 
 
@@ -150,14 +154,14 @@ def test_the_answer_places_the_piece_and_a_refused_spot_gets_one_more_try():
                    "depth_m": 0.6, "height_m": 2.0, "why": "next to its open door"}
     in_the_corner = {**on_the_walk, "against": "W1", "from_corner_with": "W0", "offset_m": 0.0}
     advisor = Answers({"add": on_the_walk}, {"add": in_the_corner})
-    applied = agent.Agent.place_dropped_piece(stub(advisor), shapes, "wardrobe", [("B1", "its open door leaf")])
+    applied = agent.Agent.ask_where_piece_stands(stub(advisor), shapes, "wardrobe", [("B1", "its open door leaf")])
     assert len(advisor.asked) == 2 and "refused" in advisor.asked[1]
     assert applied[0].startswith("ignored a wardrobe against W0") and "phone stood" in applied[0]
     assert applied[1].startswith("asked where the wardrobe stands: added B0 against W1, from its corner with W0")
     assert shapes["boxes"][0]["label"] == "wardrobe" and shapes["boxes"][0]["source"] == "claude"
 
 
-def test_masks_place_the_piece_before_claude_is_asked_and_refuse_it_when_they_disagree():
+def test_masks_place_a_dropped_piece_at_once_and_anything_else_waits_for_the_finished_room():
     box = {"min": [-20.0, 0.0, -11.5], "max": [-14.6, 9.0, 6.5], "label": "wardrobe", "build": True,
            "source": "masks", "reason": "placed by its masks in 4 keyframe(s), score 0.46, against W0"}
     advisor = Answers({"add": {"against": "W1", "width_m": 1, "depth_m": 0.6, "height_m": 2}})
@@ -165,27 +169,62 @@ def test_masks_place_the_piece_before_claude_is_asked_and_refuse_it_when_they_di
     agent_.place_by_masks = lambda shapes, label: ([box], 4)
     shapes = room()
     applied = agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
-    assert shapes["boxes"] == [box] and applied == ["added B0 wardrobe: " + box["reason"]] and advisor.asked == []
+    assert shapes["boxes"] == [box] and applied == ["added B0 wardrobe: " + box["reason"]]
+    assert not getattr(agent_, "_pending_pieces", None)
     agent_.place_by_masks = lambda shapes, label: ([], 5)                    # masks exist but fit no box
     shapes = room()
-    applied = agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
-    assert shapes["boxes"] == [] and "support no box" in applied[0] and advisor.asked == []
-    agent_.place_by_masks = lambda shapes, label: ([], 0)                    # no masks at all: ask Claude
-    shapes = room()
-    agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")])
-    assert len(advisor.asked) == 1 and len(shapes["boxes"]) == 1
+    assert agent.Agent.place_dropped_piece(agent_, shapes, "wardrobe", [("B1", "its door leaf")]) == []
+    assert shapes["boxes"] == [] and agent_._pending_pieces["wardrobe"]["evidence_frames"] == 5
+    assert advisor.asked == []                                               # nobody is asked mid-review
+
+
+def settled(pending, phone=(), answers=()):
+    """settle_pieces on a room on disk; returns (boxes, what was recorded, what Claude was asked)."""
+    import json
+    advisor = Answers(*answers)
+    agent_ = stub(advisor)
+    (agent_.space / "shapes.json").write_text(json.dumps(room()))
+    agent_._pending_pieces = pending
+    agent_.phone_objects = lambda: list(phone)
+    recorded, ran = [], []
+    agent_.judged = lambda stage, verdict, note: recorded.append(note)
+    agent_.run = lambda command, stage, note: ran.append(note) or (True, "")
+    agent.Agent.settle_pieces(agent_)
+    return json.loads((agent_.space / "shapes.json").read_text())["boxes"], recorded, advisor.asked, ran
+
+
+def test_on_the_finished_room_the_phone_is_heard_first_and_claude_only_where_nothing_saw_the_piece():
+    wardrobe = {"label": "wardrobe", "min": [-9.0, -4.0, -11.5], "max": [-3.0, -4.0 + 0.13 * UNITS, -11.5 + 1.7 * UNITS],
+                "size_m": [0.67, 0.13, 1.7], "matches": None}
+    pending = {"wardrobe": {"dropped": [("B1", "its door leaf")], "evidence_frames": 5}}
+    # the phone placed one: it is added, the room is finished again, nobody else is asked
+    boxes, recorded, asked, ran = settled(dict(pending), phone=[wardrobe])
+    assert len(boxes) == 1 and boxes[0]["source"] == "phone" and asked == [] and len(ran) == 1
+    assert recorded[0].startswith("added B0 wardrobe")
+    # the phone placed none and the keyframes' masks fit no box: nothing is guessed
+    boxes, recorded, asked, ran = settled(dict(pending))
+    assert boxes == [] and "support no box" in recorded[0] and asked == [] and ran == []
+    # no keyframe saw it and the phone placed none: Claude is asked
+    answer = {"add": {"against": "W1", "from_corner_with": "W0", "offset_m": 0.0, "width_m": 1.0, "depth_m": 0.6,
+                      "height_m": 2.0, "why": "by the door"}}
+    boxes, recorded, asked, ran = settled({"wardrobe": {"dropped": [("B1", "x")], "evidence_frames": 0}}, answers=[answer])
+    assert len(boxes) == 1 and boxes[0]["source"] == "claude" and len(asked) == 1 and len(ran) == 1
+    # nothing pending and nothing from the phone: the room is left as it is
+    boxes, recorded, asked, ran = settled({})
+    assert boxes == [] and recorded == [] and ran == []
 
 
 def test_no_whole_piece_means_nothing_is_added():
     shapes = room()
-    applied = agent.Agent.place_dropped_piece(stub(Answers({"none": True, "why": "only a door"})),
-                                              shapes, "wardrobe", [("B0", "the room door")])
+    applied = agent.Agent.ask_where_piece_stands(stub(Answers({"none": True, "why": "only a door"})),
+                                                 shapes, "wardrobe", [("B0", "the room door")])
     assert shapes["boxes"] == [] and applied == ["no wardrobe added: only a door"]
 
 
 def test_a_misplacement_claim_the_masks_contradict_becomes_minor():
     agent_ = stub(Answers())
     agent_.box_mask_score = lambda label: {"bed": (0.65, 8), "wardrobe": (0.27, 2)}.get(label)
+    agent_.phone_corroborates = lambda label: None
     verdict = {"plausible": False, "problems": [
         {"what": "misplaced: bed, set far back in the room", "severity": "structural"},
         {"what": "misplaced: wardrobe, standing in the doorway", "severity": "structural"},
@@ -198,6 +237,54 @@ def test_a_misplacement_claim_the_masks_contradict_becomes_minor():
     only_bed = {"plausible": False, "problems": [{"what": "misplaced: bed, too far", "severity": "structural"}]}
     agent.Agent.overrule_misplacements(agent_, only_bed)
     assert only_bed["plausible"] is True                                             # nothing structural is left
+
+
+def test_the_phones_piece_grows_a_measured_fragment_or_is_added_and_non_furniture_is_ignored():
+    def phone(label, x0, x1, depth):
+        return {"label": label, "min": [x0, -4.0, -11.5], "max": [x1, -4.0 + depth * UNITS, -11.5 + 1.7 * UNITS],
+                "size_m": [round((x1 - x0) / UNITS, 2), depth, 1.7], "matches": None}
+    agent_ = stub(Answers())
+    low = phone("cabinet", 1.0, 4.0, 0.3)
+    low["size_m"][2] = 0.6                                                           # a bedside cabinet: not taken on
+    agreed = phone("wardrobe", -18.0, -15.0, 0.5)
+    agreed["matches"] = "B7"                                                         # coincides with a measured box: left alone
+    agent_._phone_objects = [phone("wardrobe", -9.0, -3.0, 0.13), phone("fridge", 0.0, 4.0, 0.3), low, agreed]
+    # the review kept the open door leaf as the wardrobe: 0.2 m deep, beside and overlapping the phone's
+    shapes = room()
+    shapes["boxes"] = [{"label": "wardrobe", "build": True, "min": [-13.0, -4.0, -11.5], "max": [-6.0, -4.0 + 0.2 * UNITS, 3.5]}]
+    notes = agent.Agent.phone_second_opinion(agent_, shapes)
+    assert notes == ["grew B0 wardrobe to the phone's wardrobe"] and len(shapes["boxes"]) == 1
+    grown = shapes["boxes"][0]
+    assert grown["min"][0] == -13.0 and grown["max"][0] == -3.0                       # both extents along the wall
+    assert abs((grown["max"][1] - grown["min"][1]) - 0.55 * UNITS) < 1e-6             # the usual depth, no walk in the way
+    # the review dropped it: the phone's piece is added
+    shapes = room()
+    notes = agent.Agent.phone_second_opinion(agent_, shapes)
+    assert len(shapes["boxes"]) == 1 and shapes["boxes"][0]["source"] == "phone" and notes[0].startswith("added B0 wardrobe")
+
+
+def test_a_piece_the_phone_also_places_is_not_misplaced_and_is_not_dropped():
+    agent_ = stub(Answers())
+    agent_.box_mask_score = lambda label: (0.12, 3)                         # its masks are too mixed to say
+    agent_.phone_corroborates = lambda label: "wardrobe 1.18 x 0.6 x 2.46 m on B0" if label == "wardrobe" else None
+    verdict = {"plausible": False, "problems": [
+        {"what": "misplaced: wardrobe, a full-height box where the frame shows a wall cupboard", "severity": "structural"},
+        {"what": "misplaced: desk, floating", "severity": "structural"}]}
+    notes = agent.Agent.overrule_misplacements(agent_, verdict)
+    assert notes == ["wardrobe stays, the phone places a wardrobe 1.18 x 0.6 x 2.46 m on B0"]
+    assert [p["severity"] for p in verdict["problems"]] == ["minor", "structural"]
+    # and a review may not drop the measured box the phone vouches for, but may drop a guess
+    shapes = room()
+    shapes["boxes"] = [{"label": "wardrobe", "detected": "wardrobe", "source": "front", "build": True, "points": 900,
+                        "min": [0] * 3, "max": [1] * 3},
+                       {"label": "wardrobe", "detected": "wardrobe", "source": "claude", "build": True, "points": 0,
+                        "min": [0] * 3, "max": [1] * 3},
+                       {"label": "bed", "detected": "bed", "source": "detected", "build": True, "points": 5000,
+                        "min": [0] * 3, "max": [1] * 3}]
+    agent_.phone_matches = lambda: {"B0": {"label": "wardrobe"}, "B1": {"label": "wardrobe"}}
+    applied = agent.Agent.apply_structure_review(agent_, shapes, {"drop_boxes": [{"id": "B0", "why": "x"}, {"id": "B1", "why": "y"}]})
+    assert applied == ["kept B0: the phone's own detector places a wardrobe on the same spot", "dropped B1"]
+    assert shapes["boxes"][0]["build"] and not shapes["boxes"][1]["build"]
 
 
 if __name__ == "__main__":
