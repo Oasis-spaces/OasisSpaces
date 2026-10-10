@@ -1069,6 +1069,19 @@ class Agent:
             self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"), str(self.space), "--finish-only"],
                      "finish", "around what the second opinion added")
 
+    def repair_candidates(self) -> None:
+        """Before the review: a thin slab lying mostly inside another candidate
+        is its surface (repair_overlaps), so it is not shown to the review as a
+        piece, and the review is not tempted to drop the piece it lies in for
+        their overlap (the pan's cupboard went that way, for a 0.14 m "bed"
+        slab 87% inside it)."""
+        path = self.space / "shapes.json"
+        shapes = json.loads(path.read_text())
+        notes = self.repair_overlaps(shapes)
+        if notes:
+            path.write_text(json.dumps(shapes, indent=1) + "\n")
+            self.judged("structure", {"repairs": notes, "applied": notes}, "; ".join(notes))
+
     def repair_overlaps(self, shapes: dict) -> list[str]:
         """Once the finish step has stood every piece on the floor, a thin
         piece lying mostly inside another is that piece's surface, not
@@ -1810,6 +1823,7 @@ class Agent:
             return False
         self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"),
                   str(self.space), "--no-finish"], "classify", "label and sanity-check boxes")
+        self.safe(self.repair_candidates)
         self.safe(self.structure_review)
         # Finish only what survived the review, so a box Claude dropped cannot
         # have pushed a wall out first.

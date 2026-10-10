@@ -237,6 +237,27 @@ def test_a_thin_piece_inside_another_is_its_surface_and_is_not_built():
     assert "its surface" in shapes["boxes"][1]["reason"]
 
 
+def test_the_candidates_are_repaired_before_the_review_sees_them():
+    import json
+    agent_ = stub(Answers())
+    recorded = []
+    agent_.judged = lambda stage, verdict, note: recorded.append(note)
+    shapes = room()
+    shapes["boxes"] = [{"label": "wardrobe", "detected": "wardrobe", "source": "detected", "build": True, "points": 900,
+                        "min": [-20.0, 10.0, -11.5], "max": [-20.0 + 0.8 * UNITS, 16.0, 7.0]},
+                       {"label": "bed", "detected": "bed", "source": "detected", "build": True, "points": 300,
+                        "min": [-19.0, 11.0, -11.5], "max": [-19.0 + 0.14 * UNITS, 15.0, 5.0]}]   # a slab in the cupboard
+    (agent_.space / "shapes.json").write_text(json.dumps(shapes))
+    agent.Agent.repair_candidates(agent_)
+    repaired = json.loads((agent_.space / "shapes.json").read_text())
+    assert [b["build"] for b in repaired["boxes"]] == [True, False]
+    assert len(recorded) == 1 and "dropped B1 (bed): a 0.14 m thin slab lying 100% inside B0 (wardrobe)" in recorded[0]
+    # nothing to repair: the file and the record are left alone
+    (agent_.space / "shapes.json").write_text(json.dumps(repaired))
+    agent.Agent.repair_candidates(agent_)
+    assert len(recorded) == 1
+
+
 def test_no_whole_piece_means_nothing_is_added():
     shapes = room()
     applied = agent.Agent.ask_where_piece_stands(stub(Answers({"none": True, "why": "only a door"})),
