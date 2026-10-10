@@ -243,7 +243,9 @@ class Colab:
                 f"data = open(p, 'rb').read() if os.path.exists(p) else b''\n"
                 f"print(len(data)); print(data[{offset}:].decode('utf-8', 'replace')[-20000:])\n")
         out = self.python(code, timeout=120)
-        first, _, rest = out.partition("\n")
+        # The exec's output can start with a blank line (Colab CLI 0.6 on 2026-10-10),
+        # which would put the byte count into the text and leave the offset at 0.
+        first, _, rest = out.lstrip("\r\n").partition("\n")
         return rest, int(first.strip()) if first.strip().isdigit() else offset
 
     def md5(self, remote: str) -> str | None:

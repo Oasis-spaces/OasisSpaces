@@ -165,6 +165,12 @@ ever seen at the edge of the frame, ask for one square-on view of it.
 
 ## What I would do, in order
 
+*Status, 10 October 2026:* items 1-3 are built (`pipeline/tracking.py`,
+`pipeline/mirrors.py`, `pipeline/room_score.py`; see the README). SAM 3's
+weights turned out to be handed out on request only, so the tracker carries
+GroundingDINO's detections with SAM 2.1's video model instead; the detector
+is the one part to swap when access comes.
+
 1. **SAM 3 concept tracking over all frames** in densify (Colab). Fixes
    flicker and mislabels at the source and feeds placement with every frame.
 2. **Mirror planes instead of dropped points** (Mirror3D's border-strip
