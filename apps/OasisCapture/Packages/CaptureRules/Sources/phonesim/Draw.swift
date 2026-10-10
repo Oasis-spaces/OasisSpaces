@@ -108,7 +108,8 @@ enum Draw {
     /// `roomOnly` keeps the picture to the walls (the same size for every frame of a video) and
     /// labels the boxes with their names alone; `camera` draws where the phone is and looks.
     static func map(_ map: RoomMap, truth: [Truth.Object], walls: [Truth.Wall], to url: URL, pixelsPerMetre: CGFloat = 160,
-                    roomOnly: Bool = false, camera: PinholeCamera? = nil, caption: String? = nil) {
+                    roomOnly: Bool = false, camera: PinholeCamera? = nil, bounds: (SIMD2<Float>, SIMD2<Float>)? = nil,
+                    caption: String? = nil) {
         var lo = SIMD2<Float>(repeating: .greatestFiniteMagnitude), hi = -lo
         for wall in walls {
             let c = SIMD2(wall.center[0], wall.center[2]), d = SIMD2(wall.along[0], wall.along[2]) * wall.half
@@ -118,6 +119,7 @@ enum Draw {
             for o in truth { lo = simd_min(lo, SIMD2(o.min[0], o.min[2])); hi = simd_max(hi, SIMD2(o.max[0], o.max[2])) }
             for o in map.objects { lo = simd_min(lo, o.footprintMin); hi = simd_max(hi, o.footprintMax) }
         }
+        if let bounds { lo = bounds.0; hi = bounds.1 }
         guard lo.x < hi.x else { return }
         lo -= 0.4; hi += 0.4
         let w = Int(CGFloat(hi.x - lo.x) * pixelsPerMetre), h = Int(CGFloat(hi.y - lo.y) * pixelsPerMetre)

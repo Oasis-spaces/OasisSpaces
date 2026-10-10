@@ -262,7 +262,9 @@ final class CaptureController: NSObject, ARSessionDelegate {
             @unknown default: break
             }
         }
-        return anchor.alignment == .vertical ? .wall : .floor
+        // Without a classification a level patch is not known to be the floor: it is as likely the
+        // top of a bed or a table (the room map finds the floor by what is seen, see RoomMapBuilder.saw).
+        return anchor.alignment == .vertical ? .wall : .unknown
     }
 
     /// The plane's boundary drawn as one line: no fill, no triangles.
@@ -372,6 +374,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
         let observations = understanding.instances.map {
             ObjectObservation(classIndex: $0.classIndex, confidence: $0.confidence, points: $0.points, doubtful: $0.doubtful)
         }
+        mapBuilder.saw(floorAt: understanding.floorAt, pointsAt: understanding.pointsAt)
         let matches = mapBuilder.observe(observations, camera: understanding.camera)
         // What was seen in which direction lately: a thing is outlined from its second sighting
         // (the detector's one-frame inventions never show), under its most voted name.

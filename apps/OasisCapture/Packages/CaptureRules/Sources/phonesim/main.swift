@@ -35,17 +35,21 @@ struct Truth: Decodable {
     struct Object: Decodable { var id: String; var label: String; var min: [Float]; var max: [Float] }
     struct Wall: Decodable { var center: [Float]; var along: [Float]; var normal: [Float]; var half: Float; var height: Float }
     struct Size: Decodable { var width: Float; var depth: Float; var height: Float }
+    /// A plane as the phone's tracking had it (a recording played back: tools/phone_capture_export.py).
+    struct Plane: Decodable { var kind: String; var vertical: Bool; var center: [Float]; var xAxis: [Float]; var zAxis: [Float]; var extent: [Float] }
     var space: String
     var images: String
     var room: Size
     var walls: [Wall]
+    /// When present these are the room's planes, floor included, right or wrong, instead of `walls` and a level floor.
+    var planes: [Plane]?
     var objects: [Object]
     var frames: [Frame]
 }
 
 let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
-    print("usage: phonesim <space folder> [--every n] [--frames n] [--debug] [--dump folder]\n       phonesim --video <file> --dump <folder> [--fps n] [--frames n]")
+    print("usage: phonesim <space folder> [--every n] [--frames n] [--dump folder] [--trace] [--bare] [--given-floor] [--as-phone]\n       phonesim --video <file> --dump <folder> [--fps n] [--frames n]")
     exit(2)
 }
 /// A video to run the on-screen part over (--video <file>), instead of a processed space.
@@ -69,7 +73,12 @@ let truth: Truth = try videoURL.map {
 } ?? JSONDecoder().decode(Truth.self, from: Data(contentsOf: space.appendingPathComponent("phone-sim/frames.json")))
 // The app's model packages, beside this package: apps/OasisCapture/Resources.
 let resources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../../Resources").standardizedFileURL
-let spec = DetectionSpec.bundled(), objects = ObjectSpec.bundled()
+let spec = DetectionSpec.bundled()
+let objects: ObjectSpec = {
+    var o = ObjectSpec.bundled()
+    if arguments.contains("--no-sight") { o.tracker.standpointMetres = 0 }      // (to measure what the same-sight rule does)
+    return o
+}()
 
 // MARK: Models (compiled from the app's packages)
 
@@ -154,18 +163,27 @@ func pixelBuffer(width: Int, height: Int) -> CVPixelBuffer {
 /// The frame as the phone's camera would hold it: cropped to 3:4 about the centre
 /// (the video is 9:16; the sensor is 4:3), upright.
 func cropped34(_ image: CIImage) -> (image: CIImage, top: CGFloat) {
-    let w = image.extent.width, h = (image.extent.width * 4 / 3).rounded()
-    let top = ((image.extent.height - h) / 2).rounded()
+    var w = image.extent.width, h = (image.extent.width * 4 / 3).rounded()
+    // A picture wider than 3:4 (a video shot with the phone on its side): the upright middle of it.
+    if h > image.extent.height {
+        h = image.extent.height
+        w = (h * 3 / 4).rounded()
+    }
+    let left = ((image.extent.width - w) / 2).rounded(), top = ((image.extent.height - h) / 2).rounded()
     // Core Image's origin is bottom-left: the crop's y runs from the bottom.
-    let cropped = image.cropped(to: CGRect(x: 0, y: image.extent.height - top - h, width: w, height: h))
-        .transformed(by: CGAffineTransform(translationX: 0, y: -(image.extent.height - top - h)))
+    let cropped = image.cropped(to: CGRect(x: left, y: image.extent.height - top - h, width: w, height: h))
+        .transformed(by: CGAffineTransform(translationX: -left, y: -(image.extent.height - top - h)))
     return (cropped, top)
 }
+
+/// --as-phone: the whole 9:16 frame, stretched into the models' 4:3 inputs, which is what the
+/// app did while its camera ran at 3840 x 2160 (instead of the 3:4 crop the models were tested on).
+let asPhone = arguments.contains("--as-phone")
 
 func upright(_ frame: Frame) -> (CIImage, PinholeCamera)? {
     let url = space.appendingPathComponent(truth.images).appendingPathComponent(frame.name)
     guard let image = CIImage(contentsOf: url) else { return nil }
-    let (cropped, top) = cropped34(image)
+    let (cropped, top) = asPhone ? (image, 0) : cropped34(image)
     let w = cropped.extent.width, h = cropped.extent.height
     var transform = simd_float4x4()
     for c in 0..<4 { for r in 0..<4 { transform[c][r] = frame.transform[c * 4 + r] } }
@@ -323,18 +341,26 @@ if let videoURL {
         try? VNImageRequestHandler(ciImage: image, orientation: .up).perform([detector, surfaces])
         var instances = refine(decodeDetections(detector), image: image)
         if let map = surfaceClasses(surfaces) {
+            // (No camera is known for a video: the depth model's own shape is all the step measure needs.)
+            let lens = PinholeCamera(fx: Float(image.extent.height) * 0.75, fy: Float(image.extent.height) * 0.75, cx: Float(image.extent.width) / 2,
+                                     cy: Float(image.extent.height) / 2, width: Int(image.extent.width), height: Int(image.extent.height),
+                                     transform: matrix_identity_float4x4)
+            let depth = metricDepth(image, camera: lens)
+            func depthAt(_ x: Float, _ y: Float) -> Float? {
+                depth.map { $0.data[min($0.height - 1, Int(y * Float($0.height))) * $0.width + min($0.width - 1, Int(x * Float($0.width)))] }
+            }
+            let bare = instances.map { objects.isOnBareSurface($0, bare: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height, depthAt: depthAt) }
             if dumpFolder != nil {
-                let items = instances.map { inst in
-                    String(format: "{\"label\":\"%@\",\"conf\":%.2f,\"box\":[%.3f,%.3f,%.3f,%.3f],\"structure\":%.2f,\"bare\":%@}",
+                let items = instances.enumerated().map { i, inst in
+                    String(format: "{\"label\":\"%@\",\"conf\":%.2f,\"box\":[%.3f,%.3f,%.3f,%.3f],\"structure\":%.2f,\"steps\":%.2f,\"bare\":%@}",
                            objects.info(inst.classIndex)?.label ?? "?", inst.confidence, inst.minX, inst.minY, inst.maxX, inst.maxY,
                            inst.share(on: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height),
-                           objects.isOnBareSurface(inst, bare: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height) ? "true" : "false")
+                           inst.depthStepShare(depthAt: depthAt) ?? -1, bare[i] ? "true" : "false")
                 }
                 records.append("{\"frame\":\(n + 1),\"instances\":[\(items.joined(separator: ","))]}")
             }
-            let before = instances.count
-            instances.removeAll { objects.isOnBareSurface($0, bare: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height) }
-            dropped += before - instances.count
+            instances = instances.indices.filter { !bare[$0] }.map { instances[$0] }
+            dropped += bare.filter { $0 }.count
         }
         analysis += Date().timeIntervalSince(t)
         run += 1
@@ -360,13 +386,34 @@ if let videoURL {
 
 let builder = RoomMapBuilder(spec: objects)
 if arguments.contains("--trace") { builder.tracker.trace = { print("  " + $0) } }
-for wall in truth.walls {
-    builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(wall.center[0], wall.center[1], wall.center[2]),
-                                    xAxis: SIMD3(wall.along[0], wall.along[1], wall.along[2]), zAxis: SIMD3(0, 1, 0), extent: SIMD2(2 * wall.half, wall.height)))
+if let planes = truth.planes {
+    // A recording: the planes the phone had, as it had them.
+    for p in planes {
+        builder.update(plane: PlaneInfo(id: UUID(), kind: PlaneInfo.Kind(rawValue: p.kind) ?? .unknown, vertical: p.vertical,
+                                        center: SIMD3(p.center[0], p.center[1], p.center[2]), xAxis: SIMD3(p.xAxis[0], p.xAxis[1], p.xAxis[2]),
+                                        zAxis: SIMD3(p.zAxis[0], p.zAxis[1], p.zAxis[2]), extent: SIMD2(p.extent[0], p.extent[1])))
+    }
+} else if !arguments.contains("--bare") {
+    // The room's measured walls, standing in for the ones the phone's tracking finds. (--bare: none
+    // at all, as before the tracking has found any.) No floor is handed over unless --given-floor:
+    // the phone has to see it for itself, and its height here is known to be 0.
+    for wall in truth.walls {
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(wall.center[0], wall.center[1], wall.center[2]),
+                                        xAxis: SIMD3(wall.along[0], wall.along[1], wall.along[2]), zAxis: SIMD3(0, 1, 0), extent: SIMD2(2 * wall.half, wall.height)))
+    }
+    if arguments.contains("--given-floor") {
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 0, 1), extent: SIMD2(truth.room.width, truth.room.depth)))
+    }
 }
-// The floor, as the phone's tracking would have found it.
-builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
-                                zAxis: SIMD3(0, 0, 1), extent: SIMD2(truth.room.width, truth.room.depth)))
+/// For a recording the map's picture covers what the tracking points cover (there is no measured room).
+let mapBounds: (SIMD2<Float>, SIMD2<Float>)? = truth.planes == nil ? nil : {
+    let xs = truth.frames.flatMap { $0.points.map { $0[0] } }.sorted(), zs = truth.frames.flatMap { $0.points.map { $0[2] } }.sorted()
+    guard xs.count > 20 else { return (SIMD2(-3, -3), SIMD2(3, 3)) }
+    func at(_ v: [Float], _ q: Float) -> Float { v[min(v.count - 1, Int(Float(v.count) * q))] }
+    return (SIMD2(at(xs, 0.01) - 0.6, at(zs, 0.01) - 0.6), SIMD2(at(xs, 0.99) + 0.6, at(zs, 0.99) + 0.6))
+}()
+var floorSightings = 0
 var memory = SightingMemory(spec: objects)
 var outlinesShown = 0, heldBack = 0
 var namesShown: [String: Int] = [:]
@@ -384,8 +431,12 @@ for (n, frame) in frames.enumerated() {
     // Furniture the surface model sees as bare wall is not a thing of its own, as on the phone
     // (it may still turn out to be a door of a wardrobe the tracker knows).
     let surfaceMap = surfaceClasses(surfaces)
+    let depthMap = metricDepth(image, camera: camera)
+    func modelDepth(_ x: Float, _ y: Float) -> Float? {
+        depthMap.map { $0.data[min($0.height - 1, Int(y * Float($0.height))) * $0.width + min($0.width - 1, Int(x * Float($0.width)))] }
+    }
     let bare = instances.map { inst in
-        surfaceMap.map { objects.isOnBareSurface(inst, bare: structure, classes: $0.classes, width: $0.width, height: $0.height) } ?? false
+        surfaceMap.map { objects.isOnBareSurface(inst, bare: structure, classes: $0.classes, width: $0.width, height: $0.height, depthAt: modelDepth) } ?? false
     }
     onBareSurface += bare.filter { $0 }.count
     let onStructure = instances.map { inst in surfaceMap.map { inst.share(on: structure, classes: $0.classes, width: $0.width, height: $0.height) } ?? 0 }
@@ -405,7 +456,8 @@ for (n, frame) in frames.enumerated() {
     var fit: DepthScale.Fit?
     var observations: [ObjectObservation] = []
     var lastRatio: Float = -1
-    if let depth = metricDepth(image, camera: camera) {
+    let stepShares = instances.map { $0.depthStepShare(depthAt: modelDepth) ?? -1 }
+    if let depth = depthMap {
         framesWithDepth += 1
         if debug {
             let finite = depth.data.filter { $0.isFinite && $0 > 0 }.sorted()
@@ -439,6 +491,20 @@ for (n, frame) in frames.enumerated() {
         let (used, trusted) = DepthScale.correction(for: fitted)
         if trusted { framesWithFit += 1 }
         fit = used
+        // How high is the floor where the surface model sees floor, and how high is every part of the
+        // picture? (The room map takes the floor's height from these, as on the phone.)
+        if trusted {
+            func height(_ x: Float, _ y: Float) -> Float? {
+                let d = depth.data[Int(y * Float(depth.height)) * depth.width + Int(x * Float(depth.width))]
+                guard d > 0, d.isFinite, let z = used.metres(1 / d), z >= 0.3, z <= 6 else { return nil }
+                return camera.worldPoint(u: x * Float(camera.width), v: y * Float(camera.height), depth: z).y
+            }
+            let floorAt = surfaceMap.map { spec.floorPositions(classes: $0.classes, width: $0.width, height: $0.height).compactMap { height($0.x, $0.y) } } ?? []
+            var pointsAt: [Float] = []
+            for gy in 0..<24 { for gx in 0..<24 { if let h = height((Float(gx) + 0.5) / 24, (Float(gy) + 0.5) / 24) { pointsAt.append(h) } } }
+            builder.saw(floorAt: floorAt, pointsAt: pointsAt)
+            floorSightings += floorAt.count
+        }
         for (i, inst) in instances.enumerated() {
             let w = inst.maskWidth, h = inst.maskHeight
             var points: [SIMD3<Float>] = []
@@ -480,9 +546,9 @@ for (n, frame) in frames.enumerated() {
             let xs = o.points.map(\.x), ys = o.points.map(\.y), zs = o.points.map(\.z)
             let bounds = o.points.isEmpty ? "null" : String(format: "[[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f]]", xs.min()!, ys.min()!, zs.min()!, xs.max()!, ys.max()!, zs.max()!)
             let m = i < matches.count ? matches[i] : nil
-            items.append(String(format: "{\"label\":\"%@\",\"name\":\"%@\",\"shown\":%@,\"bare\":%@,\"conf\":%.2f,\"quality\":%@,\"share\":%.4f,\"structure\":%.2f,\"door\":%.2f,\"points\":%d,\"bounds\":%@,\"track\":%@,\"placed\":%@}",
+            items.append(String(format: "{\"label\":\"%@\",\"name\":\"%@\",\"shown\":%@,\"bare\":%@,\"conf\":%.2f,\"quality\":%@,\"share\":%.4f,\"structure\":%.2f,\"steps\":%.2f,\"door\":%.2f,\"points\":%d,\"bounds\":%@,\"track\":%@,\"placed\":%@}",
                                 objects.info(o.classIndex)?.label ?? "?", names[i], shown[i] ? "true" : "false", bare[i] ? "true" : "false",
-                                o.confidence, inst.quality.map { String(format: "%.2f", $0) } ?? "null", inst.share, onStructure[i], onDoor[i], o.points.count, bounds,
+                                o.confidence, inst.quality.map { String(format: "%.2f", $0) } ?? "null", inst.share, onStructure[i], stepShares[i], onDoor[i], o.points.count, bounds,
                                 m.map { "\"\($0.objectID)\"" } ?? "null", m?.placed == true ? "true" : "false"))
         }
         let fitText = fit.map { String(format: "{\"a\":%.3f,\"b\":%.3f,\"samples\":%d,\"error\":%.3f}", $0.a, $0.b, $0.samples, $0.error) } ?? "null"
@@ -500,7 +566,8 @@ for (n, frame) in frames.enumerated() {
                    names: instances.indices.filter { shown[$0] }.map { names[$0] }, spec: objects,
                    to: dumpFolder.appendingPathComponent(String(format: "screen/%05d.jpg", n + 1)), plain: true)
         Draw.map(builder.build(), truth: truth.objects, walls: truth.walls, to: dumpFolder.appendingPathComponent(String(format: "map/%05d.png", n + 1)),
-                 roomOnly: true, camera: camera, caption: "the room map so far (dashed: measured afterwards on the Mac)")
+                 roomOnly: true, camera: camera, bounds: mapBounds,
+                 caption: truth.planes == nil ? "the room map so far (dashed: measured afterwards on the Mac)" : "the room map so far")
     }
     analysisTime += Date().timeIntervalSince(t)
     framesRun += 1
@@ -520,6 +587,19 @@ print(String(format: "\n%@: %d frames, %.0f ms a frame on this Mac, depth on %d,
              truth.space, framesRun, analysisTime / Double(max(1, framesRun)) * 1000, framesWithDepth, framesWithFit, observationsTotal))
 print("\(outlinesShown) outlines shown; \(heldBack) detections held back as seen only once; \(onBareSurface) on bare wall, floor or ceiling")
 print("names shown: \(namesShown.sorted { $0.value > $1.value }.prefix(16).map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
+print("floor: \(builder.floorHeight.map { String(format: "%+.2f m", $0) } ?? "not found") from \(floorSightings) sightings"
+      + (truth.planes == nil ? " (measured: 0.00)" : ""))
+if arguments.contains("--trace") {
+    for o in map.objects where o.label == "bed" { print("  bed voxels along x: " + builder.tracker.hitProfile(of: o.id, axis: 0)) }
+    let seen = builder.heightsSeen
+    let total = seen.map(\.points).reduce(0, +)
+    var below = 0
+    print("  height   floor seen   all points   share of all points below")
+    for level in seen.prefix(60) {
+        print(String(format: "  %+5.2f   %10d   %10d   %5.1f%%", level.height, level.floor, level.points, Double(below) / Double(max(1, total)) * 100))
+        below += level.points
+    }
+}
 print("placed \(map.objects.count) objects; room yaw \(map.roomYaw.map { String(format: "%.2f", $0) } ?? "none")")
 func overlap(_ aMin: SIMD3<Float>, _ aMax: SIMD3<Float>, _ bMin: SIMD3<Float>, _ bMax: SIMD3<Float>) -> Float {
     let w = max(0, min(aMax.x, bMax.x) - max(aMin.x, bMin.x)), d = max(0, min(aMax.z, bMax.z) - max(aMin.z, bMin.z))
@@ -553,7 +633,7 @@ for o in map.objects {
 let extra = map.objects.filter { !matchedPlaced.contains($0.id) }
 print("  \(extra.count) placed objects match nothing measured: \(extra.map { "\($0.label) \(String(format: "%.1fx%.1f", $0.size.x, $0.size.z))" }.joined(separator: ", "))")
 if let dumpFolder {
-    Draw.map(map, truth: truth.objects, walls: truth.walls, to: dumpFolder.appendingPathComponent("map.png"))
+    Draw.map(map, truth: truth.objects, walls: truth.walls, to: dumpFolder.appendingPathComponent("map.png"), bounds: mapBounds)
     try? (records.joined(separator: "\n") + "\n").write(to: dumpFolder.appendingPathComponent("frames.jsonl"), atomically: true, encoding: .utf8)
 }
 print("labels seen: \(labelsSeen.sorted { $0.value > $1.value }.prefix(12).map { "\($0.key) \($0.value)" }.joined(separator: ", "))")

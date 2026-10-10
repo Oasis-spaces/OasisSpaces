@@ -147,6 +147,50 @@ def test_nothing_is_placed_without_evidence_or_where_the_phone_was():
     assert 0 not in keys and keys <= {1, 2, 3}
 
 
+def test_with_tracks_the_evidence_is_every_frame_the_object_shows_in_with_what_lies_on_it():
+    import json
+    import tempfile
+
+    import tracking
+
+    frames = [f"frame_{i:05d}.jpg" for i in range(1, 101)]
+    big = np.zeros((256, 256), bool); big[100:200, 60:180] = True        # the bed
+    small = np.zeros((256, 256), bool); small[110:130, 80:110] = True     # a blanket on it
+    stray = np.zeros((256, 256), bool); stray[10:30, 10:30] = True        # a blanket elsewhere
+    W, H = 1080, 1920
+    box = lambda m: tracking.mask_box(m, W, H)
+    tracks = tracking.Tracks(frames, (W, H), [
+        {"id": 0, "label": "bed", "votes": {"bed": 3.0}, "seed": frames[0],
+         "frames": {f: {"box": box(big), "score": 0.95} for f in frames[:90]}},
+        {"id": 1, "label": "blanket", "votes": {"blanket": 1.0}, "seed": frames[0],
+         "frames": {f: {"box": box(small), "score": 0.9} for f in frames[:90]}},
+        {"id": 2, "label": "blanket", "votes": {"blanket": 1.0}, "seed": frames[0],
+         "frames": {f: {"box": box(stray), "score": 0.9} for f in frames[:90]}},
+    ], {**{tracking.Tracks.key(0, f): np.packbits(big) for f in frames[:90]},
+        **{tracking.Tracks.key(1, f): np.packbits(small) for f in frames[:90]},
+        **{tracking.Tracks.key(2, f): np.packbits(stray) for f in frames[:90]}})
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        tracks.save(space / "workspace" / "tracks")
+        (space / "densify.json").write_text(json.dumps({"detections": tracks.all_detections()}))
+        (space / "objects.json").write_text(json.dumps({"objects": [{"name": "blanket", "role": "loose"}]}))
+        views = {f: view([0, 0, 0], [0, 1, 0]) for f in frames}
+        kept = pl.views_of
+        pl.views_of = lambda space, names: {n: views[n] for n in names if n in views}
+        try:
+            evidence = pl.mask_evidence(space, "bed", log=lambda *_: None)
+        finally:
+            pl.views_of = kept
+    assert len(evidence["frames"]) == pl.MAX_EVIDENCE_FRAMES              # 90 frames, evenly thinned
+    assert frames[0] in evidence["frames"] and frames[89] in evidence["frames"]
+    assert evidence["unseen"] == {}                                        # no frame shows nothing of it
+    mask = evidence["frames"][frames[0]]["mask"]
+    assert mask.shape == (H // pl.GRID, W // pl.GRID)
+    assert mask[int(115 * mask.shape[0] / 256), int(90 * mask.shape[1] / 256)]     # the blanket on the bed counts
+    assert not mask[int(20 * mask.shape[0] / 256), int(20 * mask.shape[1] / 256)]  # the stray one does not
+    assert pl.spaced(list("abcdefgh"), 3) == ["a", "e", "h"] and pl.spaced(list("ab"), 3) == ["a", "b"]
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

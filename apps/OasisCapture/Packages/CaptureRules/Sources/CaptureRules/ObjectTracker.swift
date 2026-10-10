@@ -41,7 +41,12 @@ public struct ObservationMatch: Sendable, Equatable {
 /// window or mirror that lies in the plane of a standing wardrobe's front and
 /// adjoins it is one of the wardrobe's doors (a patterned sliding door is a
 /// curtain to the detector) and becomes part of the wardrobe, whichever was
-/// seen first. An object
+/// seen first. And what is seen again from the same standpoint in the same
+/// direction is the same thing, wherever that frame's depth put it: turning
+/// on the spot gives the depth nothing to hold on to, it jumps from frame to
+/// frame, and one monitor became three in a row along the line of sight. Its
+/// points join the object all the same; the box is of where it was seen
+/// most (the busiest connected part), so the stray depths fall away. An object
 /// remembers every voxel its observations covered, with a hit count, so its
 /// box is the extent of everything seen of it from every angle, not of the
 /// current view; once the object is established a voxel needs two hits, and
@@ -84,6 +89,9 @@ public final class ObjectTracker {
         var extent: Extent?
         /// Made from a doubtful observation: it lasts only if it turns out to be a wardrobe's door.
         var doubtful = false
+        /// Where it was last seen from, and where its sighting's middle was (see sameSight).
+        var seenFrom: SIMD3<Float>?
+        var seenAt = SIMD3<Float>(repeating: 0)
     }
 
     /// How often a voxel was seen as part of an object, and over which frames.
@@ -203,6 +211,24 @@ public final class ObjectTracker {
             matchOf[pair.observation] = pair.track
             taken.insert(pair.track)
         }
+        // What found no object where its depth put it may be one seen from here before, in this direction.
+        if let eye = camera?.position, t.standpointMetres > 0 {
+            var sights: [Pair] = []
+            for (pi, p) in prepared.enumerated() where matchOf[pi] == nil && !p.doubtful {
+                let middle = (p.min + p.max) / 2
+                let radius = simd_length(p.max - p.min) / 2
+                for (ti, track) in tracks.enumerated() where !taken.contains(ti) && spec.kinGroup(track.classIndex) == p.kin {
+                    if let off = Self.sameSight(from: eye, at: middle, radius: radius, track: track, within: t.standpointMetres) {
+                        sights.append(Pair(observation: pi, track: ti, score: -off))
+                    }
+                }
+            }
+            sights.sort { $0.score > $1.score }
+            for pair in sights where matchOf[pair.observation] == nil && !taken.contains(pair.track) {
+                matchOf[pair.observation] = pair.track
+                taken.insert(pair.track)
+            }
+        }
 
         var results = [ObservationMatch?](repeating: nil, count: observations.count)
         for (pi, p) in prepared.enumerated() {
@@ -213,6 +239,8 @@ public final class ObjectTracker {
                 tracks[ti].observations += 1
                 tracks[ti].lastSeen = frame
                 tracks[ti].missedInView = 0
+                tracks[ti].seenFrom = camera?.position
+                tracks[ti].seenAt = (p.min + p.max) / 2
                 relabel(&tracks[ti])
                 results[p.index] = match(tracks[ti])
             } else {
@@ -224,6 +252,8 @@ public final class ObjectTracker {
                                   voxels: voxels, observations: 1, lastSeen: frame, missedInView: 0,
                                   box: nil, measured: nil, born: frame)
                 track.doubtful = p.doubtful
+                track.seenFrom = camera?.position
+                track.seenAt = (p.min + p.max) / 2
                 nextID += 1
                 tracks.append(track)
                 results[p.index] = match(track)
@@ -328,6 +358,19 @@ public final class ObjectTracker {
 
     /// Families whose objects are seen in parts (a door at a time, one end of a bed).
     static let seenInParts: Set<String> = ["bed", "storage"]
+
+    /// Whether something seen from `eye` with its middle at `middle` is the
+    /// track seen before: from the same standpoint (within a step) the two
+    /// lie in the same direction (within half the thing's apparent size, or
+    /// four degrees). Returns how far off the directions are, radians.
+    static func sameSight(from eye: SIMD3<Float>, at middle: SIMD3<Float>, radius: Float, track: Track, within step: Float) -> Float? {
+        guard let from = track.seenFrom, simd_distance(eye, from) <= step else { return nil }
+        let now = middle - eye, then = track.seenAt - from
+        let far = simd_length(now), was = simd_length(then)
+        guard far > 0.2, was > 0.2 else { return nil }
+        let off = acos(max(-1, min(1, simd_dot(now, then) / (far * was))))
+        return off <= max(4 * .pi / 180, 0.5 * atan(radius / far)) ? off : nil
+    }
 
     /// Flat things that can be a wardrobe's door: what the detector calls a
     /// patterned or mirrored door. (Not "door": a room's door beside a fitted
@@ -557,6 +600,26 @@ public final class ObjectTracker {
     private static func thickOverlap(_ a: ObjectBox, _ b: ObjectBox) -> Float {
         let (aMin, aMax) = thickened(a.min, a.max), (bMin, bMax) = thickened(b.min, b.max)
         return RoomMapBuilder.footprintOverlap(aMin, aMax, bMin, bMax)
+    }
+
+    /// For diagnosis: along `axis` (0 x, 1 y, 2 z), per 5 cm bin, how many of an object's voxels
+    /// are trusted (count as part of it) and how many are not, with their hit counts.
+    public func hitProfile(of id: String, axis: Int) -> String {
+        guard let track = tracks.first(where: { $0.id == id || $0.mergedIDs.contains(id) }) else { return "no \(id)" }
+        let v = spec.tracker.voxelMetres, t = spec.tracker
+        let established = track.observations >= 3
+        var bins: [Int: (trusted: Int, all: Int, hits: Int)] = [:]
+        for (k, h) in track.voxels {
+            let key = axis == 0 ? Int(k.x) : axis == 1 ? Int(k.y) : Int(k.z)
+            var b = bins[key] ?? (0, 0, 0)
+            b.all += 1; b.hits += h.count
+            let trusted = h.count >= 2 && (!established || h.vouched || h.last - h.first >= t.glimpseAnalyses || h.count >= 4 || 2 * h.count >= track.observations)
+            if trusted { b.trusted += 1 }
+            bins[key] = b
+        }
+        return "\(track.id) (\(track.observations) seen): " + bins.keys.sorted().map { k in
+            String(format: "%+.2f:%d/%d(%d)", Float(k) * v, bins[k]!.trusted, bins[k]!.all, bins[k]!.hits)
+        }.joined(separator: " ")
     }
 
     private func describe(_ track: Track) -> String {

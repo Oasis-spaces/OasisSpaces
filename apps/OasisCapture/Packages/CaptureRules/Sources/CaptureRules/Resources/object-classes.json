@@ -10,6 +10,7 @@
  "maskThreshold": 0.5,
  "minShare": 0.002,
  "bareSurfaceShare": 0.9,
+ "bareStepShare": 0.2,
  "kin": {
   "comment": "Families the detector confuses on one object: they match one tracked object, whose label is the most-voted class with hysteresis.",
   "sitting": [

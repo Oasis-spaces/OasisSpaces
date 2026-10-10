@@ -81,4 +81,25 @@ final class DepthFusionTests: XCTestCase {
         let far = OutlineLift.lift(outline: outline, centroid: SIMD2(0.5, 0.5), camera: camera, fallback: 3) { _, _ in 40 }
         XCTAssertEqual(camera.project(far.outline[0])!.depth, 3, accuracy: 1e-4)
     }
+
+    func testTheMiddleOfAWidePictureIsTakenByTheSameLens() {
+        // The phone's camera at 3840 x 2160; the models take 4:3.
+        let wide = PinholeCamera(fx: 2811, fy: 2811, cx: 1948, cy: 1084, width: 3840, height: 2160, transform: matrix_identity_float4x4)
+        let (x, y, middle) = wide.centred(aspect: 4.0 / 3)
+        XCTAssertEqual([x, y, middle.width, middle.height], [480, 0, 2880, 2160])
+        XCTAssertEqual(middle.fx, wide.fx)
+        // A point in the room lands on the same place of the picture, counted from the part's corner.
+        let point = SIMD3<Float>(0.4, -0.2, -2.5)
+        let inWide = wide.project(point)!, inMiddle = middle.project(point)!
+        XCTAssertEqual(inMiddle.u, inWide.u - 480, accuracy: 1e-3)
+        XCTAssertEqual(inMiddle.v, inWide.v, accuracy: 1e-3)
+        // A 4:3 camera is left as it is; a tall one loses its top and bottom.
+        let plain = PinholeCamera(fx: 1500, fy: 1500, cx: 960, cy: 720, width: 1920, height: 1440, transform: matrix_identity_float4x4)
+        XCTAssertEqual(plain.centred(aspect: 4.0 / 3).camera.width, 1920)
+        XCTAssertEqual(plain.centred(aspect: 4.0 / 3).x, 0)
+        let tall = PinholeCamera(fx: 1500, fy: 1500, cx: 540, cy: 960, width: 1080, height: 1920, transform: matrix_identity_float4x4)
+        let (_, top, upright) = tall.centred(aspect: 3.0 / 4)
+        XCTAssertEqual([top, upright.height], [240, 1440])
+        XCTAssertEqual(upright.cy, 720)
+    }
 }

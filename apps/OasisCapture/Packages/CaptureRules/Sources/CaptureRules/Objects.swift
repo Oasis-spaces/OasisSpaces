@@ -42,6 +42,9 @@ public struct ObjectSpec: Codable, Sendable {
         public var bodyMetres: Float = 1.5
         /// Hits within this many analysed frames of each other are one glimpse.
         public var glimpseAnalyses: Int = 4
+        /// Seen again from within this distance of where it was seen before, in the same direction,
+        /// a thing is the same thing whatever its depth that time (0 turns this off).
+        public var standpointMetres: Float = 0.3
         /// Furniture whose back is this close to a wall reaches the wall.
         public var wallSnapMetres: Float = 0.2
         /// A wardrobe or appliance (seen only from the front) reaches a wall this far behind its front.
@@ -70,6 +73,7 @@ public struct ObjectSpec: Codable, Sendable {
             floorReachMetres = try c.decodeIfPresent(Float.self, forKey: .floorReachMetres) ?? floorReachMetres
             bodyMetres = try c.decodeIfPresent(Float.self, forKey: .bodyMetres) ?? bodyMetres
             glimpseAnalyses = try c.decodeIfPresent(Int.self, forKey: .glimpseAnalyses) ?? glimpseAnalyses
+            standpointMetres = try c.decodeIfPresent(Float.self, forKey: .standpointMetres) ?? standpointMetres
             wallSnapMetres = try c.decodeIfPresent(Float.self, forKey: .wallSnapMetres) ?? wallSnapMetres
             unitDepthMetres = try c.decodeIfPresent(Float.self, forKey: .unitDepthMetres) ?? unitDepthMetres
             minBoxMetres = try c.decodeIfPresent(Float.self, forKey: .minBoxMetres) ?? minBoxMetres
@@ -111,13 +115,15 @@ public struct ObjectSpec: Codable, Sendable {
     /// A piece of furniture, a window or a curtain whose mask lies this much on what the
     /// surface model calls bare wall, floor or ceiling is the detector seeing things.
     public var bareSurfaceShare: Float
+    /// ... and with less than this share of its outline standing out in depth.
+    public var bareStepShare: Float
     public var kin: [String: [String]]
     public var tracker: Tracker
     public var screen: Screen
     public var classes: [ClassInfo]
 
     private enum CodingKeys: String, CodingKey {
-        case model, inputSize, confidence, iou, maskThreshold, minShare, bareSurfaceShare, kin, tracker, screen, classes
+        case model, inputSize, confidence, iou, maskThreshold, minShare, bareSurfaceShare, bareStepShare, kin, tracker, screen, classes
     }
 
     public init(from decoder: Decoder) throws {
@@ -129,6 +135,7 @@ public struct ObjectSpec: Codable, Sendable {
         maskThreshold = try c.decode(Float.self, forKey: .maskThreshold)
         minShare = try c.decodeIfPresent(Float.self, forKey: .minShare) ?? 0.002
         bareSurfaceShare = try c.decodeIfPresent(Float.self, forKey: .bareSurfaceShare) ?? 0.9
+        bareStepShare = try c.decodeIfPresent(Float.self, forKey: .bareStepShare) ?? 0.2
         tracker = try c.decodeIfPresent(Tracker.self, forKey: .tracker) ?? Tracker()
         screen = try c.decodeIfPresent(Screen.self, forKey: .screen) ?? Screen()
         classes = try c.decode([ClassInfo].self, forKey: .classes)
@@ -170,15 +177,25 @@ public struct ObjectSpec: Codable, Sendable {
 
     /// Whether a detection is the detector seeing things on a bare surface: a
     /// fridge that is a stretch of white wall, a window on a plain wall, a
-    /// curtain on a cupboard door. The surface model (`classes`, its class per
-    /// pixel of the same upright image; `bare`, its wall, floor and ceiling
-    /// classes) is asked what is under the mask. Only furniture, windows and
-    /// curtains are checked: screens, pictures, lights and rugs lie flat on a
-    /// surface by nature, and a door is often wall to the surface model.
-    public func isOnBareSurface(_ instance: Instance, bare: Set<Int32>, classes: [Int32], width: Int, height: Int) -> Bool {
+    /// curtain on a cupboard door. Two things must agree. The surface model
+    /// (`classes`, its class per pixel of the same upright image; `bare`, its
+    /// wall, floor and ceiling classes) sees bare surface under the mask; and
+    /// the thing stands out from nothing (`depthAt`: hardly any depth step
+    /// along its outline, see Instance.depthStepShare). The surface model
+    /// alone will not do: to it a plain white wardrobe is wall and a bed
+    /// under a pale cover is floor, and on rooms it was not tried on it threw
+    /// out a wardrobe in every frame and a bed the detector was 87% sure of.
+    /// What stands out from the wall behind it is never thrown out. Only
+    /// furniture, windows and curtains are checked: screens, pictures, lights
+    /// and rugs lie flat on a surface by nature, and a door is often wall to
+    /// the surface model. A thing too small for its outline to be read is kept.
+    public func isOnBareSurface(_ instance: Instance, bare: Set<Int32>, classes: [Int32], width: Int, height: Int,
+                                depthAt: (Float, Float) -> Float?) -> Bool {
         guard let info = info(instance.classIndex) else { return false }
         let checked = (info.boxed && !["rug", "screen"].contains(info.family)) || ["window", "curtain"].contains(info.family)
-        return checked && instance.share(on: bare, classes: classes, width: width, height: height) >= bareSurfaceShare
+        guard checked, instance.share(on: bare, classes: classes, width: width, height: height) >= bareSurfaceShare,
+              let steps = instance.depthStepShare(depthAt: depthAt) else { return false }
+        return steps < bareStepShare
     }
 
     /// The kin group a family belongs to (the family itself when it has none):
@@ -265,6 +282,43 @@ extension Instance {
             }
         }
         return all > 0 ? Float(on) / Float(all) : 0
+    }
+}
+
+extension Instance {
+    /// Share of this thing's outline across which the depth jumps: how much
+    /// of it stands out from what is behind. A piece of furniture is nearer
+    /// than the wall behind it along most of its outline; a stretch of wall
+    /// with a name (the detector's "fridge") lies in the wall's own plane and
+    /// has no step anywhere. `depthAt` answers a depth at a normalised upright
+    /// position (any unit: only ratios are used, so the model's own depth
+    /// serves where no tracking points have corrected it). At each sampled
+    /// place on the outline the surface just inside is carried on in a
+    /// straight line to just outside, so a wall seen at a slant is no step.
+    /// Nil when too little of the outline could be read (a small thing, or
+    /// one that fills the picture).
+    public func depthStepShare(tolerance: Float = 0.05, depthAt: (Float, Float) -> Float?) -> Float? {
+        let w = maskWidth, h = maskHeight, reach = 3
+        func depth(_ x: Int, _ y: Int) -> Float? {
+            guard let z = depthAt((Float(x) + 0.5) / Float(w), (Float(y) + 0.5) / Float(h)), z.isFinite, z > 0 else { return nil }
+            return z
+        }
+        var steps = 0, samples = 0
+        for y in 0..<h {
+            for x in 0..<w where mask[y * w + x] != 0 && (x + y) % 2 == 0 {
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] where !inside(x: x + dx, y: y + dy) {
+                    let ox = x + dx * (reach + 1), oy = y + dy * (reach + 1)
+                    guard ox >= 0, oy >= 0, ox < w, oy < h, !inside(x: ox, y: oy),
+                          inside(x: x - dx * reach, y: y - dy * reach), inside(x: x - dx * 2 * reach, y: y - dy * 2 * reach),
+                          let near = depth(x - dx * reach, y - dy * reach), let further = depth(x - dx * 2 * reach, y - dy * 2 * reach),
+                          let outside = depth(ox, oy) else { continue }
+                    let carriedOn = near + (near - further) * Float(2 * reach + 1) / Float(reach)
+                    samples += 1
+                    if abs(outside - carriedOn) > tolerance * min(near, outside) { steps += 1 }
+                }
+            }
+        }
+        return samples >= 12 ? Float(steps) / Float(samples) : nil
     }
 }
 

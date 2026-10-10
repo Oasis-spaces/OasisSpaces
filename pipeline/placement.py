@@ -58,6 +58,7 @@ OFFSET_STEP_M = 0.1
 TYPICAL_M = {"wardrobe": (1.0, 0.55, 2.0), "bed": (1.5, 1.9, 0.5), "table": (1.2, 0.6, 0.75), "seat": (0.5, 0.5, 0.45)}
 PRIOR_WEIGHT = 0.03         # breaks ties between sizes the masks cannot tell apart, toward the typical size
 MAX_INSTANCES = 2           # a room can hold two beds or two cupboards under one label
+MAX_EVIDENCE_FRAMES = 40    # with tracks every frame is evidence; this many, evenly spaced, is plenty
 LOOSE_ROLES = {"loose"}                                  # object-list roles that lie on furniture
 BEDDING = {"pillow", "blanket", "cushion", "duvet", "quilt", "bedsheet", "bed sheet"}
 ON_TOP_SHARE = 0.5          # a loose detection joins a piece when this much of it lies inside the piece's box
@@ -232,11 +233,22 @@ def scoring_window(dets: list[dict], width: int, height: int) -> tuple[int, int,
     return int(x0 / GRID), int(y0 / GRID), int(np.ceil(x1 / GRID)), int(np.ceil(y1 / GRID))
 
 
+def spaced(names: list[str], limit: int = MAX_EVIDENCE_FRAMES) -> list[str]:
+    """At most `limit` of the names, evenly spaced through the list."""
+    if len(names) <= limit:
+        return list(names)
+    picks = np.linspace(0, len(names) - 1, limit).round().astype(int)
+    return [names[i] for i in sorted(set(picks.tolist()))]
+
+
 def mask_evidence(space: Path, label: str, segmenter=None, log=print) -> dict:
-    """The keyframes that detected `label` (densify.json), each with its SAM
-    mask at the scoring raster (joined with what lies on it), its scoring
-    window when the frame cuts it off, its pose and lens; and the keyframes
-    that did not. Masks are cached in workspace/masks/<label>.v3.npz."""
+    """The frames that detected `label` (densify.json), each with its mask at
+    the scoring raster (joined with what lies on it), its scoring window when
+    the frame cuts it off, its pose and lens; and the frames that did not.
+    With tracks (tracking.py) the masks are the tracked outlines, in every
+    frame the object shows in, at most MAX_EVIDENCE_FRAMES evenly spaced;
+    otherwise SAM outlines the keyframes' detections, cached in
+    workspace/masks/<label>.v3.npz."""
     from PIL import Image
 
     space = Path(space)
@@ -245,15 +257,41 @@ def mask_evidence(space: Path, label: str, segmenter=None, log=print) -> dict:
     loose = loose_roles(space)
     hits = {name: [d for d in dets if d["label"] == label and d.get("score", 1) >= MIN_DETECTION]
             for name, dets in detections.items()}
-    seen = sorted(n for n, d in hits.items() if d)
-    unseen = sorted(n for n, d in hits.items() if not d)
+    seen = spaced(sorted(n for n, d in hits.items() if d))
+    unseen = spaced(sorted(n for n, d in hits.items() if not d))
     views = views_of(space, seen + unseen)
-    cache = space / "workspace" / "masks" / f"{label.replace(' ', '-')}.v3.npz"
+    tracks = None
+    if seen and all("track" in d for n in seen for d in hits[n]):
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from tracking import Tracks
+
+        tracks = Tracks.load(space / "workspace" / "tracks")
     masks: dict[str, np.ndarray] = {}
-    if cache.exists():
-        with np.load(cache) as stored:
-            masks = {k: stored[k] for k in stored.files}
-    missing = [n for n in seen if n not in masks and n in views]
+    if tracks is not None:
+        for name in seen:
+            if name not in views:
+                continue
+            view = views[name]
+            shape = (view["height"] // GRID, view["width"] // GRID)
+            union = np.zeros(shape, bool)
+            for d in with_what_lies_on_it(hits[name], detections[name], loose):
+                mask = tracks.mask(d["track"], name, shape) if "track" in d else None
+                if mask is not None:
+                    union |= mask
+                else:                                         # no outline: the detector's rectangle
+                    x0, y0, x1, y1 = (int(v / GRID) for v in d["box"])
+                    union[max(y0, 0):y1 + 1, max(x0, 0):x1 + 1] = True
+            masks[name] = union
+        log(f"    '{label}' outlined by its tracks in {len(masks)} frame(s), with what lies on it")
+        missing = []
+    else:
+        cache = space / "workspace" / "masks" / f"{label.replace(' ', '-')}.v3.npz"
+        if cache.exists():
+            with np.load(cache) as stored:
+                masks = {k: stored[k] for k in stored.files}
+        missing = [n for n in seen if n not in masks and n in views]
     if missing:
         if segmenter is None:
             import sys

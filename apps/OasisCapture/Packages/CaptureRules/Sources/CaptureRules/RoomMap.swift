@@ -121,10 +121,12 @@ public struct RoomMap: Sendable, Equatable {
 
     public var floors: [PlaneInfo] { planes.filter { !$0.vertical && $0.kind == .floor } }
 
-    /// Height of the floor: the median of the floor planes' centres. Nil without any.
+    /// Height of the floor as the tracking's planes have it: the lowest plane
+    /// called floor. Not to be relied on by itself (a bed's top is called
+    /// floor too): the room map takes the floor from what was seen, and
+    /// believes a plane only where the two agree (RoomMapBuilder.floorHeight).
     public var floorHeight: Float? {
-        let ys = floors.map(\.center.y).sorted()
-        return ys.isEmpty ? nil : ys[ys.count / 2]
+        floors.map(\.center.y).min()
     }
 
     /// The direction the room's walls run, radians in 0..<pi/2: the longest
@@ -172,6 +174,10 @@ public final class RoomMapBuilder {
     private var planes: [UUID: PlaneInfo] = [:]
     private var lastYaw: Float?
     private let lock = NSLock()
+    /// How often floor, and anything at all, was seen at each height, in 5 cm levels (see `saw`).
+    private var floorSeen: [Int: Int] = [:]
+    private var pointsSeen: [Int: Int] = [:]
+    private static let floorLevel: Float = 0.05
 
     public init(spec: ObjectSpec) {
         self.spec = spec
@@ -183,6 +189,8 @@ public final class RoomMapBuilder {
             planes = [:]
             tracker.reset()
             lastYaw = nil
+            floorSeen = [:]
+            pointsSeen = [:]
         }
     }
 
@@ -192,6 +200,83 @@ public final class RoomMapBuilder {
 
     public func remove(plane id: UUID) {
         lock.withLock { planes[id] = nil }
+    }
+
+    /// What one analysed frame showed of the room's heights, from depth that
+    /// could be trusted: `floorAt`, the heights of points where the surface
+    /// model saw floor; `pointsAt`, the heights of points all over the picture.
+    /// The floor's height is taken from these, not from the tracking's planes:
+    /// without a classification every level patch is a "floor" to ARKit, and a
+    /// recording made sitting on a bed had the bed's top as its floor, which
+    /// put everything below the mattress under the floor (thrown away) and
+    /// made the bed 9 cm tall.
+    public func saw(floorAt: [Float], pointsAt: [Float]) {
+        lock.withLock {
+            for h in floorAt where h.isFinite { floorSeen[Self.level(h), default: 0] += 1 }
+            for h in pointsAt where h.isFinite { pointsSeen[Self.level(h), default: 0] += 1 }
+        }
+    }
+
+    /// The floor's height, as known now (see `floor(seen:points:planes:)`).
+    public var floorHeight: Float? {
+        lock.withLock { Self.floor(seen: floorSeen, points: pointsSeen, planes: RoomMap(planes: Array(planes.values))) }
+    }
+
+    /// How often floor, and anything at all, was seen at each level (its lower edge in metres), for diagnosis.
+    public var heightsSeen: [(height: Float, floor: Int, points: Int)] {
+        lock.withLock {
+            Set(floorSeen.keys).union(pointsSeen.keys).sorted().map { (Float($0) * Self.floorLevel, floorSeen[$0] ?? 0, pointsSeen[$0] ?? 0) }
+        }
+    }
+
+    private static func level(_ height: Float) -> Int { Int((height / floorLevel).rounded(.down)) }
+
+    /// The floor's height from what was seen.
+    ///
+    /// Nothing lies under a floor. So it is the lowest level at which the
+    /// surface model saw floor at all often (2% of its floor sightings: it
+    /// also calls a white bedsheet floor, five times as often as the floor
+    /// itself in a room filmed looking up, but that lies above), provided
+    /// hardly any point of anything lies well below that level. Failing that
+    /// (a floor the model never names), it is where the points stop: the level
+    /// with 1.5% of all points below it, a hand high when the floor is seldom
+    /// in view but never a bed's height out. A plane the tracking calls floor
+    /// is believed when it lies within 15 cm of that, and is then the finer
+    /// measurement. Nil until enough has been seen: before that nothing is
+    /// placed either.
+    static func floor(seen: [Int: Int], points: [Int: Int], planes: RoomMap) -> Float? {
+        let all = points.values.reduce(0, +)
+        var estimate: Float?
+        let sightings = seen.values.reduce(0, +)
+        if sightings >= 100 {
+            let needed = max(10, sightings / 50)
+            if let lowest = seen.filter({ $0.value >= needed }).keys.min() {
+                let under = points.filter { $0.key < lowest - 5 }.values.reduce(0, +)
+                if all == 0 || under * 20 < all {
+                    // The mean height of the sightings at that level and the two above (one surface, its depth a little uneven).
+                    var sum: Float = 0, count: Float = 0
+                    for l in lowest...(lowest + 2) {
+                        let n = Float(seen[l] ?? 0)
+                        sum += n * (Float(l) + 0.5) * floorLevel
+                        count += n
+                    }
+                    estimate = sum / count
+                }
+            }
+        }
+        if estimate == nil, all >= 2000 {
+            var below = 0
+            for l in points.keys.sorted() {
+                below += points[l] ?? 0
+                if below * 1000 >= all * 15 {
+                    estimate = (Float(l) + 0.5) * floorLevel
+                    break
+                }
+            }
+        }
+        guard let estimate else { return nil }
+        let measured = planes.floors.map(\.center.y).filter { abs($0 - estimate) <= 0.15 }.min { abs($0 - estimate) < abs($1 - estimate) }
+        return measured ?? estimate
     }
 
     /// The direction the walls run, as known now.
@@ -208,7 +293,7 @@ public final class RoomMapBuilder {
             // Walls found later turn every box already placed.
             if let last = lastYaw, abs(last - yaw) > 0.05 { tracker.reorient(yaw: yaw) }
             lastYaw = yaw
-            let floor = map.floorHeight, walls = map.walls
+            let floor = Self.floor(seen: floorSeen, points: pointsSeen, planes: map), walls = map.walls
             let possible = observations.map { Self.withinRoom($0, floor: floor, walls: walls, camera: camera) }
             return tracker.observe(possible, yaw: yaw, floor: floor, camera: camera)
         }
@@ -261,7 +346,7 @@ public final class RoomMapBuilder {
         lock.withLock {
             var map = RoomMap()
             map.planes = planes.values.sorted { $0.id.uuidString < $1.id.uuidString }
-            let floor = map.floorHeight, walls = map.walls
+            let floor = Self.floor(seen: floorSeen, points: pointsSeen, planes: map), walls = map.walls
             let seen = tracker.objects
             map.objects = seen.compactMap { box in
                 // What rests on another piece (a box on a stool) does not reach the floor.

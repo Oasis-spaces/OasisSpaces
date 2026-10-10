@@ -25,6 +25,11 @@ final class RoomMapTests: XCTestCase {
         return out
     }
 
+    /// The floor seen at `height`, as a scan would have seen it: floor there, and nothing below it.
+    private func seeFloor(_ builder: RoomMapBuilder, at height: Float = 0) {
+        builder.saw(floorAt: (0..<300).map { height + Float($0 % 3) * 0.01 }, pointsAt: (0..<3000).map { height + Float($0 % 250) * 0.01 })
+    }
+
     private func observation(_ name: String, from lo: SIMD3<Float>, to hi: SIMD3<Float>, confidence: Float = 0.7) -> ObjectObservation {
         ObjectObservation(classIndex: cls(name), confidence: confidence, points: points(from: lo, to: hi))
     }
@@ -194,6 +199,7 @@ final class RoomMapTests: XCTestCase {
         let builder = RoomMapBuilder(spec: spec)
         builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
                                         zAxis: SIMD3(0, 0, 1), extent: SIMD2(4, 4)))
+        seeFloor(builder)
         builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(0, 1.2, 2), xAxis: SIMD3(1, 0, 0),
                                         zAxis: SIMD3(0, 1, 0), extent: SIMD2(4, 2.4)))
         // Only the wardrobe's doors are seen (0.6 m in front of the wall), from knee height up;
@@ -254,6 +260,7 @@ final class RoomMapTests: XCTestCase {
         let builder = RoomMapBuilder(spec: spec)
         builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
                                         zAxis: SIMD3(0, 0, 1), extent: SIMD2(4, 4)))
+        seeFloor(builder)
         builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(0, 1.2, -2), xAxis: SIMD3(1, 0, 0),
                                         zAxis: SIMD3(0, 1, 0), extent: SIMD2(4, 2.4)))
         let eye = camera(at: SIMD3(0, 1.4, 1))
@@ -282,6 +289,7 @@ final class RoomMapTests: XCTestCase {
         let builder = RoomMapBuilder(spec: spec)
         builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
                                         zAxis: SIMD3(0, 0, 1), extent: SIMD2(4, 4)))
+        seeFloor(builder)
         builder.update(plane: PlaneInfo(id: UUID(), kind: .wall, vertical: true, center: SIMD3(0, 1.2, 2), xAxis: SIMD3(1, 0, 0),
                                         zAxis: SIMD3(0, 1, 0), extent: SIMD2(4, 2.4)))
         // A box lying on a stool; a wardrobe on the wall with a chair's worth of clutter in front taken for part of it.
@@ -308,7 +316,8 @@ final class RoomMapTests: XCTestCase {
             return Instance(classIndex: cls(name), confidence: 0.6, minX: 0, minY: 0, maxX: 1, maxY: 1, mask: mask,
                             maskWidth: 32, maskHeight: 32, area: 24 * columns.count)
         }
-        func seeingThings(_ i: Instance) -> Bool { spec.isOnBareSurface(i, bare: [wall], classes: classes, width: 64, height: 64) }
+        // The wall is flat: 3 m away everywhere.
+        func seeingThings(_ i: Instance) -> Bool { spec.isOnBareSurface(i, bare: [wall], classes: classes, width: 64, height: 64) { _, _ in 3 } }
         XCTAssertEqual(instance("refrigerator", columns: 2..<14).share(on: [wall], classes: classes, width: 64, height: 64), 1, accuracy: 0.01)
         XCTAssertTrue(seeingThings(instance("refrigerator", columns: 2..<14)), "a fridge that is a stretch of wall")
         XCTAssertTrue(seeingThings(instance("window", columns: 2..<14)))
@@ -317,6 +326,15 @@ final class RoomMapTests: XCTestCase {
         XCTAssertFalse(seeingThings(instance("television", columns: 2..<14)), "a screen hangs on a wall")
         XCTAssertFalse(seeingThings(instance("door", columns: 2..<14)), "a door is often wall to the surface model")
         XCTAssertFalse(seeingThings(instance("rug", columns: 2..<14)))
+        // A plain white wardrobe is wall to the surface model too, but it stands half a metre out
+        // from the wall behind it: what stands out is never thrown out.
+        let whiteWardrobe = instance("wardrobe", columns: 4..<14)
+        func depth(_ x: Float, _ y: Float) -> Float? { x >= 4.0 / 32 && x < 14.0 / 32 && y >= 4.0 / 32 && y < 28.0 / 32 ? 2.4 : 3 }
+        XCTAssertEqual(whiteWardrobe.depthStepShare(depthAt: depth) ?? 0, 1, accuracy: 0.01)
+        XCTAssertFalse(spec.isOnBareSurface(whiteWardrobe, bare: [wall], classes: classes, width: 64, height: 64, depthAt: depth))
+        // The same patch of a wall seen at a slant has no step: its depth runs on steadily past the outline.
+        XCTAssertEqual(whiteWardrobe.depthStepShare { x, _ in 2 + 2 * x } ?? 1, 0, accuracy: 0.01)
+        XCTAssertTrue(spec.isOnBareSurface(whiteWardrobe, bare: [wall], classes: classes, width: 64, height: 64) { x, _ in 2 + 2 * x })
     }
 
     /// A wall along x at z = 2 (so the room's direction is known), and optionally one along z at x = 2 and the floor.
@@ -330,6 +348,7 @@ final class RoomMapTests: XCTestCase {
         if floor {
             builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0, 0), xAxis: SIMD3(1, 0, 0),
                                             zAxis: SIMD3(0, 0, 1), extent: SIMD2(6, 6)))
+            seeFloor(builder)
         }
     }
 
@@ -457,6 +476,40 @@ final class RoomMapTests: XCTestCase {
         let s = Sighting(classIndex: 0, confidence: 1, centre: SIMD2(0.5, 0.5), size: SIMD2(0.2, 0.2), camera: camera, sensorLandscape: true)
         XCTAssertEqual(s.direction.x, -1, accuracy: 1e-4)
         XCTAssertEqual(s.radius, atan(sqrt(288 * 288 + 384 * 384) / 2 / 1000), accuracy: 1e-4)
+    }
+
+    func testTheFloorIsTheLowestPlaceFloorWasSeenNotWhereItWasSeenMost() {
+        // A room filmed looking up: the floor (height 0) is seldom in view, the white bedsheet half a
+        // metre up is called floor five times as often, and a tenth of the room lies below the sheet.
+        let builder = RoomMapBuilder(spec: spec)
+        var floorAt: [Float] = [], pointsAt: [Float] = []
+        for i in 0..<60 { floorAt.append(-0.04 + Float(i % 5) * 0.02) }
+        for i in 0..<500 { floorAt.append(0.5 + Float(i % 5) * 0.02) }
+        for i in 0..<5000 { pointsAt.append(0.01 + Float(i % 250) * 0.01) }
+        builder.saw(floorAt: floorAt, pointsAt: pointsAt)
+        XCTAssertEqual(builder.floorHeight ?? 9, 0, accuracy: 0.06)
+
+        // The tracking calls the bed's top a floor, and (2 cm off what was seen) the floor: the one that agrees is believed.
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, 0.52, 0), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 0, 1), extent: SIMD2(2, 1.5)))
+        XCTAssertEqual(builder.floorHeight ?? 9, 0, accuracy: 0.06, "a plane called floor that nothing seen agrees with is not the floor")
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(1, -0.02, 1), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 0, 1), extent: SIMD2(1, 1)))
+        XCTAssertEqual(builder.floorHeight ?? 9, -0.02, accuracy: 0.001, "where the two agree, the tracking's plane is the finer measurement")
+    }
+
+    func testAFloorNeverNamedIsWhereThePointsStopAndAPlaneAloneIsNotBelieved() {
+        // Nothing seen yet: a plane the tracking calls floor (a bed's top, sitting on the bed) is not taken on trust.
+        let builder = RoomMapBuilder(spec: spec)
+        builder.update(plane: PlaneInfo(id: UUID(), kind: .floor, vertical: false, center: SIMD3(0, -0.27, 0), xAxis: SIMD3(1, 0, 0),
+                                        zAxis: SIMD3(0, 0, 1), extent: SIMD2(0.95, 0.8)))
+        XCTAssertNil(builder.floorHeight)
+        // The surface model never calls this floor "floor" (only the bedspread, a little): the points of
+        // everything stop at -0.7 all the same.
+        var pointsAt: [Float] = []
+        for i in 0..<6000 { pointsAt.append(-0.7 + Float(i % 300) * 0.01) }
+        builder.saw(floorAt: (0..<120).map { _ in Float(-0.2) }, pointsAt: pointsAt)
+        XCTAssertEqual(builder.floorHeight ?? 9, -0.66, accuracy: 0.06)
     }
 
     func testBoxesTurnWithTheRoomsWalls() {

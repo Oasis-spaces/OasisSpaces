@@ -106,6 +106,27 @@ public struct PinholeCamera: Sendable {
         return SIMD3(p.x, p.y, p.z)
     }
 
+    /// The middle part of this camera's picture with the given shape (width
+    /// over height), and the camera that took just that part: the same lens
+    /// and place, a narrower sensor. The models take a 4:3 picture; a camera
+    /// running at 16:9 gives them its middle, not the whole of it squeezed
+    /// (squeezed, the depth model's geometry is a third out and furniture is
+    /// placed twice). `x`, `y`: the part's top-left corner in this camera's pixels.
+    public func centred(aspect: Float) -> (x: Int, y: Int, camera: PinholeCamera) {
+        var part = self
+        var x = 0, y = 0
+        if Float(width) > Float(height) * aspect * 1.01 {
+            part.width = Int((Float(height) * aspect / 2).rounded()) * 2
+            x = (width - part.width) / 2
+        } else if Float(height) > Float(width) / aspect * 1.01 {
+            part.height = Int((Float(width) / aspect / 2).rounded()) * 2
+            y = (height - part.height) / 2
+        }
+        part.cx -= Float(x)
+        part.cy -= Float(y)
+        return (x, y, part)
+    }
+
     /// Where the camera is.
     public var position: SIMD3<Float> { SIMD3(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z) }
 

@@ -87,6 +87,16 @@ final class Recorder {
             "exposure": camera.exposureDuration,
         ]
         if let light = frame.lightEstimate { line["ambient"] = light.ambientIntensity }
+        // The tracking's points, every tenth frame (about as often as frames are analysed), so that a
+        // recording can be played back through the perception on a Mac exactly as the phone had it
+        // (tools/phone_capture_export.py). Millimetres; at most 300 of them.
+        if (framesWritten - 1) % 10 == 0, let cloud = frame.rawFeaturePoints?.points {
+            let step = max(1, cloud.count / 300)
+            line["points"] = stride(from: 0, to: cloud.count, by: step).map { i -> [Double] in
+                let p = cloud[i]
+                return [(Double(p.x) * 1000).rounded() / 1000, (Double(p.y) * 1000).rounded() / 1000, (Double(p.z) * 1000).rounded() / 1000]
+            }
+        }
         if let data = try? JSONSerialization.data(withJSONObject: line) {
             poses?.write(data)
             poses?.write(Data([0x0A]))

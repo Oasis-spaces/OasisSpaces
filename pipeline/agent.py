@@ -283,10 +283,10 @@ def place_added_box(shapes: dict, item: dict, units: float) -> dict | str:
 
 # After detection, Claude checks the boxes against the list (see review_labels).
 LABEL_REVIEW_PROMPT = """You check object detection for a 3D reconstruction of a room filmed on a phone.
-An open-vocabulary detector (GroundingDINO) searched {keyframes} keyframes for exactly the names in this list; each name has a
+An open-vocabulary detector (GroundingDINO) searched {keyframes} for exactly the names in this list; each name has a
 role that tells the pipeline what to do with the points it labels:
 {listing}
-The first image shows {shown} of the keyframes with every detection box drawn and named (name and confidence). The other
+The first image shows {shown} of those frames with every detection box drawn and named (name and confidence). The other
 images are plain frames from the same video.
 
 Revise the list so the detector finds what is really in the room, and nothing else:
@@ -774,11 +774,16 @@ class Agent:
             for name in {d["label"] for d in dets}:
                 found_in[name] = found_in.get(name, 0) + 1
         listing = [{"name": o["name"], "role": o["role"],
-                    "keyframes_found_in": found_in.get(o["name"], 0),
+                    "frames_found_in": found_in.get(o["name"], 0),
                     "points_labelled": (dense.get("labels") or {}).get(o["name"], 0)}
                    for o in vocabulary.objects]
+        # With tracking (densify.json "tracks"), each thing the detector found
+        # was carried through the video, so the counts cover every frame.
+        searched = (f"{dense['tracks']['frames']} frames (each object it found on about twenty of them was "
+                    "tracked through the rest, so a box is a tracked outline's rectangle)"
+                    if dense.get("tracks") else f"{len(dense.get('detections') or {})} keyframes")
         verdict = self.advisor.ask_json(LABEL_REVIEW_PROMPT.format(
-            keyframes=len(dense.get("detections") or {}), shown=len(frames),
+            keyframes=searched, shown=len(frames),
             listing=json.dumps(listing), limit=MAX_OBJECTS - 4),
             [sheet] + (self.picked_frames("objects", 4) or self.sample_frames(4)), max_tokens=2000)
         if not verdict:

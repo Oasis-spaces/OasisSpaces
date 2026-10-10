@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
 from semantics import (SEGMENTER_ID, Detector, Segmenter, planned_vocabulary,
                        default_device, pixel_labels)
+from tracking import PROMPT_FRAMES, Tracker, prompt_frames
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
 MIN_ANCHORS = 12
@@ -282,6 +283,13 @@ def main():
     parser.add_argument("--no-outlines", action="store_true",
                         help="label whole detection rectangles instead of cutting "
                              "each one to the object's outline with SAM 2.1")
+    parser.add_argument("--track", choices=["auto", "on", "off"], default="auto",
+                        help="carry each detected object through every frame with SAM 2.1's "
+                             "video model (tracking.py), so it keeps one name and has an outline "
+                             "in every frame; auto = on CUDA only (it is slow on a Mac's GPU)")
+    parser.add_argument("--prompt-frames", type=int, default=None,
+                        help="about how many frames the detector runs on when tracking "
+                             f"(default {PROMPT_FRAMES})")
     parser.add_argument("--output", default=None,
                         help="output PLY (default <space>/cloud-dense.ply)")
     args = parser.parse_args()
@@ -387,6 +395,7 @@ def main():
         # detector loads, and the detector before back-projection.
         del predictor
         release_model_memory(torch)
+        tracking_on = args.track == "on" or (args.track == "auto" and device == "cuda")
         if use_detector:
             try:
                 vocabulary = planned_vocabulary(space)
@@ -399,24 +408,58 @@ def main():
                 print(f"Object detection: GroundingDINO-tiny on {detector.device}, "
                       f"{len(vocabulary.names)} names ({vocabulary.source} list): "
                       + ", ".join(vocabulary.names))
-                for f in frames:
-                    name = images[f["id"]]["name"]
-                    f["detections"] = detector.detect(Image.open(workspace / "images" / name))
-                    seen = ", ".join(sorted({d["label"] for d in f["detections"]}))
+                # With tracking, the detector also names things on frames in
+                # between the keyframes, so the tracker has more to go on.
+                key_names = sorted(images[f["id"]]["name"] for f in frames)
+                all_names = sorted(p.name for p in (workspace / "images").glob("*.jpg"))
+                prompt_names = (prompt_frames(all_names, key_names, args.prompt_frames or PROMPT_FRAMES)
+                                if tracking_on else key_names)
+                prompts = {}
+                for name in prompt_names:
+                    prompts[name] = detector.detect(Image.open(workspace / "images" / name))
+                    seen = ", ".join(sorted({d["label"] for d in prompts[name]}))
                     print(f"  {name}: {seen or 'nothing detected'}")
+                for f in frames:
+                    f["detections"] = prompts.get(images[f["id"]]["name"], [])
                 # Kept so stage 3 can show Claude the frame where each object
                 # was actually seen (agent.py object_frames).
                 meta["detections"] = {
-                    images[f["id"]]["name"]: [
-                        {"label": d["label"], "score": d["score"],
-                         "box": [round(v) for v in d["box"]]} for d in f["detections"]]
-                    for f in frames if f["detections"]}
+                    name: [{"label": d["label"], "score": d["score"],
+                            "box": [round(v) for v in d["box"]]} for d in dets]
+                    for name, dets in prompts.items() if dets}
                 del detector
                 release_model_memory(torch)
             except Exception as exc:  # transformers or weights missing
                 label_index = None
                 print(f"Object detection unavailable ({exc}); continuing without labels")
-        if label_index is not None:
+        tracks = None
+        if label_index is not None and tracking_on and any(prompts.values()):
+            try:
+                tracker = Tracker(device=device)
+                print(f"Object tracking: {SEGMENTER_ID} (video) on {tracker.device}, "
+                      f"{len(prompts)} prompt frames of {len(all_names)}")
+                tracks = tracker.run(workspace / "images", all_names, prompts, log=print)
+                del tracker
+                release_model_memory(torch)
+                tracks.save(workspace / "tracks")
+                # The keyframes are labelled by the tracked outlines, named by
+                # the detector's votes over the whole video; and every frame
+                # an object shows in is recorded for stage 3.
+                for f in frames:
+                    f["detections"] = tracks.detections(images[f["id"]]["name"], work_size=1024)
+                meta["detections"] = tracks.all_detections()
+                meta["tracks"] = tracks.summary()
+                meta["outlines"] = SEGMENTER_ID + " (video)"
+                counts = tracks.summary()["labels"]
+                print(f"  {len(tracks.tracks)} objects: "
+                      + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+            except Exception as exc:  # weights missing, or the model failed
+                tracks = None
+                print(f"Object tracking unavailable ({exc}); outlining the keyframes' detections instead")
+        elif label_index is not None and not tracking_on and args.track == "auto":
+            print(f"Object tracking: off on {device} (about a second an object and frame here; "
+                  "--track on forces it)")
+        if label_index is not None and tracks is None:
             # A rectangle around a bed also holds floor and curtain; cut each
             # one down to the object's own outline before labelling points.
             meta["outlines"] = "boxes"

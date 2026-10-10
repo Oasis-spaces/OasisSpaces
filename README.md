@@ -193,6 +193,24 @@ the agent's judgement:
    directly. Points on mirrors, windows and screens are dropped instead,
    because monocular depth there is a reflection or the view outside.
    `--no-semantics` turns this off.
+
+   **Tracked through the video** (`pipeline/tracking.py`, on CUDA by default,
+   `--track on` elsewhere). A detector names things a little differently in
+   every frame (a wardrobe is a "hanging cloth" in one, a door a "wardrobe"
+   in another), and a thing seen in three keyframes of twelve is unknown in
+   the other nine. So the detector runs on about twenty spaced frames, and
+   SAM 2.1's video model carries each thing it found through every frame in
+   between and back to the start: one object, one identity over the whole
+   video, named by the detector's votes for it, with an outline in every
+   frame it shows in. The keyframes' points are labelled by those outlines;
+   `workspace/tracks/` keeps every object's outline per frame, which the
+   placement search below scores against instead of a dozen keyframes; and
+   `densify.json`'s `detections` list every frame each object shows in. Meta's
+   SAM 3 would do the detecting and tracking in one model, but its weights
+   are handed out on request only, so the tracker takes GroundingDINO's
+   detections; swapping the detector is the one change when they come. The
+   model runs object by object, fast on CUDA and about a second an object and
+   frame on a Mac's GPU, hence the default.
 3. `pipeline/shapes.py` and `tools/classify_shapes.py` — planes and boxes.
    Walls come from RANSAC; the floor and ceiling are the lowest upward-facing
    and highest downward-facing height levels inside the walls, so a strip of
@@ -493,11 +511,19 @@ phone (no model calls, no network while recording). Build and install with
   in; the outline's vertices are world points (`OutlineLift`), drawn through
   the live camera thirty times a second, so an outline stays on its thing
   while the phone turns instead of hanging where it was last analysed. The
-  two models check each other: a piece of furniture, a window or a curtain
-  whose mask lies 90% on what the surface model calls bare wall, floor or
-  ceiling is the detector seeing things (a "fridge" that is a stretch of
-  white wall, a "bathtub" on a bedroom wall) and is neither shown nor placed,
-  unless the tracker finds it to be a door of a wardrobe it knows. A thing
+  models take a 4:3 picture; the camera runs at 3840 x 2160, and its middle
+  is analysed as it is (the whole frame squeezed in, which is what the app
+  did at first, put every model a third out of shape and placed furniture
+  twice over: 19 pieces where there are 8). The models check each other: a
+  piece of furniture, a window or a curtain whose mask lies 90% on what the
+  surface model calls bare wall, floor or ceiling, and whose outline stands
+  out in depth from nothing, is the detector seeing things (a "fridge" that
+  is a stretch of white wall, a "bathtub" on a bedroom wall) and is neither
+  shown nor placed, unless the tracker finds it to be a door of a wardrobe it
+  knows. Both signs are needed: on rooms it had not been tried on the surface
+  model alone threw out a plain white wardrobe in every frame and a bed the
+  detector was 87% sure of, as "wall" and "floor"; what stands out from the
+  wall behind it is never thrown out. A thing
   is outlined from its second sighting, under its most voted name
   (`SightingMemory`): the detector's one-frame inventions never show, and a
   wardrobe one frame called a shelf stays a wardrobe. Sightings are matched
@@ -518,7 +544,18 @@ phone (no model calls, no network while recording). Build and install with
   depth: on a bare wall the model's own metres were anywhere from a fifth of
   the truth to twice it, so those frames draw outlines and place nothing.
   Points under the floor, or behind a wall from where the camera stands,
-  cannot be and are dropped. `ObjectTracker` (in `CaptureRules`) matches each
+  cannot be and are dropped. The floor is found by looking, not taken from
+  the tracking's planes (to ARKit any level patch is a "floor" without a
+  classification, and a recording made sitting on a bed had the bed's top
+  as its only floor, which put everything below the mattress under the floor
+  and made the bed 9 cm tall): it is the lowest level at which the surface
+  model sees floor at all often, provided hardly anything lies below it (a
+  white bedsheet is "floor" to the model five times as often as the floor,
+  but a tenth of the room lies under the sheet), or failing that the level
+  where the points stop; a plane the tracking calls floor is believed where
+  the two agree. Measured 0.03 m and -0.02 m where the true floor is 0.00,
+  and -0.66 m in the recording where ARKit said -0.27. `ObjectTracker` (in
+  `CaptureRules`) matches each
   detection to the object of its kin it overlaps from above at a similar
   height (a cabinet above a desk is not the desk), remembers every 5 cm voxel
   ever seen of that object with a hit count, and measures its box from them:
@@ -541,10 +578,14 @@ phone (no model calls, no network while recording). Build and install with
   own door a "wardrobe door"): it joins the wardrobe whichever was seen
   first, and is outlined as "wardrobe" from then on. A standing piece's
   footprint is its lower body's: cabinets that run on over a doorway at
-  head height belong to the wardrobe, not to the floor it covers. The
-  tracker votes the label (a bed one frame called a sofa stays a bed), eases
-  the box, shows it after two sightings and keeps it while it is out of
-  view. The map then settles each box the way furniture stands
+  head height belong to the wardrobe, not to the floor it covers. What is
+  seen again from the same standpoint in the same direction is the same
+  thing, wherever that frame's depth put it: turning on the spot gives the
+  depth nothing to hold on to, and one monitor became three in a row along
+  the line of sight. The tracker votes the label (a bed one frame called a
+  sofa stays a bed), eases the box, shows it after two sightings and keeps
+  it while it is out of view. The map then settles each box the way
+  furniture stands
   (`RoomMapBuilder.settle`): what stands on the floor reaches the floor
   (always for a wardrobe or a bed, whose bottom is often hidden; not for
   what rests on another piece), furniture a hand from a wall reaches the
@@ -567,19 +608,41 @@ phone (no model calls, no network while recording). Build and install with
   what matched nothing). `--dump <folder>` writes every frame with its
   outlines and labels, a map of the placed boxes over the measured ones, and
   `frames.jsonl` (each detection's extent in the room, the depth fit, the
-  share on bare wall), plus `screen/` and `map/`: the screen as the phone
+  share on bare wall, the depth step along its outline, what was shown and
+  under which name), plus `screen/` and `map/`: the screen as the phone
   would show it and the map so far, frame by frame, which `ffmpeg` puts side
   by side into a video of the scan (`-i screen/%05d.jpg -i map/%05d.png`,
   `hstack`). `phonesim --video videos/<file>.MOV --dump <folder> --fps 3`
   needs no processed space: it runs the detector, the refiner and the wall
   check straight over a video at the phone's rate and writes the outlined
   frames (no camera poses, so no map and no settled names). `--trace`
-  prints every merge the tracker makes. Changes to the phone's perception
-  are checked there before they go on a phone: on the two test rooms the
-  map went from 22 slivers with the bed at 0.13 footprint overlap to 8
-  pieces, all real, in one (bed 0.78, wardrobe 0.76 and 1.54 m wide where
-  the measured one is 1.56, desk 0.63), and to the bed at 0.88 and the
-  wardrobe with nothing spurious in the other.
+  prints every merge the tracker makes and the heights at which floor and
+  everything else was seen; `--as-phone` squeezes whole frames in as the
+  app once did; `--bare` hands over no walls at all.
+- **A recording, played back:** `tools/phone_capture_export.py <folder with
+  frames.jsonl and capture.json> --video video.mov --space spaces/<name>`
+  lays out a recording the app made for the simulator: the video, a few
+  frames a second, with the pose ARKit gave each frame and the planes it
+  found, wrong ones included, so any recording can be played through the
+  current code minutes after it was made, with no solve and no measured
+  room (needs the Core ML environment's OpenCV). Recordings from October 2026
+  carry ARKit's tracking points; for older ones they are made the way ARKit
+  makes them, corners followed over a few seconds and triangulated with the
+  poses. This is how the bed-top "floor" and the stretched frames were
+  found: neither showed on the processed videos, whose poses, floor and
+  walls were perfect.
+- **Public rooms:** `videos/public/` (see its `SOURCES.md`; kept out of git)
+  holds eighteen free-licence room videos found with the Firecrawl
+  connector on pexels.com: bedrooms, living rooms, small kitchens, a
+  vintage-furnished room, a hotel suite, a hallway. Run with `--video`, they
+  are the check that a rule is about rooms and not about ours; the
+  surface-model-only veto failed it. Changes to the phone's perception are
+  checked on all of this before they go on a phone. On the two processed
+  rooms the map went from 22 slivers with the bed at 0.13 footprint overlap
+  to 8 pieces, all real, in one (bed 0.61, wardrobe 0.76 and 1.54 m wide
+  where the measured one is 1.56, desk 0.63), and to the bed at 0.88 and
+  the wardrobe with nothing spurious in the other; the replayed recording
+  places the bed at its real height, one monitor, the basket and the desk.
 - **Logs:** the app writes `Documents/oasis-capture.log` (model load times,
   analysis ms per frame); read it with
   `xcrun devicectl device copy from --domain-type appDataContainer --domain-identifier com.oasisspaces.capture --source Documents/oasis-capture.log --destination oasis-capture.log`.

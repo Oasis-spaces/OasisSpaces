@@ -54,6 +54,10 @@ struct FrameUnderstanding {
     var instances: [InstanceRegion]
     /// The camera that took the frame.
     var camera: PinholeCamera
+    /// Heights (world y) of points where the surface model saw floor, and of points all over the
+    /// picture, from depth the tracking points corrected. The room map takes the floor from these.
+    var floorAt: [Float] = []
+    var pointsAt: [Float] = []
 }
 
 /// Runs the three models on camera frames a few times a second, one frame at
@@ -89,6 +93,8 @@ final class SceneRunner {
     /// MoGe-2: a point map with its own metric scale (see MetricDepth).
     private var depth: MLModel?
     private var depthInput: CVPixelBuffer?
+    /// The part of the camera's frame the models see, when it is not the whole frame (used on `queue`).
+    private var analysedInput: CVPixelBuffer?
     private static let depthWidth = 518, depthHeight = 392
     private var maskEncoder: MLModel?
     private var maskDecoder: MLModel?
@@ -278,6 +284,11 @@ final class SceneRunner {
 
             var marks: [(String, Date)] = [("start", began)]
             func mark(_ name: String) { marks.append((name, Date())) }
+            // 0. The models take a 4:3 picture. At 4K the camera's is 16:9: its middle is analysed as it
+            // is. (The whole of it squeezed in was a third out of shape for every model: on the test
+            // videos the depth then placed furniture twice, 19 pieces where there are 8.)
+            let (buffer, pinhole) = self.analysedView(of: buffer, camera: camera)
+            mark("crop")
             // 1. Surfaces, on the upright image.
             let upright = VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .right)
             guard (try? upright.perform([segmentation])) != nil,
@@ -313,14 +324,9 @@ final class SceneRunner {
             if !instances.isEmpty {
                 instances = self.refine(instances, in: buffer)
                 mark("refine")
-                // Furniture the surface model sees as bare wall is the detector seeing things:
-                // it is not shown or placed, unless the tracker finds it to be a wardrobe's door.
-                let surfaces = self.spec.bareSurfaces
-                bare = instances.map { self.objects.isOnBareSurface($0, bare: surfaces, classes: classes, width: width, height: height) }
             }
 
             // 3. Depth in metres, on the sensor image as it is (landscape).
-            let pinhole = Self.pinhole(camera)
             var understanding = FrameUnderstanding(time: time, segmentation: result, depthFit: nil,
                                                    instances: [], camera: pinhole)
             var depthValues: DepthValues?
@@ -338,6 +344,30 @@ final class SceneRunner {
                 depthValues = inverse.scaled(correction.fit)
             }
             mark("depth")
+            // Furniture the surface model sees as bare wall, and that stands out in depth from nothing,
+            // is the detector seeing things: it is not shown or placed, unless the tracker finds it to
+            // be a wardrobe's door. (Upright (x, y) is at sensor (y, 1 - x).)
+            let surfaces = self.spec.bareSurfaces
+            bare = instances.map { instance in
+                self.objects.isOnBareSurface(instance, bare: surfaces, classes: classes, width: width, height: height) { x, y in
+                    depthValues?.metres(x: y, y: 1 - x)
+                }
+            }
+            if trusted, let depthValues {
+                let near = self.objects.tracker.depthMetres.first ?? 0.3, far = self.objects.tracker.depthMetres.last ?? 6
+                // Upright (x, y) is at sensor (y, 1 - x).
+                func worldHeight(_ x: Float, _ y: Float) -> Float? {
+                    let xs = y, ys = 1 - x
+                    guard let z = depthValues.metres(x: xs, y: ys), z >= near, z <= far else { return nil }
+                    return pinhole.worldPoint(u: xs * Float(pinhole.width), v: ys * Float(pinhole.height), depth: z).y
+                }
+                understanding.floorAt = self.spec.floorPositions(classes: classes, width: width, height: height).compactMap { worldHeight($0.x, $0.y) }
+                for gy in 0..<24 {
+                    for gx in 0..<24 {
+                        if let h = worldHeight((Float(gx) + 0.5) / 24, (Float(gy) + 0.5) / 24) { understanding.pointsAt.append(h) }
+                    }
+                }
+            }
             understanding.instances = instances.enumerated().map { i, instance in
                 var region = self.region(instance, depth: depthValues, pinhole: pinhole, place: trusted)
                 region.doubtful = i < bare.count && bare[i]
@@ -422,7 +452,7 @@ final class SceneRunner {
             return nil
         }
         let scale = Float(truncating: scaleArray[0])
-        // The focal length relative to half the sensor's diagonal (the input keeps the sensor's aspect).
+        // The focal length relative to half the picture's diagonal (the input has the analysed picture's shape).
         let focal = MetricDepth.relativeFocal(pixels: pinhole.fx, width: Float(pinhole.width), height: Float(pinhole.height))
         var depth = [Float](repeating: .nan, count: width * height)
         let ok: Bool = points.withUnsafeBufferPointer { p in
@@ -615,6 +645,30 @@ final class SceneRunner {
             guard let fit, let d = at(x: x, y: y) else { return nil }
             return fit.metres(d)
         }
+    }
+
+    /// The shape of the picture the models take (the sensor's own, landscape).
+    private static let analysedAspect: Float = 4.0 / 3
+
+    /// The part of the camera's frame the models see, no more than 1440 across, and the camera
+    /// that took just that part. The frame itself when it has the models' shape already.
+    private func analysedView(of buffer: CVPixelBuffer, camera: ARCamera) -> (CVPixelBuffer, PinholeCamera) {
+        let whole = Self.pinhole(camera)
+        let (x, y, part) = whole.centred(aspect: Self.analysedAspect)
+        guard part.width != whole.width || part.height != whole.height else { return (buffer, whole) }
+        let scale = min(1, 1440 / CGFloat(part.width))
+        let width = Int((CGFloat(part.width) * scale).rounded()), height = Int((CGFloat(part.height) * scale).rounded())
+        if analysedInput == nil || CVPixelBufferGetWidth(analysedInput!) != width || CVPixelBufferGetHeight(analysedInput!) != height {
+            analysedInput = Self.pixelBuffer(width: width, height: height)
+        }
+        guard let target = analysedInput else { return (buffer, whole) }
+        // Core Image counts rows from the bottom.
+        let rect = CGRect(x: x, y: whole.height - y - part.height, width: part.width, height: part.height)
+        let image = CIImage(cvPixelBuffer: buffer).cropped(to: rect)
+            .transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        ciContext.render(image, to: target, bounds: CGRect(x: 0, y: 0, width: width, height: height), colorSpace: CGColorSpaceCreateDeviceRGB())
+        return (target, part)
     }
 
     private static func pinhole(_ camera: ARCamera) -> PinholeCamera {

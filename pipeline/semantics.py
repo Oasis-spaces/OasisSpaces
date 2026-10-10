@@ -365,9 +365,14 @@ class Segmenter:
 def pixel_labels(us: np.ndarray, vs: np.ndarray, detections: list[dict],
                  index: dict[str, int]) -> np.ndarray:
     """Label index per pixel: the highest-scoring detection covering it, by
-    its outline when Segmenter gave it one, else by its rectangle."""
+    its outline when Segmenter gave it one, else by its rectangle. Among
+    detections of about the same score the smaller wins: a pillow on a bed."""
     labels = np.zeros(len(us), dtype=np.uint8)
-    for det in sorted(detections, key=lambda d: d["score"]):
+
+    def area(d):
+        return (d["box"][2] - d["box"][0]) * (d["box"][3] - d["box"][1])
+
+    for det in sorted(detections, key=lambda d: (round(d["score"], 1), -area(d))):
         x0, y0, x1, y1 = det["box"]
         inside = (us >= x0) & (us <= x1) & (vs >= y0) & (vs <= y1)
         mask = det.get("mask")

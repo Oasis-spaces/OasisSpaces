@@ -87,6 +87,25 @@ public struct DetectionSpec: Codable, Sendable {
         return spec
     }
 
+    /// Places to measure the floor's height: a coarse grid of positions
+    /// (normalised, x right and y down, of the picture the surface model saw)
+    /// where it sees floor. `classes` is its class per pixel, row-major.
+    public func floorPositions(classes: [Int32], width: Int, height: Int, grid: Int = 32) -> [SIMD2<Float>] {
+        // (A rug lies on the floor, and is what the model calls a carpeted floor.)
+        let floor = Set(self.classes.filter { $0.name == "floor" || $0.name == "rug" }.map { Int32($0.id) })
+        guard width > 0, height > 0, classes.count >= width * height, !floor.isEmpty else { return [] }
+        var out: [SIMD2<Float>] = []
+        for gy in 0..<grid {
+            for gx in 0..<grid {
+                let x = (Float(gx) + 0.5) / Float(grid), y = (Float(gy) + 0.5) / Float(grid)
+                if floor.contains(classes[min(height - 1, Int(y * Float(height))) * width + min(width - 1, Int(x * Float(width)))]) {
+                    out.append(SIMD2(x, y))
+                }
+            }
+        }
+        return out
+    }
+
     /// The classes that are bare structure: wall, floor, ceiling.
     public var bareSurfaces: Set<Int32> {
         Set(classes.filter { ["wall", "floor", "ceiling"].contains($0.name) }.map { Int32($0.id) })
