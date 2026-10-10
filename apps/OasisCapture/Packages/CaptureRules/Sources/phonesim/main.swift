@@ -77,6 +77,7 @@ let spec = DetectionSpec.bundled()
 let objects: ObjectSpec = {
     var o = ObjectSpec.bundled()
     if arguments.contains("--no-sight") { o.tracker.standpointMetres = 0 }      // (to measure what the same-sight rule does)
+    if arguments.contains("--surface-veto") { o.bareStepShare = 1 }             // (the bare-wall check on the surface model alone, as before)
     return o
 }()
 
