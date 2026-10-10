@@ -42,7 +42,9 @@ import placement  # noqa: E402
 from semantics import room_vocabulary  # noqa: E402
 from tracking import FIXTURES, FIXTURE_VOTE_SHARE  # noqa: E402
 
-PIECES = ("bed", "seat", "table", "wardrobe")   # the furniture types scored as pieces
+PIECES = ("bed", "seat", "table", "wardrobe")   # the box types always scored as pieces; a block
+                                                # whose detected name is real furniture counts too
+                                                # (built_pieces) — a wood stove is built as a block
 COLLISION_WEIGHT = 0.5
 WALK_WEIGHT = 1.0
 DOORWAY_WEIGHT = 0.5
@@ -70,16 +72,24 @@ class Evidence:
         return self._cache[label]
 
 
-def built_pieces(shapes: dict) -> list[tuple[int, dict]]:
+def built_pieces(shapes: dict, vocabulary=None) -> list[tuple[int, dict]]:
+    """The built boxes the score treats as pieces: the furniture types, and —
+    given the vocabulary — a block whose detected name is real furniture or
+    storage. The review builds a wood stove as a block, and a box the room
+    has must not read "no box"; a pillow's block stays out (on_furniture),
+    and so does a block nothing detected."""
     return [(i, b) for i, b in enumerate(shapes.get("boxes") or [])
-            if b.get("build", True) and b.get("label") in PIECES]
+            if b.get("build", True)
+            and (b.get("label") in PIECES
+                 or (vocabulary is not None and b.get("label") == "block"
+                     and vocabulary.role(b.get("detected")) in ("furniture", "storage")))]
 
 
 def boxes_of(shapes: dict, label: str, vocabulary) -> list[tuple[int, dict]]:
     """The built boxes that stand for `label`: detected as it (or as the same
     kind of storage), or built as its furniture type without a detection."""
     found = []
-    for i, b in built_pieces(shapes):
+    for i, b in built_pieces(shapes, vocabulary):
         detected = b.get("detected")
         if detected:
             if vocabulary.same_kind(detected, label):
@@ -111,7 +121,7 @@ def in_doorways(shapes: dict, evidence_for, vocabulary) -> dict[str, float]:
         evidence = evidence_for(label)
         if not evidence["frames"]:
             continue
-        for i, b in built_pieces(shapes):
+        for i, b in built_pieces(shapes, vocabulary):
             lo, hi = np.array(b["min"], float), np.array(b["max"], float)
             shares = []
             for view in evidence["frames"].values():
@@ -154,7 +164,7 @@ def doorways_by_votes(space: Path, shapes: dict, vocabulary) -> dict[str, float]
         pass
     found = {}
     for t, vote_share in suspects:
-        for i, b in built_pieces(shapes):
+        for i, b in built_pieces(shapes, vocabulary):
             lo, hi = np.array(b["min"], float), np.array(b["max"], float)
             thin = units and float(min(hi[0] - lo[0], hi[1] - lo[1])) / units <= THIN_M
             weight = 1.0 if thin else vote_share
@@ -192,7 +202,7 @@ def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None) -> dict
                          "box": best_id, "boxes": [f"B{i}" for i, _ in candidates]}
     agreement = float(np.mean([p["agreement"] for p in pieces.values()])) if pieces else None
 
-    built = built_pieces(shapes)
+    built = built_pieces(shapes, vocabulary)
     collision = 0.0
     for n, (_, a) in enumerate(built):
         for _, b in built[n + 1:]:

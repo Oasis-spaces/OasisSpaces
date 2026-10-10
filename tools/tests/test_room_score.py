@@ -17,6 +17,7 @@ from semantics import Vocabulary  # noqa: E402
 UNITS = 9.0
 VOCAB = Vocabulary([{"name": "bed", "role": "furniture", "build_as": "bed"},
                     {"name": "almirah", "role": "storage", "build_as": "wardrobe"},
+                    {"name": "wood stove", "role": "furniture", "build_as": "block"},
                     {"name": "pillow", "role": "on_furniture", "build_as": "block"},
                     {"name": "door", "role": "fixture", "build_as": None}])
 
@@ -192,6 +193,21 @@ def test_a_tracked_object_the_detector_part_named_a_door_counts_as_one():
         finally:
             pl.views_of = kept
     assert thin["B1"] > 0.9 and (not not_thin or not_thin["B1"] < 0.5)
+
+
+def test_a_block_detected_as_real_furniture_is_a_piece_and_a_pillow_is_not():
+    shapes = room()
+    stove = {"min": [8.0, 8.0, 0.0], "max": [12.0, 12.0, 8.0], "label": "block",
+             "detected": "wood stove", "build": True}
+    cushion = {"min": [0.0, 5.0, 4.0], "max": [3.0, 8.0, 5.0], "label": "block",
+               "detected": "pillow", "build": True}
+    anonymous = {"min": [14.0, 2.0, 0.0], "max": [16.0, 4.0, 2.0], "label": "block", "build": True}
+    shapes["boxes"] = [stove, cushion, anonymous, dict(BED)]
+    assert [i for i, _ in rs.built_pieces(shapes, VOCAB)] == [0, 3]
+    assert [i for i, _ in rs.built_pieces(shapes)] == [3]      # without the vocabulary: as before
+    # The stove's box now stands for its name, so the score stops reporting
+    # "no box" for a box the room has.
+    assert [i for i, _ in rs.boxes_of(shapes, "wood stove", VOCAB)] == [0]
 
 
 def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():
