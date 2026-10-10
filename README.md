@@ -671,13 +671,19 @@ phone (no model calls, no network while recording). Build and install with
   connector on pexels.com: bedrooms, living rooms, small kitchens, a
   vintage-furnished room, a hotel suite, a hallway. Run with `--video`, they
   are the check that a rule is about rooms and not about ours; the
-  surface-model-only veto failed it. Changes to the phone's perception are
-  checked on all of this before they go on a phone. On the two processed
-  rooms the map went from 22 slivers with the bed at 0.13 footprint overlap
-  to 8 pieces, all real, in one (bed 0.61, wardrobe 0.76 and 1.54 m wide
-  where the measured one is 1.56, desk 0.63), and to the bed at 0.88 and
-  the wardrobe with nothing spurious in the other; the replayed recording
-  places the bed at its real height, one monitor, the basket and the desk.
+  surface-model-only veto failed it. `tools/phone_video_preview.py --clips
+  videos/public --dumps <folder of dumps> --out videos/public/analysis`
+  turns those runs into something to look at: a preview per clip (the clip
+  with a box around the upright middle the phone analyses, the kept
+  outlines beside it, the clip's numbers above), contact sheets of six
+  frames per clip, and one reel of every preview. Changes to the phone's
+  perception are checked on all of this before they go on a phone. On the
+  two processed rooms the map went from 22 slivers with the bed at 0.13
+  footprint overlap to 8 pieces, all real, in one (bed 0.73, wardrobe 0.76
+  and 1.71 m wide where the measured one is 1.56, desk 0.58), and to the
+  bed at 0.90 and the wardrobe with nothing spurious in the other; the
+  replayed recording places the bed at its real height, one TV, the basket
+  and the wardrobe, with one 25 cm sliver still called a bed beside it.
 - **Logs:** the app writes `Documents/oasis-capture.log` (model load times,
   analysis ms per frame); read it with
   `xcrun devicectl device copy from --domain-type appDataContainer --domain-identifier com.oasisspaces.capture --source Documents/oasis-capture.log --destination oasis-capture.log`.
