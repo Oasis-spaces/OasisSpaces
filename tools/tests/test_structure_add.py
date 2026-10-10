@@ -287,6 +287,30 @@ def test_a_piece_the_phone_also_places_is_not_misplaced_and_is_not_dropped():
     assert shapes["boxes"][0]["build"] and not shapes["boxes"][1]["build"]
 
 
+def test_an_edit_that_lowers_the_measured_room_score_is_rolled_back():
+    agent_ = stub(Answers())
+    agent_.phone_matches = lambda: {}
+    # a measurement that likes built boxes: each built one is worth 0.3
+    agent_.measure_room = lambda shapes=None: {"score": round(0.3 * sum(1 for b in shapes["boxes"] if b.get("build", True)), 3)}
+    shapes = room()
+    shapes["boxes"] = [{"label": "bed", "detected": "bed", "source": "detected", "build": True, "points": 5000,
+                        "min": [-16.0, -4.0, -11.5], "max": [-7.0, 5.0, -6.0]},
+                       {"label": "wardrobe", "detected": "wardrobe", "source": "claude", "build": True, "points": 0,
+                        "min": [-20.0, 10.0, -11.5], "max": [-14.0, 15.0, 7.0]}]
+    item = {"label": "table", "against": "W1", "from_corner_with": "W2", "offset_m": 0.3,
+            "width_m": 1.2, "depth_m": 0.6, "height_m": 0.75, "why": "the desk"}
+    applied = agent.Agent.apply_structure_review(
+        agent_, shapes, {"drop_boxes": [{"id": "B1", "why": "a guess"}], "add_boxes": [item]})
+    assert applied == ["dropped B1", "rolled back drop_boxes: it lowered the measured room score from 0.60 to 0.30",
+                       "added B2 table against W1, from its corner with W2"]
+    assert all(b["build"] for b in shapes["boxes"]) and len(shapes["boxes"]) == 3   # the drop undone, the add kept
+    # without a measurement, the review's word stands
+    agent_.measure_room = lambda shapes=None: (_ for _ in ()).throw(FileNotFoundError("no densify.json"))
+    shapes["boxes"] = shapes["boxes"][:2]
+    applied = agent.Agent.apply_structure_review(agent_, shapes, {"drop_boxes": [{"id": "B1", "why": "a guess"}]})
+    assert applied == ["dropped B1"] and not shapes["boxes"][1]["build"]
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

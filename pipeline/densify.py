@@ -40,6 +40,7 @@ from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
 from semantics import (SEGMENTER_ID, Detector, Segmenter, planned_vocabulary,
                        default_device, pixel_labels)
 from tracking import PROMPT_FRAMES, Tracker, prompt_frames
+from mirrors import fill_unreliable
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
 MIN_ANCHORS = 12
@@ -290,6 +291,9 @@ def main():
     parser.add_argument("--prompt-frames", type=int, default=None,
                         help="about how many frames the detector runs on when tracking "
                              f"(default {PROMPT_FRAMES})")
+    parser.add_argument("--no-mirror-planes", action="store_true",
+                        help="drop the points on mirrors, windows and screens instead of giving "
+                             "them the depth of the plane their surroundings lie in (mirrors.py)")
     parser.add_argument("--output", default=None,
                         help="output PLY (default <space>/cloud-dense.ply)")
     args = parser.parse_args()
@@ -340,7 +344,7 @@ def main():
     label_index, label_names, unreliable_ids = None, None, np.zeros(0, int)
 
     all_pts, all_cols, all_norms, all_labels = [], [], [], []
-    dropped_unreliable = 0
+    dropped_unreliable, filled_on_planes, fills = 0, 0, {}
     meta = {"model_dir": str(model_dir.resolve()), "depth_model": args.depth_model,
             "keyframes": len(keys)}
 
@@ -508,6 +512,21 @@ def main():
             if s is None or abs(np.log(s / s_med)) > np.log(1.25):
                 s, on_median = s_med, on_median + 1
             depth, k, normal = f["depth"], f["k"], f["normal"]
+            # A mirror's depth is its reflection's, a window's the view
+            # outside: give each the plane of what surrounds it (the wall,
+            # the wardrobe it is a door of) instead of dropping it.
+            filled_map = None
+            if label_index is not None and not args.no_mirror_planes and f["detections"]:
+                depth, normal, filled_map, records = fill_unreliable(
+                    depth, k, f["detections"], set(vocabulary.unreliable), cam["params"][:4], normal)
+                for r in records:
+                    fills.setdefault(r["label"], []).append(r)
+                done = ", ".join(f"{r['label']} {r['filled']:,} px at {r['plane_depth_m']} m"
+                                 for r in records if r["filled"])
+                left = ", ".join(f"{r['label']} ({r['why']})" for r in records if not r["filled"])
+                if done or left:
+                    print(f"  {info['name']}: filled {done or 'nothing'}"
+                          + (f"; left {left}" if left else ""))
             rows, cols = depth.shape
 
             def pixel(us, vs, k=k, rows=rows, cols=cols):
@@ -524,9 +543,21 @@ def main():
             labels = None
             if label_index is not None:
                 labels = pixel_labels(us, vs, f["detections"], label_index)
-                # Mirrors, windows and screens: the depth there is a
-                # reflection or the view outside, so drop those points.
-                keep = ~np.isin(labels, unreliable_ids)
+                on_unreliable = np.isin(labels, unreliable_ids)
+                if filled_map is not None and on_unreliable.any():
+                    # A filled outline stands where its surface is, so its
+                    # points take the name of what it sits on: the wardrobe
+                    # whose door it is, or nothing (the wall).
+                    at = np.flatnonzero(on_unreliable)
+                    at = at[filled_map[pixel(us[at], vs[at])]]
+                    if len(at):
+                        solid = [d for d in f["detections"] if d["label"] not in vocabulary.unreliable]
+                        labels[at] = pixel_labels(us[at], vs[at], solid, label_index)
+                        on_unreliable[at] = False
+                        filled_on_planes += len(at)
+                # Mirrors, windows and screens that could not be filled: the
+                # depth there is a reflection or the view outside, so drop them.
+                keep = ~on_unreliable
                 dropped_unreliable += int((~keep).sum())
                 pts, rgb, labels = pts[keep], rgb[keep], labels[keep]
                 if nrm is not None:
@@ -558,10 +589,15 @@ def main():
         counts = {name: n for name, n in counts.items() if n}
         meta["labels"] = counts
         meta["points_dropped_unreliable"] = dropped_unreliable
+        meta["points_on_mirror_planes"] = filled_on_planes
+        meta["mirror_planes"] = {label: {"outlines": len(rs), "filled": sum(1 for r in rs if r["filled"]),
+                                         "pixels": sum(r["filled"] for r in rs)}
+                                 for label, rs in fills.items()}
         summary = ", ".join(f"{name} {n:,}" for name, n in
                             sorted(counts.items(), key=lambda kv: -kv[1]))
         print(f"Labelled: {summary or 'nothing detected'}"
-              f" (dropped {dropped_unreliable:,} points on mirrors/windows/screens)")
+              f" ({filled_on_planes:,} points on mirrors/windows/screens stood on their planes, "
+              f"{dropped_unreliable:,} dropped)")
 
     out = Path(args.output) if args.output else space / "cloud-dense.ply"
     save_ply(cloud, out)

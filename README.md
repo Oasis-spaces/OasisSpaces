@@ -190,9 +190,22 @@ the agent's judgement:
    and curtain, so SAM 2.1 (hiera-tiny, local) cuts each one to the object's
    outline first (`--no-outlines` keeps rectangles). Every dense point knows
    the frame and pixel it came from, so those outlines label the points
-   directly. Points on mirrors, windows and screens are dropped instead,
-   because monocular depth there is a reflection or the view outside.
-   `--no-semantics` turns this off.
+   directly. `--no-semantics` turns this off.
+
+   **Mirrors, windows and screens** (`pipeline/mirrors.py`). Monocular depth
+   on a mirror is the reflection's, on a window the view outside, on a screen
+   whatever it shows; those points used to be dropped, which left a hole where
+   a window sits in its wall and took the front off any wardrobe with mirrored
+   doors. What Mirror3D does instead: the depth of a thin strip just outside
+   the outline (the frame, the wall or the door round it) gives a plane, and
+   the outline takes that plane's depth, its points named after what the
+   outline sits on (the wardrobe, or nothing, meaning the wall). The strip has
+   to be flat (its densest depth, then three rounds of dropping the worst, to
+   within 3% of its depth), not beyond the rest of the frame (a window's strip
+   can itself be the view outside), and the plane has to cover the outline;
+   otherwise the points are dropped as before. On the pan, 273,000 of the
+   304,000 points that were dropped now stand on their planes, the windows at
+   their wall's depth. `--no-mirror-planes` turns it off.
 
    **Tracked through the video** (`pipeline/tracking.py`, on CUDA by default,
    `--track on` elsewhere). A detector names things a little differently in
@@ -254,6 +267,24 @@ the agent's judgement:
    and the masks only for pieces that have none. Below the acceptance score
    nothing is placed, and Claude is asked only when no keyframe saw the piece
    at all.
+
+   **The measured room score** (`pipeline/room_score.py`). Claude's render
+   check names what looks wrong, but it cannot measure: asked which of two
+   reconstructions is the better one, frontier models agree with the true
+   geometry about as often as a coin (`docs/research-weaknesses-2026-10.md`).
+   So the room is scored by what can be measured: for every furniture or
+   storage name the frames show, how well the best built box of that kind
+   covers the name's outlines when projected through the frames' own cameras
+   (the placement score above), 0 when no such box is built; less the largest
+   overlap between two pieces, and the share of the walk that stands inside a
+   piece too tall to film from. The score is recorded in the report after the
+   review, and it decides instead of the judge: each group of the review's
+   edits that touches the furniture (fronts, drops, relabels, additions) is
+   measured and rolled back when it lowers the score, and when the render
+   check sends the room back for a second review, the second room is kept
+   when it measures higher and the first when it measures lower; only two
+   rooms that measure the same are left to the judge's count of problems. A
+   measured piece can thus no longer be deleted on one opinion.
 
    **The phone's second opinion** (`tools/phone_objects.py`, on a Mac). Oasis
    Capture's own detector, depth and tracker, run over the space's frames by

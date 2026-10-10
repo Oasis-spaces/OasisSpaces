@@ -36,6 +36,7 @@ One stage at a time, checking each before starting the next:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import shutil
@@ -56,6 +57,7 @@ from densify import read_cameras_bin, read_images_bin  # noqa: E402
 from pointcloud import space_model_dir  # noqa: E402
 import numpy as np  # noqa: E402
 import placement  # noqa: E402
+import room_score  # noqa: E402
 from reconstruct import (  # noqa: E402
     MAX_PATH_JUMP, camera_path_jump, mean_reprojection, registered_images, solved_models,
 )
@@ -1129,11 +1131,37 @@ class Agent:
         return applied
 
     def apply_structure_review(self, shapes: dict, verdict: dict) -> list[str]:
-        """Apply Claude's decisions within fixed limits; report what happened."""
+        """Apply Claude's decisions within fixed limits; report what happened.
+        Each group of edits that touches the furniture is measured
+        (room_score.py) and undone when it lowers the room's score: Claude
+        names what looks wrong, the measurements decide."""
         applied = []
+        measured = self.safe(self.measure_room, shapes)
+
+        def checkpoint() -> dict:
+            return {"planes": copy.deepcopy(shapes["planes"]), "boxes": copy.deepcopy(shapes["boxes"])}
+
+        def settle(group: str, snapshot: dict) -> bool:
+            """Undo the group's edits when they lowered the measured score. True when undone."""
+            nonlocal measured
+            changed = shapes["planes"] != snapshot["planes"] or shapes["boxes"] != snapshot["boxes"]
+            if measured is None or not changed:
+                return False
+            after = self.safe(self.measure_room, shapes)
+            if after is None:
+                return False
+            if room_score.compare(measured, after) == "worse":
+                shapes["planes"], shapes["boxes"] = snapshot["planes"], snapshot["boxes"]
+                applied.append(f"rolled back {group}: it lowered the measured room score "
+                               f"from {measured['score']:.2f} to {after['score']:.2f}")
+                return True
+            measured = after
+            return False
+
         walls = {i: p for i, p in enumerate(shapes["planes"])
                  if p["kind"] == "wall" and p.get("build", True)}
         fronted = set()
+        snapshot = checkpoint()
         for item in verdict.get("furniture_fronts") or []:
             ident = str(item.get("id", ""))
             if not ident:
@@ -1144,6 +1172,10 @@ class Agent:
                 continue
             applied.append(self.build_front(shapes, i, item.get("why", "")))
             fronted.add(i)
+        if settle("furniture_fronts", snapshot):
+            walls = {i: p for i, p in enumerate(shapes["planes"])
+                     if p["kind"] == "wall" and p.get("build", True)}
+            fronted.clear()
         biggest = max(walls, key=lambda i: walls[i]["points"]) if walls else None
         can_drop = len(walls) // 2  # never remove more than half the walls
         for item in verdict.get("drop_walls") or []:
@@ -1163,6 +1195,7 @@ class Agent:
                 can_drop -= 1
                 applied.append(f"dropped {ident}")
         boxes = shapes["boxes"]
+        snapshot = checkpoint()
         vouched = self.safe(self.phone_matches, default={}) or {}
         detected = [i for i, b in enumerate(boxes) if b.get("detected") and b.get("build", True)]
         main_object = max(detected, key=lambda i: boxes[i]["points"]) if detected else None
@@ -1184,6 +1217,9 @@ class Agent:
             boxes[i]["build"] = False
             boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
             applied.append(f"dropped {ident}")
+        if settle("drop_boxes", snapshot):
+            boxes = shapes["boxes"]
+        snapshot = checkpoint()
         for item in verdict.get("relabel_boxes") or []:
             ident, new = str(item.get("id", "")), item.get("label")
             i = int(ident[1:]) if ident[:1] == "B" and ident[1:].isdigit() else None
@@ -1195,6 +1231,9 @@ class Agent:
                 applied.append(f"relabelled {ident} {boxes[i].get('label')} -> {new}")
                 boxes[i]["label"] = new
                 boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
+        if settle("relabel_boxes", snapshot):
+            boxes = shapes["boxes"]
+        snapshot = checkpoint()
         units = self.densify_metrics().get("colmap_units_per_metre")
         for n, item in enumerate(verdict.get("add_boxes") or []):
             what = f"an added {item.get('label')}"
@@ -1209,6 +1248,7 @@ class Agent:
                 corner = item.get("from_corner_with")
                 applied.append(f"added B{len(boxes) - 1} {placed['label']} against {item.get('against')}"
                                + (f", from its corner with {corner}" if corner else ""))
+        settle("add_boxes", snapshot)
         return applied
 
     def build_front(self, shapes: dict, i: int, why: str) -> str:
@@ -1380,6 +1420,22 @@ class Agent:
                 return f"{obj['label']} {obj['size_m'][0]} x {obj['size_m'][1]} x {obj['size_m'][2]} m on {ident}"
         return None
 
+    def evidence_for(self, label: str) -> dict:
+        """A name's outlines in the frames (placement.mask_evidence), loaded once per run."""
+        if getattr(self, "_evidence", None) is None:
+            self._evidence = room_score.Evidence(self.space, log=lambda text: print("    " + text))
+        return self._evidence(label)
+
+    def measure_room(self, shapes: dict | None = None) -> dict:
+        """The measured room score (room_score.py) of `shapes`, or of shapes.json
+        as it stands: how well every built piece covers its outlines in the
+        frames, less collisions and pieces the walk went through."""
+        if shapes is None:
+            shapes = json.loads((self.space / "shapes.json").read_text())
+        result = room_score.room_score(self.space, shapes, self.evidence_for, room_vocabulary(self.space))
+        print("    " + room_score.describe(result))
+        return result
+
     def box_mask_score(self, label: str) -> tuple[float, int] | None:
         """How well the built box(es) labelled `label` agree with the label's
         own masks in the keyframes (pipeline/placement.py): (best score,
@@ -1389,7 +1445,7 @@ class Agent:
                  and label in (b.get("label"), b.get("detected"))]
         if not boxes:
             return None
-        evidence = placement.mask_evidence(self.space, label, log=lambda text: print("    " + text))
+        evidence = self.evidence_for(label)
         if len(evidence["frames"]) < placement.MIN_FRAMES:
             return None
         best = None
@@ -1434,11 +1490,13 @@ class Agent:
             verdict["plausible"] = True
         return notes
 
-    def recheck_structure(self, first: dict) -> None:
+    def recheck_structure(self, first: dict, first_score: dict | None = None) -> None:
         """The render check found the built room structurally wrong: run the
         structure review again with those problems, rebuild, check again, and
-        keep whichever room has fewer structural problems (the first one on a
-        tie). The first room is kept in structure-first/."""
+        keep the second room when its measured score (room_score.py) is
+        higher, the first when it is lower; only when the two measure the
+        same does the judge decide, by which has fewer structural problems
+        (the first on a tie). The first room is kept in structure-first/."""
         problems = structural_problems(first)
         kept = self.space / "structure-first"
         kept.mkdir(exist_ok=True)
@@ -1455,6 +1513,24 @@ class Agent:
         self.safe(self.settle_pieces)
         self.build_room()
         second = self.safe(self.render_verdict)
+        second_score = self.safe(self.measure_room) if first_score else None
+        if second_score:
+            self.decide("shapes", "score", room_score.describe(second_score), second_score)
+            outcome = room_score.compare(first_score, second_score)
+            if outcome == "better":
+                self.decide("shapes", "accept",
+                            f"the second review raised the measured room score from "
+                            f"{first_score['score']:.2f} to {second_score['score']:.2f}")
+                return
+            if outcome == "worse":
+                for name in saved:
+                    shutil.copy2(kept / name, self.space / name)
+                self.judgements.append({"stage": "blender", **first, "restored": True})
+                self.decide("shapes", "revert",
+                            f"the second review lowered the measured room score from "
+                            f"{first_score['score']:.2f} to {second_score['score']:.2f}; kept the first room")
+                return
+            # measured the same: what follows is the judge's call
         if second is not None and len(structural_problems(second)) < len(problems):
             self.decide("shapes", "accept",
                         f"the second review left {len(structural_problems(second))} structural "
@@ -1691,6 +1767,9 @@ class Agent:
                   str(self.space), "--finish-only"], "finish",
                  "stand furniture on the floor, keep it inside the walls, close the room")
         self.safe(self.settle_pieces)
+        measured = self.safe(self.measure_room)
+        if measured:
+            self.decide("shapes", "score", room_score.describe(measured), measured)
         metrics = self.shape_metrics()
         self.decide("shapes", "accept",
                     f"{metrics.get('walls', 0)} walls"
@@ -1703,7 +1782,7 @@ class Agent:
         self.build_room()
         verdict = self.safe(self.render_verdict)
         if verdict and structural_problems(verdict):
-            self.safe(self.recheck_structure, verdict)
+            self.safe(self.recheck_structure, verdict, measured)
         return True
 
     def step_splat(self) -> bool:
