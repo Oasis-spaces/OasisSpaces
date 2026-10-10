@@ -210,6 +210,84 @@ def test_a_block_detected_as_real_furniture_is_a_piece_and_a_pillow_is_not():
     assert [i for i, _ in rs.boxes_of(shapes, "wood stove", VOCAB)] == [0]
 
 
+def cloud_room():
+    """A synthetic room in the shapes frame: floor 0..20 x 0..14 at z=0, a
+    real back wall along y=14, a bogus half-way wall along y=7 (the room
+    continues beyond it), and a second room's wall along y=20 seen past the
+    real one. UNITS units to the metre, like the other fixtures."""
+    rng = np.random.default_rng(3)
+    def sheet(n, xr, yr, zr):
+        return np.column_stack([rng.uniform(*xr, n), rng.uniform(*yr, n), rng.uniform(*zr, n)])
+    floor = sheet(4000, (0, 20), (0, 14), (0.0, 0.05))
+    back = sheet(2000, (0, 20), (13.95, 14.05), (0.0, 2.5 * UNITS / 9 * 9 / 4))
+    back[:, 2] = rng.uniform(0.0, 20.0, len(back))        # full height, base included
+    far = sheet(800, (6, 12), (19.95, 20.05), (0.0, 20.0))  # the next room, via a doorway
+    P = np.vstack([floor, back, far])
+    def wall(center_y, half_a, points, x=10.0):
+        return {"kind": "wall", "normal": [0.0, 1.0, 0.0], "center": [x, center_y, 10.0],
+                "axis_a": [1.0, 0.0, 0.0], "half_a": half_a, "points": points}
+    planes = [wall(14.0, 10.0, 2000), wall(7.0, 10.0, 1500), wall(20.0, 3.0, 800)]
+    cams = np.array([[6.0, 4.0], [10.0, 5.0], [14.0, 4.0]])
+    return P, planes, cams
+
+
+def test_wall_support_tells_a_real_wall_from_a_bogus_and_a_glimpsed_one():
+    P, planes, cams = cloud_room()
+    real = rs.wall_support(P, planes[0], 0.0, cams, UNITS, [planes[1], planes[2]])
+    bogus = rs.wall_support(P, planes[1], 0.0, cams, UNITS, [planes[0], planes[2]])
+    glimpsed = rs.wall_support(P, planes[2], 0.0, cams, UNITS, [planes[0], planes[1]])
+    assert real["seam"] > 0.8 and real["interior"] < 0.15 and not real["occluded"]
+    assert real["support"] > 0.7
+    assert bogus["interior"] > 0.3 and bogus["support"] < 0.5 * real["support"]
+    assert glimpsed["occluded"] and glimpsed["support"] == 0.0
+
+
+def test_dropping_a_supported_wall_costs_and_dropping_a_bogus_one_pays(tmp_path=None):
+    import tempfile
+    P, planes, cams = cloud_room()
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        walls = rs.WallEvidence(space)
+        walls._loaded = True                       # the cloud, injected: no PLY on disk
+        walls._positions = P
+        walls.unit = UNITS
+        shapes = {"world": np.eye(3).tolist(), "planes": [dict(p) for p in planes],
+                  "room_level": {"floor_z": 0.0, "height": 20.0},
+                  "cameras": cams.tolist(), "boxes": []}
+        penalty = lambda m, c: rs.WALL_WEIGHT * m + rs.WALL_CUT_WEIGHT * c
+        missing, cut, detail = rs.wall_terms(shapes, walls)
+        assert missing == 0.0 and cut == detail["W1"]["interior"] > 0.3   # the kept bogus wall cuts the room
+        dropped_bogus = json.loads(json.dumps(shapes)); dropped_bogus["planes"][1]["build"] = False
+        m2, c2, _ = rs.wall_terms(dropped_bogus, walls)
+        assert c2 < cut and penalty(m2, c2) < penalty(missing, cut)   # dropping the bogus wall pays net
+        dropped_real = json.loads(json.dumps(shapes)); dropped_real["planes"][0]["build"] = False
+        m3, c3, _ = rs.wall_terms(dropped_real, walls)
+        assert m3 > 0.6 and penalty(m3, c3) > penalty(missing, cut)   # dropping the supported wall costs net
+        assert rs.wall_terms(shapes, None) == (0.0, 0.0, {})
+
+
+def test_wall_evidence_loads_a_real_cloud_from_disk():
+    import tempfile
+    from pointcloud import PointCloud, save_ply
+    P, planes, cams = cloud_room()
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        cloud = PointCloud(P.astype(np.float32), np.zeros((len(P), 3), np.uint8))
+        save_ply(cloud, space / "cloud-dense.ply")
+        (space / "densify.json").write_text(json.dumps({"colmap_units_per_metre": UNITS}))
+        walls = rs.WallEvidence(space)
+        shapes = {"world": np.eye(3).tolist(), "planes": [dict(p) for p in planes],
+                  "room_level": {"floor_z": 0.0, "height": 20.0},
+                  "cameras": cams.tolist(), "boxes": []}
+        measured = walls.measured(shapes)
+        assert measured["W0"]["support"] > 0.7 and measured["W2"]["occluded"]
+        # A moved neighbour re-measures its dependants on the same evidence:
+        # shift the real wall away and the far wall is no longer hidden.
+        moved = json.loads(json.dumps(shapes))
+        moved["planes"][0]["center"][1] = 40.0
+        assert not walls.measured(moved)["W2"]["occluded"]
+
+
 def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():
     shapes = room()
     shapes["boxes"] = [dict(CUPBOARD, detected="wardrobe"),                       # another storage name: same kind

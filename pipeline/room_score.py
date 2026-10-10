@@ -21,9 +21,21 @@ and a pass that lowers the score is rolled back, whatever the judge said.
              frames' cameras, that lies inside a fixture's outline (a door, a
              window): a "wardrobe" standing where the frames show the door
              (the phone's detector once named the pan's door a wardrobe).
+  missing    The share of the measured wall support that the built room
+             drops. A wall's support is read off the dense cloud in place:
+             it meets the floor along its run (seam), little of the room
+             lies beyond it (a bogus wall through the middle fails this),
+             and no other measured wall stands between it and the cameras
+             (a next room's wall glimpsed through a door fails this). So a
+             review may drop an unsupported wall freely, but dropping a
+             supported one is measured loss and is rolled back.
+  cut        The largest share of the room's cloud lying beyond a *built*
+             wall: a kept wall that slices the room. Dropping such a wall
+             raises the score; nothing before measured walls at all.
 
   score = agreement - COLLISION_WEIGHT * collision - WALK_WEIGHT * walk
-          - DOORWAY_WEIGHT * doorway
+          - DOORWAY_WEIGHT * doorway - WALL_WEIGHT * missing
+          - WALL_CUT_WEIGHT * cut
 
 Usage:
     python3 pipeline/room_score.py spaces/<name>
@@ -48,6 +60,8 @@ PIECES = ("bed", "seat", "table", "wardrobe")   # the box types always scored as
 COLLISION_WEIGHT = 0.5
 WALK_WEIGHT = 1.0
 DOORWAY_WEIGHT = 0.5
+WALL_WEIGHT = 0.5
+WALL_CUT_WEIGHT = 0.5
 WALK_MIN_SHARE = 0.4      # a piece reaching this share of the room's height cannot be filmed from inside
 MIN_SILHOUETTE = 0.005    # a piece filling less of a frame than this is not judged in that frame
 DOORWAY_SHARE = 0.5       # a piece counts as standing in a fixture when this much of it lies in the outline
@@ -56,6 +70,21 @@ DOORWAY_SHARE_ONE = 0.6   # ... or this much in a single frame (a door is often 
 THIN_M = 0.2              # a piece thinner than this in such an outline is the door itself, not a wardrobe
                           # the detector sometimes calls a door: it counts in full, not by the vote share
 EPS = 0.02                # scores closer than this are the same room
+
+# Wall support, measured on the dense cloud in the shapes frame. Metres where
+# densify recorded the scale; shares of the cloud's extent where it did not
+# (the same fallback shapes.py uses).
+SEAM_BINS = 12            # the wall's run, split into bins: how much of it meets the floor
+SEAM_BIN_POINTS = 3       # a bin is met with at least this many points at the wall's base
+SEAM_BAND_M = 0.30        # the floor band reaches this high up the wall
+PLANE_BAND_M = 0.10       # a point this close to the plane lies on the wall
+CLEAR_M = 0.30            # a point this far beyond the wall is outside the room it bounds
+OCCLUDE_M = 0.40          # a parallel measured wall this much nearer the cameras hides this one
+OCCLUDE_COS = 0.94        # ... parallel within about 20 degrees
+OCCLUDE_OVERLAP = 0.5     # ... overlapping at least this share of the shorter wall's run
+OCCLUDER_MAX_INTERIOR = 0.25  # ... and itself credible: a plane the room lies beyond is no
+                              # wall, and must not hide the real one standing behind it
+MAX_CLOUD_POINTS = 200_000
 
 
 class Evidence:
@@ -183,7 +212,152 @@ def doorways_by_votes(space: Path, shapes: dict, vocabulary) -> dict[str, float]
     return found
 
 
-def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None) -> dict:
+def wall_support(P: np.ndarray, plane: dict, floor_z: float, cameras: np.ndarray,
+                 unit: float, others: list[dict] = ()) -> dict:
+    """One wall plane measured in place against the cloud `P` (shapes frame).
+
+    seam      the share of the wall's run with points at its base, in the
+              floor band: a real wall meets the floor along its length.
+    interior  the share of the room's points lying beyond the wall (outward
+              of the cameras, within its run): a bogus wall through the room
+              has the room itself beyond it.
+    occluded  another measured wall — roughly parallel, overlapping, and
+              itself credible (little of the room beyond it) — stands
+              between this one and the cameras: the next room's wall seen
+              through a doorway. A bogus plane cannot occlude (else a wall
+              through the middle of the room would hide the real one).
+    support   seam * (1 - interior), 0 when occluded.
+    """
+    def frame(p):
+        n = np.asarray(p["normal"], float)
+        return (n / np.linalg.norm(n), np.asarray(p["axis_a"], float),
+                np.asarray(p["center"], float), float(p["half_a"]))
+
+    def seam_interior(n, a, c, half):
+        inner = float(np.sign(np.median(
+            (np.column_stack([cameras, np.full(len(cameras), c[2])]) - c) @ n)))
+        inner = inner or 1.0
+        t = (P - c) @ a
+        d = (P - c) @ n
+        in_run = np.abs(t) <= half
+        on_wall = in_run & (np.abs(d) < PLANE_BAND_M * unit)
+        at_base = on_wall & (P[:, 2] > floor_z - PLANE_BAND_M * unit) \
+            & (P[:, 2] < floor_z + SEAM_BAND_M * unit)
+        bins = np.floor((t[at_base] + half) / (2 * half) * SEAM_BINS).astype(int) \
+            .clip(0, SEAM_BINS - 1)
+        seam = float((np.bincount(bins, minlength=SEAM_BINS) >= SEAM_BIN_POINTS).sum() / SEAM_BINS)
+        beyond = in_run & (-inner * d > CLEAR_M * unit)
+        return seam, (float(beyond.sum() / len(P)) if len(P) else 0.0), inner
+
+    n, a, c, half = frame(plane)
+    seam, interior, inner = seam_interior(n, a, c, half)
+
+    occluded = False
+    for other in others:
+        n2, a2, c2, half2 = frame(other)
+        if abs(float(n @ n2)) < OCCLUDE_COS:
+            continue
+        if float((c2 - c) @ (inner * n)) <= OCCLUDE_M * unit:
+            continue                       # not clearly on the cameras' side of this wall
+        t2 = float((c2 - c) @ a)
+        overlap = min(half, t2 + half2) - max(-half, t2 - half2)
+        if overlap < OCCLUDE_OVERLAP * min(half, half2) * 2:
+            continue
+        if seam_interior(n2, a2, c2, half2)[1] > OCCLUDER_MAX_INTERIOR:
+            continue                       # the room lies beyond it: no wall, no occluder
+        occluded = True
+        break
+    support = 0.0 if occluded else seam * (1.0 - interior)
+    return {"seam": round(seam, 3), "interior": round(interior, 3),
+            "occluded": occluded, "support": round(support, 3)}
+
+
+class WallEvidence:
+    """The space's dense cloud, loaded once; each wall's measured support
+    cached by its geometry, so the review's edits re-measure only the walls
+    they moved."""
+
+    def __init__(self, space: Path, log=None):
+        self.space = Path(space)
+        self.log = log or (lambda text: None)
+        self._positions = None   # raw solve-frame positions, subsampled
+        self._loaded = False
+        self._frames: dict[bytes, np.ndarray] = {}
+        self._cache: dict[tuple, dict] = {}
+        try:
+            self.unit = json.loads((self.space / "densify.json").read_text()) \
+                .get("colmap_units_per_metre")
+        except (OSError, ValueError):
+            self.unit = None
+
+    def _points(self, world) -> np.ndarray | None:
+        if not self._loaded:
+            self._loaded = True
+            from pointcloud import load_ply
+            path = next((p for p in (self.space / "cloud-dense.ply", self.space / "cloud.ply")
+                         if p.exists()), None)
+            if path is not None:
+                points = load_ply(path).points.astype(np.float64)
+                if len(points) > MAX_CLOUD_POINTS:
+                    keep = np.random.default_rng(7).choice(len(points), MAX_CLOUD_POINTS,
+                                                           replace=False)
+                    points = points[keep]
+                self._positions = points
+                self.log(f"wall evidence: {len(points):,} points from {path.name}")
+        if self._positions is None:
+            return None
+        key = np.asarray(world, float).tobytes()
+        if key not in self._frames:
+            self._frames[key] = self._positions @ np.asarray(world, float).T
+        return self._frames[key]
+
+    def measured(self, shapes: dict) -> dict[str, dict]:
+        """{W<i>: wall_support(...)} for every RANSAC wall, built or not."""
+        level = shapes.get("room_level") or {}
+        cameras = np.asarray(shapes.get("cameras") or [], float)
+        walls = [(i, p) for i, p in enumerate(shapes.get("planes") or [])
+                 if p.get("kind") == "wall" and p.get("source") != "inferred" and p.get("points")]
+        if "floor_z" not in level or not len(cameras) or not walls or shapes.get("world") is None:
+            return {}
+        P = self._points(shapes["world"])
+        if P is None:
+            return {}
+        extent = float(np.linalg.norm(np.percentile(P, 98, 0) - np.percentile(P, 2, 0)))
+        unit = self.unit or extent * 0.12      # without the scale: bands as shares of the room
+        found = {}
+
+        def geometry(p):
+            return (tuple(np.round(np.asarray(p["normal"], float), 4)),
+                    tuple(np.round(np.asarray(p["center"], float), 3)),
+                    round(float(p["half_a"]), 3))
+
+        for i, p in walls:
+            others = [q for j, q in walls if j != i]
+            # Occlusion depends on the other walls too, so a moved neighbour
+            # (the review's wall-move edit) re-measures this one as well.
+            key = (round(float(level["floor_z"]), 4), geometry(p),
+                   tuple(sorted(geometry(q) for q in others)))
+            if key not in self._cache:
+                self._cache[key] = wall_support(P, p, float(level["floor_z"]), cameras, unit, others)
+            found[f"W{i}"] = {**self._cache[key], "points": int(p["points"]),
+                              "built": bool(p.get("build", True))}
+        return found
+
+
+def wall_terms(shapes: dict, walls: "WallEvidence | None") -> tuple[float, float, dict]:
+    """(missing, cut, per-wall detail): the dropped share of the measured
+    wall support, and the worst built wall's slice through the room."""
+    if walls is None:
+        return 0.0, 0.0, {}
+    measured = walls.measured(shapes)
+    mass = {k: w["support"] * w["points"] for k, w in measured.items()}
+    total = sum(mass.values())
+    missing = sum(m for k, m in mass.items() if not measured[k]["built"]) / total if total else 0.0
+    cut = max((w["interior"] for w in measured.values() if w["built"]), default=0.0)
+    return missing, cut, measured
+
+
+def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None, walls=None) -> dict:
     """The score of `shapes` (a shapes.json in memory), with its parts."""
     space = Path(space)
     vocabulary = vocabulary or room_vocabulary(space)
@@ -224,10 +398,15 @@ def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None) -> dict
         doorways[box_id] = max(doorways.get(box_id, 0.0), share)
     doorway = max(doorways.values(), default=0.0)
 
-    score = (agreement or 0.0) - COLLISION_WEIGHT * collision - WALK_WEIGHT * walk - DOORWAY_WEIGHT * doorway
+    missing, cut, measured_walls = wall_terms(shapes, walls)
+
+    score = ((agreement or 0.0) - COLLISION_WEIGHT * collision - WALK_WEIGHT * walk
+             - DOORWAY_WEIGHT * doorway - WALL_WEIGHT * missing - WALL_CUT_WEIGHT * cut)
     return {"score": round(score, 3), "agreement": None if agreement is None else round(agreement, 3),
             "collision": round(collision, 3), "walk": round(walk, 3), "doorway": round(doorway, 3),
-            "doorways": {k: round(v, 3) for k, v in doorways.items()}, "pieces": pieces}
+            "doorways": {k: round(v, 3) for k, v in doorways.items()},
+            "wall_missing": round(missing, 3), "wall_cut": round(cut, 3),
+            "walls": measured_walls, "pieces": pieces}
 
 
 def compare(before: dict, after: dict) -> str:
@@ -251,6 +430,14 @@ def describe(result: dict) -> str:
     if result.get("doorway"):
         worst = max(result["doorways"].items(), key=lambda kv: kv[1])
         text += f"; {worst[0]} stands in a doorway or window ({worst[1]:.0%} of it)"
+    if result.get("wall_missing"):
+        dropped = sorted(k for k, w in result["walls"].items() if not w["built"] and w["support"])
+        text += (f"; dropped walls held {result['wall_missing']:.0%} of the measured wall "
+                 f"support ({', '.join(dropped)})")
+    if result.get("wall_cut"):
+        worst = max((k for k, w in result["walls"].items() if w["built"]),
+                    key=lambda k: result["walls"][k]["interior"])
+        text += f"; {worst} cuts the room off ({result['walls'][worst]['interior']:.0%} of it beyond)"
     return text
 
 
@@ -259,7 +446,8 @@ def main() -> None:
         sys.exit(__doc__)
     space = Path(sys.argv[1])
     shapes = json.loads((space / "shapes.json").read_text())
-    result = room_score(space, shapes, Evidence(space, log=print))
+    result = room_score(space, shapes, Evidence(space, log=print),
+                        walls=WallEvidence(space, log=print))
     print(describe(result))
     print(json.dumps(result, indent=1))
 

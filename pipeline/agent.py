@@ -1537,7 +1537,10 @@ class Agent:
         frames, less collisions and pieces the walk went through."""
         if shapes is None:
             shapes = json.loads((self.space / "shapes.json").read_text())
-        result = room_score.room_score(self.space, shapes, self.evidence_for, room_vocabulary(self.space))
+        if getattr(self, "_walls", None) is None:
+            self._walls = room_score.WallEvidence(self.space, log=lambda text: print("    " + text))
+        result = room_score.room_score(self.space, shapes, self.evidence_for,
+                                       room_vocabulary(self.space), walls=self._walls)
         print("    " + room_score.describe(result))
         return result
 
