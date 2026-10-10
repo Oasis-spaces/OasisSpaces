@@ -222,6 +222,21 @@ def test_on_the_finished_room_the_phone_is_heard_first_and_claude_only_where_not
     assert "from 0.50 to 0.20" in recorded[0]
 
 
+def test_a_thin_piece_inside_another_is_its_surface_and_is_not_built():
+    agent_ = stub(Answers())
+    shapes = room()
+    shapes["boxes"] = [{"label": "bed", "detected": "bed", "source": "detected", "build": True, "points": 5000,
+                        "min": [-16.0, -4.0, -11.5], "max": [-7.0, 11.0, -6.0]},
+                       {"label": "wardrobe", "detected": "chest of drawers", "source": "detected", "build": True, "points": 600,
+                        "min": [-14.0, -4.0, -11.5], "max": [-9.0, -4.0 + 0.07 * UNITS, -7.0]},   # the bed's base front
+                       {"label": "wardrobe", "detected": "wardrobe", "source": "detected", "build": True, "points": 900,
+                        "min": [-20.0, 10.0, -11.5], "max": [-20.0 + 0.13 * UNITS, 16.0, 7.0]}]  # a thin front on its own
+    notes = agent.Agent.repair_overlaps(agent_, shapes)
+    assert len(notes) == 1 and notes[0].startswith("dropped B1 (chest of drawers): a 0.07 m thin slab lying 100% inside B0 (bed)")
+    assert [b["build"] for b in shapes["boxes"]] == [True, False, True]
+    assert "its surface" in shapes["boxes"][1]["reason"]
+
+
 def test_no_whole_piece_means_nothing_is_added():
     shapes = room()
     applied = agent.Agent.ask_where_piece_stands(stub(Answers({"none": True, "why": "only a door"})),

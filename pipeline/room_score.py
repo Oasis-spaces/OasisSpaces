@@ -17,8 +17,13 @@ and a pass that lowers the score is rolled back, whatever the judge said.
              another's (pillows and the like on furniture are not pieces).
   walk       The share of the camera positions standing inside a piece tall
              enough that nobody could have filmed from there.
+  doorway    The largest share of a built piece's silhouette, through the
+             frames' cameras, that lies inside a fixture's outline (a door, a
+             window): a "wardrobe" standing where the frames show the door
+             (the phone's detector once named the pan's door a wardrobe).
 
   score = agreement - COLLISION_WEIGHT * collision - WALK_WEIGHT * walk
+          - DOORWAY_WEIGHT * doorway
 
 Usage:
     python3 pipeline/room_score.py spaces/<name>
@@ -39,7 +44,13 @@ from semantics import room_vocabulary  # noqa: E402
 PIECES = ("bed", "seat", "table", "wardrobe")   # the furniture types scored as pieces
 COLLISION_WEIGHT = 0.5
 WALK_WEIGHT = 1.0
+DOORWAY_WEIGHT = 0.5
 WALK_MIN_SHARE = 0.4      # a piece reaching this share of the room's height cannot be filmed from inside
+FIXTURES = ("door", "window")   # names whose outlines no piece should fill (plus the list's fixture role)
+MIN_SILHOUETTE = 0.005    # a piece filling less of a frame than this is not judged in that frame
+DOORWAY_SHARE = 0.5       # a piece counts as standing in a fixture when this much of it lies in the outline
+                          # (a piece beside a door overlaps its outline a little from some angles)
+DOORWAY_SHARE_ONE = 0.6   # ... or this much in a single frame (a door is often seen in one keyframe only)
 EPS = 0.02                # scores closer than this are the same room
 
 
@@ -86,6 +97,35 @@ def overlap_share(a: dict, b: dict) -> float:
     return inter / smallest if smallest > 0 else 0.0
 
 
+def in_doorways(shapes: dict, evidence_for, vocabulary) -> dict[str, float]:
+    """For each built piece, the mean share of its silhouette lying inside a
+    fixture's outline over the frames that show the piece: DOORWAY_SHARE over
+    at least MIN_FRAMES frames, or DOORWAY_SHARE_ONE in fewer (the pan's door
+    was detected in two keyframes and the box standing in it shows in one).
+    Keyed by box id; only pieces with a share are listed."""
+    names = set(FIXTURES) | set(vocabulary.with_role("fixture"))
+    found = {}
+    for label in sorted(names):
+        evidence = evidence_for(label)
+        if not evidence["frames"]:
+            continue
+        for i, b in built_pieces(shapes):
+            lo, hi = np.array(b["min"], float), np.array(b["max"], float)
+            shares = []
+            for view in evidence["frames"].values():
+                mask = view["mask"]
+                sil = placement.silhouette(lo, hi, view, mask.shape)
+                if sil.sum() < MIN_SILHOUETTE * sil.size:
+                    continue
+                shares.append(float((sil & mask).sum() / sil.sum()))
+            if not shares:
+                continue
+            share = float(np.mean(shares))
+            if (len(shares) >= placement.MIN_FRAMES and share >= DOORWAY_SHARE) or share >= DOORWAY_SHARE_ONE:
+                found[f"B{i}"] = max(found.get(f"B{i}", 0.0), share)
+    return found
+
+
 def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None) -> dict:
     """The score of `shapes` (a shapes.json in memory), with its parts."""
     space = Path(space)
@@ -122,9 +162,13 @@ def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None) -> dict
             inside += 1
     walk = inside / len(cameras) if cameras else 0.0
 
-    score = (agreement or 0.0) - COLLISION_WEIGHT * collision - WALK_WEIGHT * walk
+    doorways = in_doorways(shapes, evidence_for, vocabulary)
+    doorway = max(doorways.values(), default=0.0)
+
+    score = (agreement or 0.0) - COLLISION_WEIGHT * collision - WALK_WEIGHT * walk - DOORWAY_WEIGHT * doorway
     return {"score": round(score, 3), "agreement": None if agreement is None else round(agreement, 3),
-            "collision": round(collision, 3), "walk": round(walk, 3), "pieces": pieces}
+            "collision": round(collision, 3), "walk": round(walk, 3), "doorway": round(doorway, 3),
+            "doorways": {k: round(v, 3) for k, v in doorways.items()}, "pieces": pieces}
 
 
 def compare(before: dict, after: dict) -> str:
@@ -145,6 +189,9 @@ def describe(result: dict) -> str:
         text += f"; pieces overlap by {result['collision']:.0%}"
     if result["walk"]:
         text += f"; {result['walk']:.0%} of the walk stands inside a piece"
+    if result.get("doorway"):
+        worst = max(result["doorways"].items(), key=lambda kv: kv[1])
+        text += f"; {worst[0]} stands in a doorway or window ({worst[1]:.0%} of it)"
     return text
 
 

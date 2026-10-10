@@ -201,6 +201,8 @@ CAMERA_CLEARANCE_M = 0.1         # an added box this close to where the phone wa
 ASKABLE_PIECES = {"bed", "wardrobe", "table", "seat"}   # a review that drops every box of one of these is asked where it stands
 PHONE_ADDS_M = {"wardrobe": 1.4, "bed": 0.3}     # the phone's second opinion adds only large furniture: family -> least height
 FRAGMENT_DEPTH_M = 0.25          # a measured box thinner than this, against a wall, may be a piece's fragment (an open door leaf)
+SLAB_M = 0.2                     # a built piece thinner than this that lies mostly inside another is that piece's surface ...
+SLAB_INSIDE = 0.5                # ... when this share of it is inside (repair_overlaps, after the finish step)
 
 
 def dropped_pieces(shapes: dict, verdict: dict, applied: list[str]) -> dict[str, list[tuple[str, str]]]:
@@ -1039,7 +1041,8 @@ class Agent:
         # matched no box, the box it stands in does) is undone.
         measured = self.safe(self.measure_room, shapes)
         snapshot = copy.deepcopy(shapes["boxes"])
-        notes = self.safe(self.phone_second_opinion, shapes, default=[]) or []
+        notes = self.safe(self.repair_overlaps, shapes, default=[]) or []
+        notes += self.safe(self.phone_second_opinion, shapes, default=[]) or []
         for label, piece in pending.items():
             family = placement.furniture_family(self.space, label)
             if any(b.get("build", True) and placement.furniture_family(self.space, b.get("label") or "") == family
@@ -1065,6 +1068,37 @@ class Agent:
         if len(shapes["boxes"]) != before or any(note.startswith("grew") for note in notes):
             self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"), str(self.space), "--finish-only"],
                      "finish", "around what the second opinion added")
+
+    def repair_overlaps(self, shapes: dict) -> list[str]:
+        """Once the finish step has stood every piece on the floor, a thin
+        piece lying mostly inside another is that piece's surface, not
+        furniture: the front of a bed's storage base measured as a "chest of
+        drawers" (the pan, 0.07 m thick, 71% inside the bed once the bed
+        reached the floor). It is not built. Bounded: only pieces thinner
+        than SLAB_M, only when SLAB_INSIDE of them lies inside another."""
+        units = self.densify_metrics().get("colmap_units_per_metre")
+        if not units:
+            return []
+        notes = []
+        pieces = room_score.built_pieces(shapes)
+        for i, a in pieces:
+            lo, hi = np.array(a["min"], float), np.array(a["max"], float)
+            thickness = float(min(hi[0] - lo[0], hi[1] - lo[1])) / units
+            if thickness > SLAB_M or not a.get("build", True):
+                continue
+            volume = float(np.prod(hi - lo))
+            for j, b in pieces:
+                if j == i or not b.get("build", True):
+                    continue
+                inner = np.maximum(np.minimum(hi, np.array(b["max"], float)) - np.maximum(lo, np.array(b["min"], float)), 0.0)
+                share = float(np.prod(inner)) / volume if volume > 0 else 0.0
+                if share >= SLAB_INSIDE:
+                    a["build"] = False
+                    a["reason"] = f"a {thickness:.2f} m thin slab lying {share:.0%} inside B{j}: its surface, not a piece"
+                    notes.append(f"dropped B{i} ({a.get('detected') or a.get('label')}): a {thickness:.2f} m thin slab "
+                                 f"lying {share:.0%} inside B{j} ({b.get('label')}), its surface rather than a piece")
+                    break
+        return notes
 
     def place_dropped_piece(self, shapes: dict, label: str, dropped: list[tuple[str, str]]) -> list[str]:
         """The review dropped every '{label}' box as a fragment (a door leaf, a

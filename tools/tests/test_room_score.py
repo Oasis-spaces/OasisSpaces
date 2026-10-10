@@ -16,7 +16,8 @@ from semantics import Vocabulary  # noqa: E402
 UNITS = 9.0
 VOCAB = Vocabulary([{"name": "bed", "role": "furniture", "build_as": "bed"},
                     {"name": "almirah", "role": "storage", "build_as": "wardrobe"},
-                    {"name": "pillow", "role": "on_furniture", "build_as": "block"}])
+                    {"name": "pillow", "role": "on_furniture", "build_as": "block"},
+                    {"name": "door", "role": "fixture", "build_as": None}])
 
 
 def look_at(position, target):
@@ -113,6 +114,31 @@ def test_without_outlines_only_the_penalties_count_and_small_things_are_not_piec
     # the pillow box is not a piece: it neither collides nor stands for a name
     assert [i for i, _ in rs.built_pieces(shapes)] == [0]
     assert rs.boxes_of(shapes, "pillow", VOCAB) == []
+
+
+def test_a_piece_standing_where_the_frames_show_the_door_is_penalised():
+    door = {"min": [8.0, 15.0, 0.0], "max": [15.0, 15.6, 18.0], "label": "door", "detected": "door"}
+    # the door is looked at from beside the bed, not through it (an outline stops where a piece covers it)
+    table = {"bed": evidence_from(BED, ((0.0, -20.0, 12.0), (8.0, -18.0, 12.0), (-8.0, -18.0, 12.0))),
+             "door": evidence_from(door, ((11.0, 2.0, 12.0), (9.5, 0.0, 12.0), (13.0, 4.0, 12.0)))}
+    evidence_for = lambda label: table.get(label, {"frames": {}, "unseen": {}})
+    shapes = room()
+    in_doorway = dict(CUPBOARD, min=[8.5, 12.0, 0.0], max=[14.5, 15.5, 17.0])   # a "wardrobe" standing in the doorway
+    shapes["boxes"] = [dict(BED), in_doorway]
+    result = rs.room_score(Path("."), shapes, evidence_for, VOCAB)
+    assert result["doorways"]["B1"] > 0.7
+    assert "B0" not in result["doorways"] and result["doorway"] == result["doorways"]["B1"]
+    assert "B1 stands in a doorway" in rs.describe(result)
+    clear = rs.room_score(Path("."), dict(shapes, boxes=[dict(BED), dict(CUPBOARD)]), evidence_for, VOCAB)
+    assert clear["doorway"] == 0 and rs.compare(clear, result) == "worse"
+    # one frame is enough when most of the piece lies in the door; a slight overlap in one is not
+    one = {"door": evidence_from(door, ((11.0, 2.0, 12.0),))}
+    filling = dict(CUPBOARD, min=list(door["min"]), max=list(door["max"]))        # exactly in the doorway
+    once = rs.room_score(Path("."), dict(shapes, boxes=[dict(BED), filling]), lambda l: one.get(l, {"frames": {}, "unseen": {}}), VOCAB)
+    assert once["doorways"]["B1"] > 0.9
+    beside = dict(CUPBOARD, min=[13.0, 12.0, 0.0], max=[19.0, 15.5, 17.0])      # mostly past the door's edge
+    aside = rs.room_score(Path("."), dict(shapes, boxes=[dict(BED), beside]), lambda l: one.get(l, {"frames": {}, "unseen": {}}), VOCAB)
+    assert aside["doorway"] < once["doorway"]
 
 
 def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():

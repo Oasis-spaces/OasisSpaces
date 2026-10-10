@@ -276,11 +276,18 @@ the agent's judgement:
    storage name the frames show, how well the best built box of that kind
    covers the name's outlines when projected through the frames' own cameras
    (the placement score above), 0 when no such box is built; less the largest
-   overlap between two pieces, and the share of the walk that stands inside a
-   piece too tall to film from. The score is recorded in the report after the
-   review, and it decides instead of the judge: each group of the review's
-   edits that touches the furniture (fronts, drops, relabels, additions) is
-   measured and rolled back when it lowers the score, and when the render
+   overlap between two pieces, the share of the walk that stands inside a
+   piece too tall to film from, and the largest share of a piece's silhouette
+   lying inside a door's or window's outline (the phone's detector once named
+   the pan's door a wardrobe, and the box stood in the doorway). The score is
+   recorded in the report after the review, and it decides instead of the
+   judge: each of the review's edits that touches the furniture (a front, a
+   drop, a relabel, an addition) is measured on its own and rolled back when
+   it lowers the score, as is what the phone's second opinion adds. One
+   repair is made without asking anyone: once the finish step has stood
+   every piece on the floor, a piece thinner than 0.2 m lying mostly inside
+   another is that piece's surface (the front of a storage bed's base,
+   measured as a "chest of drawers") and is not built. And when the render
    check sends the room back for a second review, the second room is kept
    when it measures higher and the first when it measures lower; only two
    rooms that measure the same are left to the judge's count of problems. A
