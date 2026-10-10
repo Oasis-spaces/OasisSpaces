@@ -1,5 +1,5 @@
 {
- "comment": "Classes of the on-device object detector (YOLOE-11m segmentation, prompted with these names; the class index is the row's position). Each detection is one whole thing with its own mask, which is what makes one box per piece of furniture. label: shown on screen. group: colour (see detection-classes.json). family: look-alikes that vote together on one object. boxed: placed as a box in the room map (wall-mounted and small things are outlined only). onFloor: always stands on the floor, so its box reaches the floor even when its bottom was hidden (a cabinet or a shelf may hang on a wall and has no such flag). minTop / maxTop: its top layer is at least, or at most, this many metres above the floor, or it is not placed under that name (a desk whose top is knee-high is a stool). Clothes are not in the list on purpose.",
+ "comment": "Classes of the on-device object detector (YOLOE-11m segmentation, prompted with these names; the class index is the row's position). Each detection is one whole thing with its own mask, which is what makes one box per piece of furniture. label: shown on screen. group: colour (see detection-classes.json). family: look-alikes that vote together on one object. boxed: placed as a box in the room map (wall-mounted and small things are outlined only). onFloor: always stands on the floor, so its box reaches the floor even when its bottom was hidden (a cabinet or a shelf may hang on a wall and has no such flag). minTop / maxTop: its top layer is at least, or at most, this many metres above the floor, or it is not placed under that name (a desk whose top is knee-high is a stool). minHeight / maxHeight / minWidth / maxWidth: the thing's own size in metres as the depth puts it, outside which the name is impossible and the detector's runner-up name is taken instead (a 'person' 0.4 m tall is a lamp); a minimum is only held against a thing seen whole, not one cut by the frame's edge, and only standing things get a height bound (a bed's extent on the screen is its length seen from above). glimpseShare: a thing cut by the frame's edge with less than this share of the frame showing is a glimpse and gets no name yet. Clothes are not in the list on purpose.",
  "model": "yoloe-11m-seg",
  "inputSize": [
   480,
@@ -11,6 +11,7 @@
  "minShare": 0.002,
  "bareSurfaceShare": 0.9,
  "bareStepShare": 0.2,
+ "glimpseShare": 0.12,
  "kin": {
   "comment": "Families the detector confuses on one object: they match one tracked object, whose label is the most-voted class with hysteresis.",
   "sitting": [
@@ -41,7 +42,8 @@
  "screen": {
   "showSightings": 2,
   "forgetAnalyses": 6,
-  "minAngleDegrees": 6
+  "minAngleDegrees": 6,
+  "voteDecay": 0.9
  },
  "tracker": {
   "voxelMetres": 0.05,
@@ -66,7 +68,8 @@
    0.3,
    6.0
   ],
-  "forgetObservations": 24
+  "forgetObservations": 24,
+  "voteDecay": 0.9
  },
  "classes": [
   {
@@ -216,7 +219,8 @@
    "group": "storage",
    "family": "storage",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "minHeight": 1.0
   },
   {
    "id": 16,
@@ -328,7 +332,8 @@
    "group": "appliance",
    "family": "fridge",
    "boxed": true,
-   "onFloor": true
+   "onFloor": true,
+   "minHeight": 0.5
   },
   {
    "id": 29,
@@ -528,7 +533,8 @@
    "label": "door",
    "group": "structure",
    "family": "door",
-   "boxed": false
+   "boxed": false,
+   "minHeight": 1.4
   },
   {
    "id": 53,
@@ -675,7 +681,8 @@
    "label": "person",
    "group": "person",
    "family": "person",
-   "boxed": false
+   "boxed": false,
+   "minHeight": 0.8
   }
  ]
 }

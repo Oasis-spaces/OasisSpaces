@@ -20,6 +20,13 @@ public struct ObjectSpec: Codable, Sendable {
         /// Its top is at least, or at most, this high above the floor (a desk's top, a bathtub's rim).
         public var minTop: Float?
         public var maxTop: Float?
+        /// Its own size in metres, as the depth puts it, outside which the name is impossible
+        /// (a "person" 0.4 m tall is a lamp). Only standing things get a height bound: a bed's
+        /// extent on the screen is its length seen from above, not its height.
+        public var minHeight: Float?
+        public var maxHeight: Float?
+        public var minWidth: Float?
+        public var maxWidth: Float?
     }
 
     public struct Tracker: Codable, Sendable {
@@ -56,6 +63,8 @@ public struct ObjectSpec: Codable, Sendable {
         public var forgetObservations: Int = 24
         public var maxSizeMetres: Float = 4
         public var depthMetres: [Float] = [0.3, 6]
+        /// Each observation of an object scales its earlier name votes by this (see Screen.voteDecay).
+        public var voteDecay: Float = 0.9
 
         public init() {}
 
@@ -82,6 +91,7 @@ public struct ObjectSpec: Codable, Sendable {
             forgetObservations = try c.decodeIfPresent(Int.self, forKey: .forgetObservations) ?? forgetObservations
             maxSizeMetres = try c.decodeIfPresent(Float.self, forKey: .maxSizeMetres) ?? maxSizeMetres
             depthMetres = try c.decodeIfPresent([Float].self, forKey: .depthMetres) ?? depthMetres
+            voteDecay = try c.decodeIfPresent(Float.self, forKey: .voteDecay) ?? voteDecay
         }
     }
 
@@ -93,6 +103,9 @@ public struct ObjectSpec: Codable, Sendable {
         public var forgetAnalyses: Int = 6
         /// Two sightings this close in direction are the same thing, however small it is.
         public var minAngleDegrees: Float = 6
+        /// Each new sighting of a thing scales its earlier name votes by this: the latest looks
+        /// weigh most, so a TV called a painting from across the room is a TV once seen up close.
+        public var voteDecay: Float = 0.9
 
         public init() {}
 
@@ -101,6 +114,7 @@ public struct ObjectSpec: Codable, Sendable {
             showSightings = try c.decodeIfPresent(Int.self, forKey: .showSightings) ?? showSightings
             forgetAnalyses = try c.decodeIfPresent(Int.self, forKey: .forgetAnalyses) ?? forgetAnalyses
             minAngleDegrees = try c.decodeIfPresent(Float.self, forKey: .minAngleDegrees) ?? minAngleDegrees
+            voteDecay = try c.decodeIfPresent(Float.self, forKey: .voteDecay) ?? voteDecay
         }
     }
 
@@ -117,13 +131,16 @@ public struct ObjectSpec: Codable, Sendable {
     public var bareSurfaceShare: Float
     /// ... and with less than this share of its outline standing out in depth.
     public var bareStepShare: Float
+    /// A thing cut by the frame's edge with less than this share of the frame showing is a
+    /// glimpse: too little of it to say what it is, so it gets no name yet.
+    public var glimpseShare: Float
     public var kin: [String: [String]]
     public var tracker: Tracker
     public var screen: Screen
     public var classes: [ClassInfo]
 
     private enum CodingKeys: String, CodingKey {
-        case model, inputSize, confidence, iou, maskThreshold, minShare, bareSurfaceShare, bareStepShare, kin, tracker, screen, classes
+        case model, inputSize, confidence, iou, maskThreshold, minShare, bareSurfaceShare, bareStepShare, glimpseShare, kin, tracker, screen, classes
     }
 
     public init(from decoder: Decoder) throws {
@@ -136,6 +153,7 @@ public struct ObjectSpec: Codable, Sendable {
         minShare = try c.decodeIfPresent(Float.self, forKey: .minShare) ?? 0.002
         bareSurfaceShare = try c.decodeIfPresent(Float.self, forKey: .bareSurfaceShare) ?? 0.9
         bareStepShare = try c.decodeIfPresent(Float.self, forKey: .bareStepShare) ?? 0.2
+        glimpseShare = try c.decodeIfPresent(Float.self, forKey: .glimpseShare) ?? 0.12
         tracker = try c.decodeIfPresent(Tracker.self, forKey: .tracker) ?? Tracker()
         screen = try c.decodeIfPresent(Screen.self, forKey: .screen) ?? Screen()
         classes = try c.decode([ClassInfo].self, forKey: .classes)
@@ -207,6 +225,44 @@ public struct ObjectSpec: Codable, Sendable {
     public func kinGroup(_ index: Int) -> String? {
         info(index).map { kinGroup(of: $0.family) }
     }
+
+    /// A glimpse: cut by the frame's edge with under `glimpseShare` of the frame
+    /// showing across it. Too little to say what it is, so it gets no name of
+    /// its own; in the room map it adds to whatever tracked object it lies on.
+    public func isGlimpse(_ instance: Instance) -> Bool {
+        let edge: Float = 0.005
+        let atSide = instance.minX <= edge || instance.maxX >= 1 - edge
+        let atTopOrBottom = instance.minY <= edge || instance.maxY >= 1 - edge
+        return (atSide && instance.maxX - instance.minX < glimpseShare) || (atTopOrBottom && instance.maxY - instance.minY < glimpseShare)
+    }
+
+    /// The class a detected thing can be: its own; the detector's runner-up
+    /// when its own is impossible at the size the depth gives it (a "person"
+    /// 0.4 m tall is the lamp the detector also considered); or none yet,
+    /// when it is a glimpse at the frame's edge (a chair's back showing as a
+    /// strip along the bottom edge was a "toilet"). A minimum size is held
+    /// only against a thing seen whole: cut by the frame's edge, it is as
+    /// small as the frame makes it. `size` is the thing's apparent width and
+    /// height in metres (see Instance.apparentSize); without depth only the
+    /// glimpse rule applies.
+    public func believed(_ instance: Instance, size: (width: Float, height: Float)?) -> Int? {
+        if isGlimpse(instance) { return nil }
+        let edge: Float = 0.005
+        let atSide = instance.minX <= edge || instance.maxX >= 1 - edge
+        let atTopOrBottom = instance.minY <= edge || instance.maxY >= 1 - edge
+        func possible(_ index: Int) -> Bool {
+            guard let info = info(index) else { return false }
+            guard let size else { return true }
+            let slack: Float = 1.25                                  // the depth's own uncertainty
+            if let m = info.maxHeight, size.height > m * slack { return false }
+            if let m = info.maxWidth, size.width > m * slack { return false }
+            if !atTopOrBottom, let m = info.minHeight, size.height < m / slack { return false }
+            if !atSide, let m = info.minWidth, size.width < m / slack { return false }
+            return true
+        }
+        if possible(instance.classIndex) { return instance.classIndex }
+        return instance.alternatives.first { $0.confidence >= confidence && possible($0.classIndex) }?.classIndex
+    }
 }
 
 /// One detected thing in a frame.
@@ -223,13 +279,27 @@ public struct Instance: Sendable {
     public var area: Int
     /// The mask refiner's own estimate of its mask (0...1), when it refined this one.
     public var quality: Float? = nil
+    /// The other names the detector gave this same outline, most confident first:
+    /// the runner-up class of its anchor, and the classes of the anchors it suppressed.
+    public var alternatives: [Alternative] = []
+
+    public struct Alternative: Sendable, Equatable {
+        public var classIndex: Int
+        public var confidence: Float
+        public init(classIndex: Int, confidence: Float) {
+            self.classIndex = classIndex
+            self.confidence = confidence
+        }
+    }
 
     public init(classIndex: Int, confidence: Float, minX: Float, minY: Float, maxX: Float, maxY: Float,
-                mask: [UInt8], maskWidth: Int, maskHeight: Int, area: Int, quality: Float? = nil) {
+                mask: [UInt8], maskWidth: Int, maskHeight: Int, area: Int, quality: Float? = nil,
+                alternatives: [Alternative] = []) {
         self.classIndex = classIndex; self.confidence = confidence
         self.minX = minX; self.minY = minY; self.maxX = maxX; self.maxY = maxY
         self.mask = mask; self.maskWidth = maskWidth; self.maskHeight = maskHeight; self.area = area
         self.quality = quality
+        self.alternatives = alternatives
     }
 
     /// Share of the image the mask covers.
@@ -246,6 +316,32 @@ extension Instance {
     /// mask pixels of the mask's edge. The depth map is soft at an edge (a
     /// pixel there is somewhere between the thing and the wall behind it),
     /// and those in-between points stretch a box towards the wall.
+    /// How big the thing looks in metres: its box's width and height at the
+    /// depth of its middle (the median depth inside the mask), with the depth.
+    /// `depthAt` reads depth at normalised upright coordinates; the camera is
+    /// the upright image's (`sensorLandscape` false) or the phone's landscape
+    /// sensor's, which shows upright (x, y) at sensor (y, 1 - x). For a thing
+    /// seen from above this is its extent on the screen, not its height.
+    public func apparentSize(camera: PinholeCamera, sensorLandscape: Bool,
+                             depthAt: (Float, Float) -> Float?) -> (width: Float, height: Float, depth: Float)? {
+        // Well inside the mask where there is room; a thin thing (a floor lamp's pole, the very
+        // things a size says most about) has no inside to speak of, so then any of its pixels.
+        var depths: [Float] = []
+        for margin in [2, 0] {
+            depths.removeAll()
+            for s in interiorSamples(budget: 64, margin: margin) {
+                if let z = depthAt(s.x, s.y), z.isFinite, z > 0 { depths.append(z) }
+            }
+            if depths.count >= 8 { break }
+        }
+        guard depths.count >= 4 else { return nil }
+        depths.sort()
+        let z = depths[depths.count / 2]
+        let w = Float(sensorLandscape ? camera.height : camera.width), h = Float(sensorLandscape ? camera.width : camera.height)
+        let fw = sensorLandscape ? camera.fy : camera.fx, fh = sensorLandscape ? camera.fx : camera.fy
+        return ((maxX - minX) * w / fw * z, (maxY - minY) * h / fh * z, z)
+    }
+
     public func interiorSamples(budget: Int, margin: Int = 2) -> [SIMD2<Float>] {
         let step = max(1, Int((Double(area) / Double(max(1, budget))).squareRoot().rounded(.up)))
         var out: [SIMD2<Float>] = []
@@ -338,31 +434,45 @@ public enum InstanceDecoder {
         let width = Float(spec.inputWidth), height = Float(spec.inputHeight)
         func at(_ channel: Int, _ anchor: Int) -> Float { predictions[channel * anchors + anchor] }
 
-        // 1. Candidates: the best class of every anchor above the threshold.
-        struct Candidate { var anchor: Int; var cls: Int; var score: Float; var box: SIMD4<Float> }
+        // 1. Candidates: the best class of every anchor above the threshold (and its runner-up, when
+        //    that is above the threshold too: the detector's other name for the same outline).
+        struct Candidate { var anchor: Int; var cls: Int; var score: Float; var box: SIMD4<Float>; var alternatives: [Instance.Alternative] }
         var candidates: [Candidate] = []
         for a in 0..<anchors {
-            var best = -1, bestScore = spec.confidence
+            var best = -1, bestScore = spec.confidence, second = -1, secondScore = spec.confidence
             for c in 0..<nc {
                 let s = at(4 + c, a)
-                if s >= bestScore { bestScore = s; best = c }
+                if s >= bestScore { second = best; secondScore = bestScore; bestScore = s; best = c }
+                else if s >= secondScore { secondScore = s; second = c }
             }
             guard best >= 0 else { continue }
             let cx = at(0, a) / width, cy = at(1, a) / height, w = at(2, a) / width, h = at(3, a) / height
             guard w > 0, h > 0 else { continue }
             candidates.append(Candidate(anchor: a, cls: best, score: bestScore,
-                                        box: SIMD4(max(0, cx - w / 2), max(0, cy - h / 2), min(1, cx + w / 2), min(1, cy + h / 2))))
+                                        box: SIMD4(max(0, cx - w / 2), max(0, cy - h / 2), min(1, cx + w / 2), min(1, cy + h / 2)),
+                                        alternatives: second >= 0 ? [Instance.Alternative(classIndex: second, confidence: secondScore)] : []))
         }
         candidates.sort { $0.score > $1.score }
 
         // 2. Suppression: within a kin group at the spec's IoU; across everything when nearly identical.
+        //    What a kept candidate suppresses under another name is one more name for its outline.
         var kept: [Candidate] = []
         for c in candidates where kept.count < maxInstances {
             let kin = spec.kinGroup(c.cls)
             var suppressed = false
-            for k in kept {
-                let overlap = iou(c.box, k.box)
-                if overlap >= 0.85 || (overlap >= spec.iou && spec.kinGroup(k.cls) == kin) { suppressed = true; break }
+            for ki in kept.indices {
+                let overlap = iou(c.box, kept[ki].box)
+                if overlap >= 0.85 || (overlap >= spec.iou && spec.kinGroup(kept[ki].cls) == kin) {
+                    if c.cls != kept[ki].cls {
+                        if let ai = kept[ki].alternatives.firstIndex(where: { $0.classIndex == c.cls }) {
+                            kept[ki].alternatives[ai].confidence = max(kept[ki].alternatives[ai].confidence, c.score)
+                        } else {
+                            kept[ki].alternatives.append(Instance.Alternative(classIndex: c.cls, confidence: c.score))
+                        }
+                    }
+                    suppressed = true
+                    break
+                }
             }
             if !suppressed { kept.append(c) }
         }
@@ -397,7 +507,9 @@ public enum InstanceDecoder {
             guard Float(area) / Float(pixels) >= spec.minShare else { continue }
             instances.append(Instance(classIndex: c.cls, confidence: c.score,
                                       minX: c.box.x, minY: c.box.y, maxX: c.box.z, maxY: c.box.w,
-                                      mask: mask, maskWidth: maskWidth, maskHeight: maskHeight, area: area))
+                                      mask: mask, maskWidth: maskWidth, maskHeight: maskHeight, area: area,
+                                      alternatives: Array(c.alternatives.filter { $0.classIndex != c.cls }
+                                        .sorted { $0.confidence > $1.confidence }.prefix(3))))
         }
         return instances.sorted { $0.area > $1.area }
     }

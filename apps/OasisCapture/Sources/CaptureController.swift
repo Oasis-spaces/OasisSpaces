@@ -372,7 +372,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
         let time = understanding.time
         let objectSpec = mapBuilder.spec
         let observations = understanding.instances.map {
-            ObjectObservation(classIndex: $0.classIndex, confidence: $0.confidence, points: $0.points, doubtful: $0.doubtful)
+            ObjectObservation(classIndex: $0.classIndex, confidence: $0.confidence, points: $0.points, doubtful: $0.doubtful, glimpse: $0.glimpse)
         }
         mapBuilder.saw(floorAt: understanding.floorAt, pointsAt: understanding.pointsAt)
         let matches = mapBuilder.observe(observations, camera: understanding.camera)
@@ -383,7 +383,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
             sightingsNeedReset = false
         }
         let camera = understanding.camera
-        let believed = understanding.instances.indices.filter { !understanding.instances[$0].doubtful }
+        let believed = understanding.instances.indices.filter { !understanding.instances[$0].doubtful && !understanding.instances[$0].glimpse }
         var seen: [Sighting] = []
         for i in believed {
             let instance = understanding.instances[i]
@@ -403,8 +403,9 @@ final class CaptureController: NSObject, ARSessionDelegate {
         for (i, instance) in understanding.instances.enumerated() {
             guard instance.outline.count >= 3 else { continue }
             let match = matches[i]
-            // Bare wall with a name shows only as the door of a wardrobe the tracker knows.
-            let shown = instance.doubtful ? match != nil
+            // Bare wall with a name shows only as the door of a wardrobe the tracker knows; a glimpse
+            // at the frame's edge only as part of a thing it knows.
+            let shown = instance.doubtful || instance.glimpse ? match != nil
                 : objectSpec.shows(sightings: verdictOf[i]?.sightings ?? 1, tracked: match?.sightings ?? 0)
             guard shown, let info = objectSpec.info(verdictOf[i]?.classIndex ?? instance.classIndex) else { continue }
             regions.append(Region(classId: match?.classIndex ?? info.id, label: match?.label ?? info.label,

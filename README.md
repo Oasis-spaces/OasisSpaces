@@ -572,6 +572,42 @@ phone (no model calls, no network while recording). Build and install with
   by the direction they were seen in, which the phone always knows, not by
   place in the image: between two analyses the picture slides by more than
   a laptop's width, and a laptop at 94% confidence did not overlap itself.
+  One place, one name: a sighting of any kind that is the same outline as a
+  remembered one (centre within a third of its size, size alike) joins it
+  and votes, so a TV one frame called a window or a mirror, or a wardrobe
+  called a door, keeps the name most voted; before, only look-alike families
+  voted together and such a stray name showed on its own. Two tracks of the
+  room map that are the same box (footprints, sizes, bottoms and tops alike)
+  merge the same way. A pillow inside a bed's outline is not the bed: sizes
+  differ. The latest looks weigh most: each new sighting scales a thing's
+  earlier votes by 0.9, so a TV called a painting eight times from across
+  the room is a TV once seen up close (summed without decay, the eight
+  far looks outvoted the four near ones for good, on the screen and in the
+  map, where a painting is not placed at all). Three more things the
+  detector gets wrong on a single frame are
+  undone by what the thing is (`ObjectSpec.believed`), not by which room it
+  is in. A glimpse cut by the frame's edge with under 12% of the frame
+  showing gets no name yet (a chair's back as a strip along the bottom edge
+  was a "toilet"); in the room map it adds to whatever tracked object it
+  lies on, of any kind, and starts nothing. With glimpses joining, the
+  near side of the walkthrough's bed was hit by every pass and every
+  glimpse, and its box lost the far end (0.58 overlap for 0.73): the extent
+  rule weighed bins by hits, so the busy near side raised the bar the far
+  end, seen on three frames with two or three hits a cell, then failed.
+  Each trusted cell now counts once: an object reaches where it was seen,
+  not where it was seen most. A name
+  impossible at the size the depth gives the thing
+  is replaced by the detector's runner-up name for the same outline, which
+  the decoder now keeps (`Instance.alternatives`): a "person" 0.4 m tall is
+  the lamp the detector also considered, a "door" 0.6 m tall is a cabinet,
+  and with no possible name the thing is doubtful, like bare wall. Only
+  standing things get a height bound (person, door, wardrobe, fridge), held
+  only against a thing seen whole: a bed's extent on the screen is its
+  length seen from above, and a wardrobe cut by the frame's top is as short
+  as the frame makes it. `phonesim --video` shows what the phone would: what
+  has been seen twice, under its settled name (reading the camera's turn off
+  the pictures with Vision's translation registration was tried and chained
+  no more sightings on a pan and fewer on a walk).
 - **The room map:** MoGe-2 small (MIT, built by `scripts/convert_depth_moge.py`,
   66 MB) gives every pixel a place in metres on its own: a point map plus a
   metric scale, with one depth offset recovered from the camera's known focal

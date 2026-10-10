@@ -19,6 +19,7 @@ import CoreML
 import ImageIO
 import Foundation
 import Vision
+import simd
 import CaptureRules
 
 // MARK: Input
@@ -333,52 +334,94 @@ if let videoURL {
     generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 30)
     generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 30)
     let count = min(limit, Int(CMTimeGetSeconds(asset.duration) * rate))
-    var things = 0, dropped = 0, analysis = 0.0, run = 0
-    var labels: [String: Int] = [:]
+    var things = 0, dropped = 0, held = 0, unsure = 0, glimpsed = 0, renamed = 0, analysis = 0.0, run = 0
+    var names: [String: Int] = [:]
+    // No camera is known for a video: things are looked for again in the direction they were seen
+    // from a still camera. (Reading the camera's turn off the pictures, with Vision's translation
+    // registration, was tried and chained no more sightings on a pan and fewer on a walk.)
+    var memory = SightingMemory(spec: objects)
+    if arguments.contains("--trace") { memory.trace = { print("  " + $0) } }
     for n in 0..<count {
         guard let frame = try? generator.copyCGImage(at: CMTime(seconds: Double(n) / rate, preferredTimescale: 600), actualTime: nil) else { continue }
         let image = cropped34(CIImage(cgImage: frame)).image
         let t = Date()
         try? VNImageRequestHandler(ciImage: image, orientation: .up).perform([detector, surfaces])
         var instances = refine(decodeDetections(detector), image: image)
-        if let map = surfaceClasses(surfaces) {
-            // (No camera is known for a video: the depth model's own shape is all the step measure needs.)
-            let lens = PinholeCamera(fx: Float(image.extent.height) * 0.75, fy: Float(image.extent.height) * 0.75, cx: Float(image.extent.width) / 2,
-                                     cy: Float(image.extent.height) / 2, width: Int(image.extent.width), height: Int(image.extent.height),
-                                     transform: matrix_identity_float4x4)
-            let depth = metricDepth(image, camera: lens)
-            func depthAt(_ x: Float, _ y: Float) -> Float? {
-                depth.map { $0.data[min($0.height - 1, Int(y * Float($0.height))) * $0.width + min($0.width - 1, Int(x * Float($0.width)))] }
+        // A lens for the upright picture (focal 0.75 of the height, near a phone's).
+        let lens = PinholeCamera(fx: Float(image.extent.height) * 0.75, fy: Float(image.extent.height) * 0.75, cx: Float(image.extent.width) / 2,
+                                 cy: Float(image.extent.height) / 2, width: Int(image.extent.width), height: Int(image.extent.height),
+                                 transform: matrix_identity_float4x4)
+        let depth = metricDepth(image, camera: lens)
+        func depthAt(_ x: Float, _ y: Float) -> Float? {
+            depth.map { $0.data[min($0.height - 1, Int(y * Float($0.height))) * $0.width + min($0.width - 1, Int(x * Float($0.width)))] }
+        }
+        // Furniture the surface model sees as bare wall, standing out from nothing, is the detector seeing things.
+        let map = surfaceClasses(surfaces)
+        let bare = instances.map { inst in map.map { objects.isOnBareSurface(inst, bare: spec.bareSurfaces, classes: $0.classes, width: $0.width, height: $0.height, depthAt: depthAt) } ?? false }
+        let onStructure = instances.map { inst in map.map { inst.share(on: spec.bareSurfaces, classes: $0.classes, width: $0.width, height: $0.height) } ?? 0 }
+        let steps = instances.map { $0.depthStepShare(depthAt: depthAt) ?? -1 }
+        // The name each thing can have at its size (the detector's runner-up when its own is impossible),
+        // or none yet for a glimpse at the frame's edge: doubtful like bare wall, as on the phone.
+        let detected = instances.map { objects.info($0.classIndex)?.label ?? "?" }
+        let glimpse = instances.map { objects.isGlimpse($0) }
+        var doubt = bare
+        var sizes = [(width: Float, height: Float)?](repeating: nil, count: instances.count)
+        for i in instances.indices where !bare[i] && !glimpse[i] {
+            sizes[i] = instances[i].apparentSize(camera: lens, sensorLandscape: false, depthAt: depthAt).map { (width: $0.width, height: $0.height) }
+            if let believed = objects.believed(instances[i], size: sizes[i]) {
+                if believed != instances[i].classIndex { renamed += 1; instances[i].classIndex = believed }
+            } else {
+                doubt[i] = true
+                unsure += 1
             }
-            let bare = instances.map { objects.isOnBareSurface($0, bare: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height, depthAt: depthAt) }
-            if dumpFolder != nil {
-                let items = instances.enumerated().map { i, inst in
-                    String(format: "{\"label\":\"%@\",\"conf\":%.2f,\"box\":[%.3f,%.3f,%.3f,%.3f],\"structure\":%.2f,\"steps\":%.2f,\"bare\":%@}",
-                           objects.info(inst.classIndex)?.label ?? "?", inst.confidence, inst.minX, inst.minY, inst.maxX, inst.maxY,
-                           inst.share(on: spec.bareSurfaces, classes: map.classes, width: map.width, height: map.height),
-                           inst.depthStepShare(depthAt: depthAt) ?? -1, bare[i] ? "true" : "false")
-                }
-                records.append("{\"frame\":\(n + 1),\"instances\":[\(items.joined(separator: ","))]}")
+        }
+        // What was seen in which direction lately: outlined from its second sighting, under its most voted name.
+        let believed = instances.indices.filter { !doubt[$0] && !glimpse[$0] }
+        let verdicts = memory.observe(believed.map { i in
+            let inst = instances[i]
+            return Sighting(classIndex: inst.classIndex, confidence: inst.confidence, centre: SIMD2((inst.minX + inst.maxX) / 2, (inst.minY + inst.maxY) / 2),
+                            size: SIMD2(inst.maxX - inst.minX, inst.maxY - inst.minY), camera: lens, sensorLandscape: false)
+        }, eye: .zero)
+        var verdictOf = [SightingMemory.Verdict?](repeating: nil, count: instances.count)
+        for (k, i) in believed.enumerated() { verdictOf[i] = verdicts[k] }
+        var shown = [Bool](repeating: false, count: instances.count)
+        var name = [String](repeating: "?", count: instances.count)
+        for i in instances.indices where !doubt[i] && !glimpse[i] {
+            shown[i] = objects.shows(sightings: verdictOf[i]?.sightings ?? 1, tracked: 0)
+            name[i] = objects.info(verdictOf[i]?.classIndex ?? instances[i].classIndex)?.label ?? "?"
+        }
+        if dumpFolder != nil {
+            let items = instances.enumerated().map { i, inst in
+                String(format: "{\"label\":\"%@\",\"detected\":\"%@\",\"name\":\"%@\",\"shown\":%@,\"bare\":%@,\"doubt\":%@,\"glimpse\":%@,\"conf\":%.2f,\"box\":[%.3f,%.3f,%.3f,%.3f],\"size\":%@,\"alternatives\":[%@],\"structure\":%.2f,\"steps\":%.2f}",
+                       objects.info(inst.classIndex)?.label ?? "?", detected[i], name[i], shown[i] ? "true" : "false", bare[i] ? "true" : "false", doubt[i] ? "true" : "false", glimpse[i] ? "true" : "false",
+                       inst.confidence, inst.minX, inst.minY, inst.maxX, inst.maxY,
+                       sizes[i].map { String(format: "[%.2f,%.2f]", $0.width, $0.height) } ?? "null",
+                       inst.alternatives.map { String(format: "[\"%@\",%.2f]", objects.info($0.classIndex)?.label ?? "?", $0.confidence) }.joined(separator: ","),
+                       onStructure[i], steps[i])
             }
-            instances = instances.indices.filter { !bare[$0] }.map { instances[$0] }
-            dropped += bare.filter { $0 }.count
+            records.append("{\"frame\":\(n + 1),\"instances\":[\(items.joined(separator: ","))]}")
         }
         analysis += Date().timeIntervalSince(t)
         run += 1
-        things += instances.count
-        for inst in instances { if let label = objects.info(inst.classIndex)?.label { labels[label, default: 0] += 1 } }
+        things += shown.filter { $0 }.count
+        held += instances.indices.filter { !doubt[$0] && !glimpse[$0] && !shown[$0] }.count
+        glimpsed += glimpse.filter { $0 }.count
+        dropped += bare.filter { $0 }.count
+        for i in instances.indices where shown[i] { names[name[i], default: 0] += 1 }
         if let dumpFolder {
-            Draw.frame(image, context: context, instances: instances, matches: [], spec: objects,
+            // The screen as the phone would show it: what has been seen twice, under its settled name.
+            let onScreen = instances.indices.filter { shown[$0] }
+            Draw.frame(image, context: context, instances: onScreen.map { instances[$0] }, matches: [], names: onScreen.map { name[$0] }, spec: objects,
                        to: dumpFolder.appendingPathComponent(String(format: "frame_%05d.jpg", n + 1)), plain: true)
         }
         if n % 30 == 0 || n == count - 1 {
             print(String(format: "%5.1f s  frame %3d/%d: %@", Double(n) / rate, n + 1, count,
-                         instances.compactMap { objects.info($0.classIndex)?.label }.joined(separator: ", ")))
+                         instances.indices.filter { shown[$0] }.map { name[$0] }.joined(separator: ", ")))
         }
     }
-    print(String(format: "\n%@: %d frames at %.0f a second, %.0f ms a frame on this Mac; %.1f things outlined a frame, %d dropped as bare wall",
-                 videoURL.lastPathComponent, run, rate, analysis / Double(max(1, run)) * 1000, Double(things) / Double(max(1, run)), dropped))
-    print("labels: \(labels.sorted { $0.value > $1.value }.prefix(16).map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
+    print(String(format: "\n%@: %d frames at %.0f a second, %.0f ms a frame on this Mac; %.1f things on screen a frame, %d held back as seen once, %d dropped as bare wall, %d glimpses at the frame's edge, %d with no possible name at their size, %d renamed by size",
+                 videoURL.lastPathComponent, run, rate, analysis / Double(max(1, run)) * 1000, Double(things) / Double(max(1, run)), held, dropped, glimpsed, unsure, renamed))
+    print("names shown: \(names.sorted { $0.value > $1.value }.prefix(16).map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
     if let dumpFolder { try? (records.joined(separator: "\n") + "\n").write(to: dumpFolder.appendingPathComponent("detections.jsonl"), atomically: true, encoding: .utf8) }
     exit(0)
 }
@@ -416,7 +459,7 @@ let mapBounds: (SIMD2<Float>, SIMD2<Float>)? = truth.planes == nil ? nil : {
 }()
 var floorSightings = 0
 var memory = SightingMemory(spec: objects)
-var outlinesShown = 0, heldBack = 0
+var outlinesShown = 0, heldBack = 0, renamedBySize = 0, glimpses = 0, nameless = 0
 var namesShown: [String: Int] = [:]
 var recent: [SIMD3<Float>] = []
 var framesRun = 0, framesWithDepth = 0, framesWithFit = 0, observationsTotal = 0, analysisTime = 0.0
@@ -440,10 +483,25 @@ for (n, frame) in frames.enumerated() {
         surfaceMap.map { objects.isOnBareSurface(inst, bare: structure, classes: $0.classes, width: $0.width, height: $0.height, depthAt: modelDepth) } ?? false
     }
     onBareSurface += bare.filter { $0 }.count
+    // The name each thing can have at its size (the detector's runner-up when its own is impossible),
+    // or none yet for a glimpse at the frame's edge: doubtful like bare wall, as on the phone.
+    // A glimpse cut by the frame's edge has no name of its own: it adds to what it lies on in the map.
+    let glimpse = instances.map { objects.isGlimpse($0) }
+    glimpses += glimpse.filter { $0 }.count
+    var doubt = bare
+    for i in instances.indices where !bare[i] && !glimpse[i] {
+        let size = instances[i].apparentSize(camera: camera, sensorLandscape: false, depthAt: modelDepth).map { (width: $0.width, height: $0.height) }
+        if let believed = objects.believed(instances[i], size: size) {
+            if believed != instances[i].classIndex { renamedBySize += 1; instances[i].classIndex = believed }
+        } else {
+            doubt[i] = true
+            nameless += 1
+        }
+    }
     let onStructure = instances.map { inst in surfaceMap.map { inst.share(on: structure, classes: $0.classes, width: $0.width, height: $0.height) } ?? 0 }
     let onDoor = instances.map { inst in surfaceMap.map { inst.share(on: doorClasses, classes: $0.classes, width: $0.width, height: $0.height) } ?? 0 }
     // What was seen in which direction lately: a thing is outlined from its second sighting, under its most voted name.
-    let believed = instances.indices.filter { !bare[$0] }
+    let believed = instances.indices.filter { !doubt[$0] && !glimpse[$0] }
     let verdicts = memory.observe(believed.map { i in
         let inst = instances[i]
         return Sighting(classIndex: inst.classIndex, confidence: inst.confidence, centre: SIMD2((inst.minX + inst.maxX) / 2, (inst.minY + inst.maxY) / 2),
@@ -516,7 +574,7 @@ for (n, frame) in frames.enumerated() {
                     points.append(camera.worldPoint(u: sample.x * Float(camera.width), v: sample.y * Float(camera.height), depth: z))
                 }
             }
-            observations.append(ObjectObservation(classIndex: inst.classIndex, confidence: inst.confidence, points: points, doubtful: bare[i]))
+            observations.append(ObjectObservation(classIndex: inst.classIndex, confidence: inst.confidence, points: points, doubtful: doubt[i], glimpse: glimpse[i]))
             if debug, let label = objects.info(inst.classIndex)?.label {
                 let xs = points.map(\.x), ys = points.map(\.y), zs = points.map(\.z)
                 print(String(format: "  %@ (%.2f, mask %dx%d area %d): %d world points%@", label, inst.confidence, w, h, inst.area, points.count,
@@ -532,13 +590,13 @@ for (n, frame) in frames.enumerated() {
     var names = [String](repeating: "?", count: instances.count)
     for i in instances.indices {
         let match = i < matches.count ? matches[i] : nil
-        if bare[i] {
-            shown[i] = match != nil                                  // only as the door of a wardrobe
+        if doubt[i] || glimpse[i] {
+            shown[i] = match != nil                                  // only as the door of a wardrobe, or a glimpse of a known thing
         } else {
             shown[i] = objects.shows(sightings: verdictOf[i]?.sightings ?? 1, tracked: match?.sightings ?? 0)
         }
         names[i] = match?.label ?? objects.info(verdictOf[i]?.classIndex ?? instances[i].classIndex)?.label ?? "?"
-        if shown[i] { outlinesShown += 1; namesShown[names[i], default: 0] += 1 } else if !bare[i] { heldBack += 1 }
+        if shown[i] { outlinesShown += 1; namesShown[names[i], default: 0] += 1 } else if !doubt[i] && !glimpse[i] { heldBack += 1 }
     }
     if dumpFolder != nil {
         var items: [String] = []
@@ -547,8 +605,8 @@ for (n, frame) in frames.enumerated() {
             let xs = o.points.map(\.x), ys = o.points.map(\.y), zs = o.points.map(\.z)
             let bounds = o.points.isEmpty ? "null" : String(format: "[[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f]]", xs.min()!, ys.min()!, zs.min()!, xs.max()!, ys.max()!, zs.max()!)
             let m = i < matches.count ? matches[i] : nil
-            items.append(String(format: "{\"label\":\"%@\",\"name\":\"%@\",\"shown\":%@,\"bare\":%@,\"conf\":%.2f,\"quality\":%@,\"share\":%.4f,\"structure\":%.2f,\"steps\":%.2f,\"door\":%.2f,\"points\":%d,\"bounds\":%@,\"track\":%@,\"placed\":%@}",
-                                objects.info(o.classIndex)?.label ?? "?", names[i], shown[i] ? "true" : "false", bare[i] ? "true" : "false",
+            items.append(String(format: "{\"label\":\"%@\",\"name\":\"%@\",\"shown\":%@,\"bare\":%@,\"doubt\":%@,\"glimpse\":%@,\"conf\":%.2f,\"quality\":%@,\"share\":%.4f,\"structure\":%.2f,\"steps\":%.2f,\"door\":%.2f,\"points\":%d,\"bounds\":%@,\"track\":%@,\"placed\":%@}",
+                                objects.info(o.classIndex)?.label ?? "?", names[i], shown[i] ? "true" : "false", bare[i] ? "true" : "false", doubt[i] ? "true" : "false", glimpse[i] ? "true" : "false",
                                 o.confidence, inst.quality.map { String(format: "%.2f", $0) } ?? "null", inst.share, onStructure[i], stepShares[i], onDoor[i], o.points.count, bounds,
                                 m.map { "\"\($0.objectID)\"" } ?? "null", m?.placed == true ? "true" : "false"))
         }
@@ -559,7 +617,7 @@ for (n, frame) in frames.enumerated() {
     }
     if let dumpFolder {
         Draw.frame(image, context: context, instances: instances, matches: matches,
-                   notes: instances.indices.map { String(format: "s%.0f%@", onStructure[$0] * 100, shown[$0] ? "" : bare[$0] ? " BARE" : " HELD") }, spec: objects,
+                   notes: instances.indices.map { String(format: "s%.0f%@", onStructure[$0] * 100, shown[$0] ? "" : bare[$0] ? " BARE" : doubt[$0] ? " UNSURE" : glimpse[$0] ? " GLIMPSE" : " HELD") }, spec: objects,
                    to: dumpFolder.appendingPathComponent((frame.name as NSString).deletingPathExtension + ".jpg"))
         // For a video of the run: the screen as the phone would show it, and the map so far.
         for sub in ["screen", "map"] { try? FileManager.default.createDirectory(at: dumpFolder.appendingPathComponent(sub), withIntermediateDirectories: true) }
@@ -586,7 +644,7 @@ for (n, frame) in frames.enumerated() {
 let map = builder.build()
 print(String(format: "\n%@: %d frames, %.0f ms a frame on this Mac, depth on %d, fitted on %d; %d observations",
              truth.space, framesRun, analysisTime / Double(max(1, framesRun)) * 1000, framesWithDepth, framesWithFit, observationsTotal))
-print("\(outlinesShown) outlines shown; \(heldBack) detections held back as seen only once; \(onBareSurface) on bare wall, floor or ceiling")
+print("\(outlinesShown) outlines shown; \(heldBack) detections held back as seen only once; \(onBareSurface) on bare wall, floor or ceiling; \(glimpses) glimpses at the frame's edge; \(nameless) with no possible name at their size; \(renamedBySize) renamed by size")
 print("names shown: \(namesShown.sorted { $0.value > $1.value }.prefix(16).map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
 print("floor: \(builder.floorHeight.map { String(format: "%+.2f m", $0) } ?? "not found") from \(floorSightings) sightings"
       + (truth.planes == nil ? " (measured: 0.00)" : ""))

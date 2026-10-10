@@ -60,32 +60,36 @@ def summarise(dump: Path, log: Path) -> dict:
     frames = 0
     kept = 0
     dropped = 0
+    held = 0
     labels: dict[str, int] = {}
     with open(dump / "detections.jsonl") as f:
         for line in f:
             record = json.loads(line)
             frames += 1
             for inst in record.get("instances", []):
-                if inst.get("bare"):
+                if inst.get("bare") or inst.get("doubt"):
                     dropped += 1
+                elif inst.get("shown") is False:
+                    held += 1                                   # seen only once so far: not on screen yet
                 else:
                     kept += 1
-                    labels[inst["label"]] = labels.get(inst["label"], 0) + 1
+                    name = inst.get("name") or inst["label"]
+                    labels[name] = labels.get(name, 0) + 1
     ms = None
     if log.exists():
         m = re.search(r"(\d+) ms a frame", log.read_text())
         if m:
             ms = int(m.group(1))
     top = sorted(labels.items(), key=lambda kv: -kv[1])[:6]
-    return {"frames": frames, "kept": kept, "dropped": dropped, "ms": ms, "top": top, "labels": labels}
+    return {"frames": frames, "kept": kept, "dropped": dropped, "held": held, "ms": ms, "top": top, "labels": labels}
 
 
 def caption_png(name: str, info: dict, path: Path, width: int) -> None:
     per_frame = info["kept"] / info["frames"] if info["frames"] else 0.0
-    line1 = f"{name}   {info['frames']} frames at 3 a second   {per_frame:.1f} things outlined a frame   {info['dropped']} dropped as bare wall"
+    line1 = f"{name}   {info['frames']} frames at 3 a second   {per_frame:.1f} things on screen a frame   {info['held']} held back as seen once   {info['dropped']} dropped as bare wall or unsure"
     if info["ms"]:
         line1 += f"   {info['ms']} ms a frame on this Mac"
-    line2 = "left: the clip, white box = the upright middle the phone analyses      right: what the phone keeps (things dropped as bare wall are not drawn)"
+    line2 = "left: the clip, white box = the upright middle the phone analyses      right: what the phone shows, under the names it would show"
     seen = ", ".join(f"{label} {n}" for label, n in info["top"])
     line3 = f"most often: {seen}" if seen else "nothing outlined"
     img = Image.new("RGBA", (width, CAPTION_H), (0, 0, 0, 255))
@@ -132,7 +136,7 @@ def contact_sheets(rows: list[tuple[str, dict, Path]], out_dir: Path, per_sheet:
             frames = sorted(dump.glob("frame_*.jpg"))
             picks = [frames[round(i * (len(frames) - 1) / (SHEET_FRAMES - 1))] for i in range(SHEET_FRAMES)] if frames else []
             per_frame = info["kept"] / info["frames"] if info["frames"] else 0.0
-            text = [name, f"{info['frames']} frames", f"{per_frame:.1f} outlined a frame", f"{info['dropped']} dropped as", "bare wall", ""]
+            text = [name, f"{info['frames']} frames", f"{per_frame:.1f} shown a frame", f"{info['held']} held back", f"{info['dropped']} dropped", ""]
             text += [f"{label} {n}" for label, n in info["top"]]
             for i, t in enumerate(text):
                 draw.text((10, y0 + 10 + 22 * i), t, font=font(17 if i else 20), fill=(235, 235, 235))
@@ -183,7 +187,7 @@ def main() -> int:
         rows.append((name, info, dump))
         previews.append(preview)
         per_frame = info["kept"] / info["frames"]
-        print(f"{name}: {info['frames']} frames, {per_frame:.1f} outlined a frame, {info['dropped']} dropped as bare wall -> {preview.name}")
+        print(f"{name}: {info['frames']} frames, {per_frame:.1f} shown a frame, {info['held']} held back, {info['dropped']} dropped -> {preview.name}")
 
     if not rows:
         print("nothing to show", file=sys.stderr)

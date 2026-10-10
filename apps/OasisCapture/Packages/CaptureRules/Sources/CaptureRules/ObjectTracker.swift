@@ -10,12 +10,16 @@ public struct ObjectObservation: Sendable {
     /// The surface model saw bare wall where this is (see ObjectSpec.isOnBareSurface):
     /// it is not a thing of its own, but it may be a door of a wardrobe already tracked.
     public var doubtful: Bool
+    /// A glimpse cut by the frame's edge (see ObjectSpec.isGlimpse): its name is not to be
+    /// trusted, so it adds to whatever tracked object it lies on, of any kind, and starts nothing.
+    public var glimpse: Bool
 
-    public init(classIndex: Int, confidence: Float, points: [SIMD3<Float>], doubtful: Bool = false) {
+    public init(classIndex: Int, confidence: Float, points: [SIMD3<Float>], doubtful: Bool = false, glimpse: Bool = false) {
         self.classIndex = classIndex
         self.confidence = confidence
         self.points = points
         self.doubtful = doubtful
+        self.glimpse = glimpse
     }
 }
 
@@ -187,6 +191,7 @@ public final class ObjectTracker {
             var kin: String
             var family: String
             var doubtful: Bool
+            var glimpse: Bool
             /// For a part of a storage unit: its extent in the room's axes (is it in the unit's plane?).
             var part: Extent?
         }
@@ -200,25 +205,26 @@ public final class ObjectTracker {
             let size = bounds.hi - bounds.lo
             // Bigger than any piece of furniture: a wall or floor with a wrong label.
             guard size.x <= t.maxSizeMetres, size.y <= t.maxSizeMetres, size.z <= t.maxSizeMetres else { continue }
-            let part = info.family == "storage" && !o.doubtful
+            let part = info.family == "storage" && !o.doubtful && !o.glimpse
                 ? Self.extent(voxels.map { (Self.centre($0, v), 1) }, yaw: yaw, voxel: v, binShare: t.binShare, gap: t.gapMetres) : nil
             prepared.append(Prepared(index: i, voxels: voxels, min: bounds.lo, max: bounds.hi, kin: spec.kinGroup(of: info.family),
-                                     family: info.family, doubtful: o.doubtful, part: part))
+                                     family: info.family, doubtful: o.doubtful, glimpse: o.glimpse, part: part))
         }
 
-        // Match observations to tracks, best overlap first, one observation per track.
+        // Match observations to tracks, best overlap first, one observation per track. A glimpse at
+        // the frame's edge has no name to go by: it joins whatever it lies on, of any kind.
         struct Pair { var observation: Int; var track: Int; var score: Float }
         var pairs: [Pair] = []
         for (pi, p) in prepared.enumerated() where !p.doubtful {
             let (pMin, pMax) = Self.thickened(p.min, p.max)
             for (ti, track) in tracks.enumerated() {
-                guard spec.kinGroup(track.classIndex) == p.kin, let box = track.measured,
+                guard p.glimpse || spec.kinGroup(track.classIndex) == p.kin, let box = track.measured,
                       Self.heightsNear(box.min.y, box.max.y, p.min.y, p.max.y) else { continue }
                 let (bMin, bMax) = Self.thickened(box.min, box.max)
                 let overlap = RoomMapBuilder.footprintOverlap(bMin, bMax, pMin, pMax)
                 // Beds and storage are seen in parts: a part that adjoins one of its own family joins it
                 // (for storage, in the same plane: two units that meet in a corner of the room are two).
-                var reach: Float = Self.seenInParts.contains(p.family) && box.family == p.family ? t.adjoinMetres : 0
+                var reach: Float = !p.glimpse && Self.seenInParts.contains(p.family) && box.family == p.family ? t.adjoinMetres : 0
                 if let part = p.part, let unit = track.extent, !Self.coplanar(part, unit) { reach = 0 }
                 if overlap >= t.matchOverlap {
                     pairs.append(Pair(observation: pi, track: ti, score: overlap))
@@ -237,7 +243,7 @@ public final class ObjectTracker {
         // What found no object where its depth put it may be one seen from here before, in this direction.
         if let eye = camera?.position, t.standpointMetres > 0 {
             var sights: [Pair] = []
-            for (pi, p) in prepared.enumerated() where matchOf[pi] == nil && !p.doubtful {
+            for (pi, p) in prepared.enumerated() where matchOf[pi] == nil && !p.doubtful && !p.glimpse {
                 let middle = (p.min + p.max) / 2
                 let radius = simd_length(p.max - p.min) / 2
                 for (ti, track) in tracks.enumerated() where !taken.contains(ti) && spec.kinGroup(track.classIndex) == p.kin {
@@ -258,7 +264,11 @@ public final class ObjectTracker {
             let o = observations[p.index]
             if let ti = matchOf[pi] {
                 for key in p.voxels { tracks[ti].hit(key, frame: frame) }
-                tracks[ti].votes[o.classIndex, default: 0] += o.confidence
+                if !p.glimpse {                                      // a glimpse's name is no vote
+                    // The latest looks weigh most (see ObjectSpec.Screen.voteDecay).
+                    for key in tracks[ti].votes.keys { tracks[ti].votes[key]! *= t.voteDecay }
+                    tracks[ti].votes[o.classIndex, default: 0] += o.confidence
+                }
                 tracks[ti].observations += 1
                 tracks[ti].lastSeen = frame
                 tracks[ti].missedInView = 0
@@ -266,6 +276,8 @@ public final class ObjectTracker {
                 tracks[ti].seenAt = (p.min + p.max) / 2
                 relabel(&tracks[ti])
                 results[p.index] = match(tracks[ti])
+            } else if p.glimpse {
+                continue                                             // a glimpse starts nothing
             } else {
                 var voxels: [SIMD3<Int32>: Hits] = [:]
                 for key in p.voxels { voxels[key] = Hits(count: 1, first: frame, last: frame) }
@@ -331,10 +343,14 @@ public final class ObjectTracker {
         var minHits = established ? 2 : 1
         var box: ObjectBox?
         while minHits <= 4 {
+            // Each trusted cell counts once: an object reaches where it was seen, not where it was
+            // seen most. Weighted by hits, the near side of a bed, hit on every pass and by every
+            // glimpse at the frame's edge, raised the bar that its far end, seen on three frames
+            // with two or three hits a cell, then failed.
             let hits = track.voxels.filter { _, h in
                 h.count >= minHits && (!established || h.vouched || h.last - h.first >= t.glimpseAnalyses || h.count >= 2 * minHits
                                        || 2 * h.count >= track.observations)
-            }.map { (Self.centre($0.key, v), $0.value.count) }
+            }.map { (Self.centre($0.key, v), 1) }
             guard hits.count >= 4, let extent = Self.extent(hits, yaw: yaw, voxel: v, binShare: t.binShare, gap: t.gapMetres) else { break }
             // What stands on the floor covers the floor its lower body covers: cabinets that run on
             // over a doorway at head height are part of the wardrobe, not of its footprint.
@@ -490,8 +506,21 @@ public final class ObjectTracker {
         if top.value > 1.25 * current + 1.0 { track.classIndex = top.key }
     }
 
+    /// Two tracks of any kinds that are the same box: footprints mostly the
+    /// same, alike in size, bottoms and tops within 0.3 m. One place, one name
+    /// (the votes decide it): a TV one frame called a window, a wardrobe
+    /// called a heater. A rug under a table, a pillow on a bed, a lamp on a
+    /// nightstand are not: their heights or sizes differ.
+    static func coincide(_ a: ObjectBox, _ b: ObjectBox) -> Bool {
+        guard abs(a.min.y - b.min.y) <= 0.3, abs(a.max.y - b.max.y) <= 0.3 else { return false }
+        let fa = (a.max.x - a.min.x) * (a.max.z - a.min.z), fb = (b.max.x - b.min.x) * (b.max.z - b.min.z)
+        guard min(fa, fb) > 0, max(fa, fb) <= 2 * min(fa, fb) else { return false }
+        return thickOverlap(a, b) >= 0.6
+    }
+
     /// Two objects of one kin whose footprints mostly overlap are one object
-    /// seen from two sides before the sides joined up.
+    /// seen from two sides before the sides joined up; two of any kinds that
+    /// are the same box are one object with two names.
     private func merge(yaw: Float) {
         takeDoors(yaw: yaw)
         var i = 0
@@ -500,9 +529,10 @@ public final class ObjectTracker {
             var mergedAny = false
             while j < tracks.count {
                 let a = tracks[i], b = tracks[j]
-                if !a.doubtful, !b.doubtful, spec.kinGroup(a.classIndex) == spec.kinGroup(b.classIndex), let ba = a.measured, let bb = b.measured,
-                   Self.heightsOverlap(ba, bb),
-                   Self.thickOverlap(ba, bb) >= spec.tracker.mergeOverlap || Self.adjoin(a, b, within: spec.tracker.adjoinMetres) {
+                if !a.doubtful, !b.doubtful, let ba = a.measured, let bb = b.measured,
+                   spec.kinGroup(a.classIndex) == spec.kinGroup(b.classIndex)
+                    ? Self.heightsOverlap(ba, bb) && (Self.thickOverlap(ba, bb) >= spec.tracker.mergeOverlap || Self.adjoin(a, b, within: spec.tracker.adjoinMetres))
+                    : Self.coincide(ba, bb) {
                     // The older keeps its identity.
                     let (keep, drop) = a.born <= b.born ? (i, j) : (j, i)
                     trace?("frame \(frame): \(describe(tracks[keep])) merges \(describe(tracks[drop]))")

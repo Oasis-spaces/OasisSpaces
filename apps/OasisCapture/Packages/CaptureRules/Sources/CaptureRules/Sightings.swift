@@ -63,6 +63,8 @@ public struct SightingMemory {
     public let spec: ObjectSpec
     private var chains: [Chain] = []
     private var analysis = 0
+    /// Told of every chain a sighting joins, with the votes so far (the simulator's --trace).
+    public var trace: ((String) -> Void)?
 
     public init(spec: ObjectSpec) {
         self.spec = spec
@@ -79,16 +81,23 @@ public struct SightingMemory {
         let screen = spec.screen
         chains.removeAll { analysis - $0.lastSeen > screen.forgetAnalyses }
 
-        // Pair each sighting with the remembered thing of its kin nearest in direction, closest first.
+        // Pair each sighting with the remembered thing nearest in direction, closest first: one of
+        // its kin anywhere within the thing's size, or one of any kind seen as the same outline
+        // (a TV one frame called a window, a wardrobe called a door: one place, one name).
         struct Pair { var sighting: Int; var chain: Int; var score: Float }
         var pairs: [Pair] = []
         for (si, s) in sightings.enumerated() {
             guard let kin = spec.kinGroup(s.classIndex) else { continue }
-            for (ci, c) in chains.enumerated() where c.kin == kin {
+            for (ci, c) in chains.enumerated() {
                 let angle = acos(max(-1, min(1, simd_dot(s.direction, c.direction))))
                 // As far apart as half the thing's size, plus what a step sideways moves something a metre away.
-                let allowed = max(screen.minAngleDegrees * .pi / 180, 0.75 * max(s.radius, c.radius)) + atan(simd_distance(eye, c.eye))
-                if angle <= allowed { pairs.append(Pair(sighting: si, chain: ci, score: angle / allowed)) }
+                let step = atan(simd_distance(eye, c.eye))
+                let allowed = max(screen.minAngleDegrees * .pi / 180, 0.75 * max(s.radius, c.radius)) + step
+                if c.kin == kin {
+                    if angle <= allowed { pairs.append(Pair(sighting: si, chain: ci, score: angle / allowed)) }
+                } else if Self.sameOutline(angle: angle, step: step, s.radius, c.radius) {
+                    pairs.append(Pair(sighting: si, chain: ci, score: angle / allowed))
+                }
             }
         }
         pairs.sort { $0.score < $1.score }
@@ -111,11 +120,18 @@ public struct SightingMemory {
                 chains[ci].eye = eye
                 chains[ci].lastSeen = analysis
                 chains[ci].count += 1
+                // The latest looks weigh most: a TV called a painting from across the room is a TV up close.
+                for key in chains[ci].votes.keys { chains[ci].votes[key]! *= screen.voteDecay }
                 chains[ci].votes[s.classIndex, default: 0] += s.confidence
-                // The most voted name; the present one keeps a tie.
+                // The most voted name; the present one keeps a tie. The name's kin is the chain's.
                 let current = chains[ci].votes[chains[ci].classIndex] ?? 0
                 if let best = chains[ci].votes.max(by: { ($0.value, -$0.key) < ($1.value, -$1.key) }), best.value > current {
                     chains[ci].classIndex = best.key
+                    chains[ci].kin = spec.kinGroup(best.key) ?? chains[ci].kin
+                }
+                if let trace {
+                    let votes = chains[ci].votes.sorted { $0.value > $1.value }.map { String(format: "%@ %.2f", spec.info($0.key)?.label ?? "?", $0.value) }
+                    trace("analysis \(analysis): \(spec.info(s.classIndex)?.label ?? "?") joins chain \(ci) as \(spec.info(chains[ci].classIndex)?.label ?? "?") (\(chains[ci].count) sightings; \(votes.joined(separator: ", ")))")
                 }
                 verdicts.append(Verdict(sightings: chains[ci].count, classIndex: chains[ci].classIndex))
             } else {
@@ -125,6 +141,14 @@ public struct SightingMemory {
             }
         }
         return verdicts
+    }
+
+    /// Two sightings of different kinds are one thing when they are the same
+    /// outline: centres within a third of the thing's apparent size (plus the
+    /// step taken) and sizes alike. A pillow inside a bed's outline is not.
+    static func sameOutline(angle: Float, step: Float, _ a: Float, _ b: Float) -> Bool {
+        let (small, big) = (min(a, b), max(a, b))
+        return small > 0 && big <= 1.4 * small && angle <= 0.35 * big + step
     }
 }
 

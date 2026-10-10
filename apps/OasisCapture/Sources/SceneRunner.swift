@@ -21,6 +21,8 @@ struct InstanceRegion {
     var worldCentroid: SIMD3<Float>
     /// The surface model saw bare wall here: not a thing of its own, unless it is a wardrobe's door.
     var doubtful = false
+    /// A glimpse cut by the frame's edge: no name of its own; it adds to the tracked thing it lies on.
+    var glimpse = false
 }
 
 /// How far the models have loaded, for the preparing screen. Changed on the main queue.
@@ -353,6 +355,22 @@ final class SceneRunner {
                     depthValues?.metres(x: y, y: 1 - x)
                 }
             }
+            // The name each thing can have at the size the depth gives it (the detector's runner-up
+            // when its own is impossible: a "person" 0.4 m tall is a lamp), or none yet for a glimpse
+            // at the frame's edge, which is doubtful like bare wall: not shown, not placed.
+            // A glimpse cut by the frame's edge has no name of its own; in the map it adds to what it lies on.
+            let glimpses = instances.map { self.objects.isGlimpse($0) }
+            var doubtful = bare
+            for i in instances.indices where !bare[i] && !glimpses[i] {
+                let size = instances[i].apparentSize(camera: pinhole, sensorLandscape: true) { x, y in
+                    depthValues?.metres(x: y, y: 1 - x)
+                }.map { (width: $0.width, height: $0.height) }
+                if let believed = self.objects.believed(instances[i], size: size) {
+                    instances[i].classIndex = believed
+                } else {
+                    doubtful[i] = true
+                }
+            }
             if trusted, let depthValues {
                 let near = self.objects.tracker.depthMetres.first ?? 0.3, far = self.objects.tracker.depthMetres.last ?? 6
                 // Upright (x, y) is at sensor (y, 1 - x).
@@ -370,7 +388,8 @@ final class SceneRunner {
             }
             understanding.instances = instances.enumerated().map { i, instance in
                 var region = self.region(instance, depth: depthValues, pinhole: pinhole, place: trusted)
-                region.doubtful = i < bare.count && bare[i]
+                region.doubtful = i < doubtful.count && doubtful[i]
+                region.glimpse = i < glimpses.count && glimpses[i]
                 return region
             }
             // The surfaces' outlines go into the room too, so they follow the camera like the things do.
