@@ -594,7 +594,7 @@ class Agent:
         printable = " ".join(a.replace(str(ROOT) + "/", "") for a in args[1:])
         print(f"\n=== {stage}{': ' + note if note else ''}\n    $ {printable}")
         started = time.time()
-        result = subprocess.run(args, text=True, capture_output=True)
+        result = subprocess.run(args, text=True, capture_output=True, errors="replace")
         seconds = round(time.time() - started, 1)
         self.space.mkdir(parents=True, exist_ok=True)
         with open(self.log_path, "a") as log:
@@ -627,6 +627,10 @@ class Agent:
             entry["seconds"] = seconds
         self.stages.append(entry)
         print(f"    -> {action}: {why}")
+        if action != "stop":
+            # The failure is judged and tolerated (warn, skip, retry...):
+            # a later sub-step's stop must not wear this error.
+            self.last_error = ""
 
     # -------------------------------------------------------- claude's calls
     def capture_verdict(self, metrics: dict) -> dict | None:
