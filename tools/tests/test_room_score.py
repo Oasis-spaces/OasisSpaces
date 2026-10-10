@@ -3,6 +3,7 @@
     python3 tools/tests/test_room_score.py
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -177,6 +178,20 @@ def test_a_tracked_object_the_detector_part_named_a_door_counts_as_one():
     assert set(by_votes) == {"B1"} and abs(by_votes["B1"] - 1.9 / 5.6) < 0.05      # all of it, by a third of the votes
     assert abs(result["doorways"]["B1"] - by_votes["B1"]) < 1e-3 and "B1 stands in a doorway" in rs.describe(result)
     assert rs.doorways_by_votes(Path("/nonexistent"), shapes, VOCAB) == {}
+    # with the room's scale known, a piece thinner than THIN_M in that outline is the door itself: in full
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        tracks.save(space / "workspace" / "tracks")
+        (space / "densify.json").write_text(json.dumps({"colmap_units_per_metre": UNITS}))
+        kept = pl.views_of
+        pl.views_of = lambda space_, names: {n: views[n] for n in names if n in views}
+        try:
+            thin = rs.doorways_by_votes(space, shapes, VOCAB)                     # 0.6 units = 0.07 m thick
+            deep = dict(CUPBOARD, min=[8.0, 15.0, 0.0], max=[15.0, 15.0 + 0.5 * UNITS, 18.0])  # 0.5 m deep
+            not_thin = rs.doorways_by_votes(space, dict(shapes, boxes=[dict(BED), deep]), VOCAB)
+        finally:
+            pl.views_of = kept
+    assert thin["B1"] > 0.9 and (not not_thin or not_thin["B1"] < 0.5)
 
 
 def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():

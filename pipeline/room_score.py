@@ -53,6 +53,8 @@ DOORWAY_SHARE = 0.5       # a piece counts as standing in a fixture when this mu
 DOORWAY_SHARE_ONE = 0.6   # ... or this much in a single frame (a door is often seen in one keyframe only)
 FIXTURE_VOTE_SHARE = 0.25 # a tracked object the detector named a door or window this share of the time is
                           # partly one, whatever name won: the pan's door was "wardrobe 3.7, door 1.9"
+THIN_M = 0.2              # a piece thinner than this in such an outline is the door itself, not a wardrobe
+                          # the detector sometimes calls a door: it counts in full, not by the vote share
 EPS = 0.02                # scores closer than this are the same room
 
 
@@ -151,10 +153,17 @@ def doorways_by_votes(space: Path, shapes: dict, vocabulary) -> dict[str, float]
         return {}
     frames = sorted({f for t, _ in suspects for f in t["frames"]})
     views = placement.views_of(space, placement.spaced(frames))
+    units = None
+    try:
+        units = json.loads((Path(space) / "densify.json").read_text()).get("colmap_units_per_metre")
+    except (OSError, ValueError):
+        pass
     found = {}
     for t, vote_share in suspects:
         for i, b in built_pieces(shapes):
             lo, hi = np.array(b["min"], float), np.array(b["max"], float)
+            thin = units and float(min(hi[0] - lo[0], hi[1] - lo[1])) / units <= THIN_M
+            weight = 1.0 if thin else vote_share
             shares = []
             for name, view in views.items():
                 if name not in t["frames"]:
@@ -166,7 +175,7 @@ def doorways_by_votes(space: Path, shapes: dict, vocabulary) -> dict[str, float]
                     continue
                 shares.append(float((sil & mask).sum() / sil.sum()))
             if shares and np.mean(shares) >= DOORWAY_SHARE:
-                found[f"B{i}"] = max(found.get(f"B{i}", 0.0), float(np.mean(shares)) * vote_share)
+                found[f"B{i}"] = max(found.get(f"B{i}", 0.0), float(np.mean(shares)) * weight)
     return found
 
 
