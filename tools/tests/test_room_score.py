@@ -288,6 +288,62 @@ def test_wall_evidence_loads_a_real_cloud_from_disk():
         assert not walls.measured(moved)["W2"]["occluded"]
 
 
+def test_a_furniture_front_cannot_hide_the_real_wall_behind_it():
+    # The inversion a verifier proved on the first version: a wardrobe front
+    # (narrow, credible-looking) occluded the real wall, so dropping the real
+    # wall was free and dropping the front was rolled back.
+    rng = np.random.default_rng(5)
+    def sheet(n, xr, yr, zr):
+        return np.column_stack([rng.uniform(*xr, n), rng.uniform(*yr, n), rng.uniform(*zr, n)])
+    floor = sheet(4000, (0, 20), (0, 14), (0.0, 0.05))
+    back = sheet(2000, (0, 20), (13.95, 14.05), (0.0, 20.0))
+    front = sheet(600, (6, 10), (9.95, 10.05), (0.0, 18.0))     # a wardrobe face, 4 units wide
+    P = np.vstack([floor, back, front])
+    cams = np.array([[6.0, 4.0], [10.0, 5.0], [14.0, 4.0]])
+    real = {"kind": "wall", "normal": [0.0, 1.0, 0.0], "center": [10.0, 14.0, 10.0],
+            "axis_a": [1.0, 0.0, 0.0], "half_a": 10.0, "points": 2000}
+    face = {"kind": "wall", "normal": [0.0, 1.0, 0.0], "center": [8.0, 10.0, 9.0],
+            "axis_a": [1.0, 0.0, 0.0], "half_a": 2.0, "points": 600}
+    measured_real = rs.wall_support(P, real, 0.0, cams, UNITS, [face])
+    measured_face = rs.wall_support(P, face, 0.0, cams, UNITS, [real])
+    assert not measured_real["occluded"] and measured_real["support"] > 0.6
+    assert measured_face["interior"] > rs.OCCLUDER_MAX_INTERIOR   # its corridor gives it away
+
+
+def test_an_alcoves_back_wall_is_not_hidden_by_the_wall_fitted_across_its_opening():
+    rng = np.random.default_rng(6)
+    def sheet(n, xr, yr, zr):
+        return np.column_stack([rng.uniform(*xr, n), rng.uniform(*yr, n), rng.uniform(*zr, n)])
+    floor = np.vstack([sheet(3500, (0, 20), (0, 14), (0.0, 0.05)),
+                       sheet(500, (8, 12), (14, 18), (0.0, 0.05))])      # the alcove's floor
+    main = np.vstack([sheet(900, (0, 8), (13.95, 14.05), (0.0, 20.0)),   # either side of the opening
+                      sheet(900, (12, 20), (13.95, 14.05), (0.0, 20.0))])
+    alcove = sheet(500, (8, 12), (17.95, 18.05), (0.0, 20.0))
+    P = np.vstack([floor, main, alcove])
+    cams = np.array([[6.0, 4.0], [10.0, 5.0], [14.0, 4.0]])
+    wall_main = {"kind": "wall", "normal": [0.0, 1.0, 0.0], "center": [10.0, 14.0, 10.0],
+                 "axis_a": [1.0, 0.0, 0.0], "half_a": 10.0, "points": 1800}
+    wall_alcove = {"kind": "wall", "normal": [0.0, 1.0, 0.0], "center": [10.0, 18.0, 10.0],
+                   "axis_a": [1.0, 0.0, 0.0], "half_a": 2.0, "points": 500}
+    measured = rs.wall_support(P, wall_alcove, 0.0, cams, UNITS, [wall_main])
+    assert not measured["occluded"] and measured["support"] > 0.5
+
+
+def test_a_front_flagged_by_shapes_is_not_measured_at_all():
+    import tempfile
+    P, planes, cams = cloud_room()
+    planes = [dict(p) for p in planes]
+    planes[1]["behind"] = {"depth": 0.6, "points": 900}       # shapes.py's furniture-front note
+    with tempfile.TemporaryDirectory() as tmp:
+        walls = rs.WallEvidence(Path(tmp))
+        walls._loaded = True; walls._positions = P; walls.unit = UNITS
+        shapes = {"world": np.eye(3).tolist(), "planes": planes,
+                  "room_level": {"floor_z": 0.0, "height": 20.0},
+                  "cameras": cams.tolist(), "boxes": []}
+        measured = walls.measured(shapes)
+    assert "W1" not in measured and "W0" in measured
+
+
 def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():
     shapes = room()
     shapes["boxes"] = [dict(CUPBOARD, detected="wardrobe"),                       # another storage name: same kind
