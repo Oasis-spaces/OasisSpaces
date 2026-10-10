@@ -40,19 +40,17 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 import placement  # noqa: E402
 from semantics import room_vocabulary  # noqa: E402
+from tracking import FIXTURES, FIXTURE_VOTE_SHARE  # noqa: E402
 
 PIECES = ("bed", "seat", "table", "wardrobe")   # the furniture types scored as pieces
 COLLISION_WEIGHT = 0.5
 WALK_WEIGHT = 1.0
 DOORWAY_WEIGHT = 0.5
 WALK_MIN_SHARE = 0.4      # a piece reaching this share of the room's height cannot be filmed from inside
-FIXTURES = ("door", "window")   # names whose outlines no piece should fill (plus the list's fixture role)
 MIN_SILHOUETTE = 0.005    # a piece filling less of a frame than this is not judged in that frame
 DOORWAY_SHARE = 0.5       # a piece counts as standing in a fixture when this much of it lies in the outline
                           # (a piece beside a door overlaps its outline a little from some angles)
 DOORWAY_SHARE_ONE = 0.6   # ... or this much in a single frame (a door is often seen in one keyframe only)
-FIXTURE_VOTE_SHARE = 0.25 # a tracked object the detector named a door or window this share of the time is
-                          # partly one, whatever name won: the pan's door was "wardrobe 3.7, door 1.9"
 THIN_M = 0.2              # a piece thinner than this in such an outline is the door itself, not a wardrobe
                           # the detector sometimes calls a door: it counts in full, not by the vote share
 EPS = 0.02                # scores closer than this are the same room
@@ -143,12 +141,8 @@ def doorways_by_votes(space: Path, shapes: dict, vocabulary) -> dict[str, float]
     if tracks is None:
         return {}
     fixtures = set(FIXTURES) | set(vocabulary.with_role("fixture"))
-    suspects = []
-    for t in tracks.tracks:
-        total = sum(t["votes"].values())
-        share = sum(v for k, v in t["votes"].items() if k in fixtures) / total if total else 0.0
-        if share >= FIXTURE_VOTE_SHARE and t["label"] not in fixtures:
-            suspects.append((t, share))
+    doorish = tracks.doorish(fixtures)
+    suspects = [(t, tracks.fixture_share(t, fixtures)) for t in tracks.tracks if t["id"] in doorish]
     if not suspects:
         return {}
     frames = sorted({f for t, _ in suspects for f in t["frames"]})

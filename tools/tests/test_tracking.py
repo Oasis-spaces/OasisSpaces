@@ -57,6 +57,18 @@ def test_only_the_rooms_names_are_tracked_and_the_rest_stay_per_keyframe():
     assert merged["f2"][0]["label"] == "pillow" and "track" not in merged["f2"][0]
 
 
+def test_an_object_part_named_a_door_is_doorish_unless_it_is_a_door():
+    tracks = tracking.Tracks(FRAMES, (W, H), [
+        {"id": 0, "label": "wardrobe", "votes": {"wardrobe": 3.7, "door": 1.9}, "seed": FRAMES[0], "frames": {}},
+        {"id": 1, "label": "wardrobe", "votes": {"wardrobe": 3.0, "door": 0.5}, "seed": FRAMES[0], "frames": {}},
+        {"id": 2, "label": "door", "votes": {"door": 2.0}, "seed": FRAMES[0], "frames": {}},
+        {"id": 3, "label": "bed", "votes": {"bed": 2.0, "pinboard": 1.0}, "seed": FRAMES[0], "frames": {}},
+        {"id": 4, "label": "wardrobe", "votes": {"wardrobe": 0.8, "door": 0.3}, "seed": FRAMES[0], "frames": {}}], {})
+    assert tracks.doorish() == {0}                                   # a third of its votes; 1 is at 14%; 4's one weak vote is not enough
+    assert tracks.doorish({"pinboard"}) == {0, 3}                    # the list's own fixture names count too
+    assert abs(tracking.Tracks.fixture_share(tracks.tracks[0], {"door"}) - 1.9 / 5.6) < 1e-9
+
+
 def test_prompt_frames_are_the_keyframes_plus_a_spaced_sample():
     frames = [f"f{i:03d}" for i in range(100)]
     chosen = tracking.prompt_frames(frames, ["f037", "f090", "not-a-frame"], count=20)

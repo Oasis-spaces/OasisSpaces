@@ -57,6 +57,13 @@ MASK_SIZE = 256           # the model's own mask raster, kept as the stored one
 # forty names did not finish inside a Colab session.
 TRACKED_ROLES = ("furniture", "storage", "fixture", "unreliable", "hanging", "floor_covering")
 HALF_ON_CUDA = True       # float16 on CUDA: half the memory traffic of the per-object loop
+# A tracked object the detector named a door or window this share of the time
+# is partly one, whatever name won the vote: the pan's door was "wardrobe 3.7,
+# door 1.9". Its outlines are evidence for the fixture, not for a piece.
+FIXTURES = ("door", "window")
+FIXTURE_VOTE_SHARE = 0.25
+MIN_FIXTURE_VOTES = 0.6   # ... with at least this much vote behind it: one weak "door" (0.3) on a
+                          # cupboard seen eight times is not a verdict
 MATCH_IOU = 0.5           # a detection lands on a tracked object
 DUPLICATE_IOU = 0.7       # two objects trace the same thing
 DUPLICATE_FRAMES = 3      # ... judged over at least this many shared frames
@@ -163,6 +170,20 @@ class Tracks:
             found.append(det)
         found.sort(key=lambda d: -(d["box"][2] - d["box"][0]) * (d["box"][3] - d["box"][1]))
         return found
+
+    @staticmethod
+    def fixture_share(track: dict, fixtures: set[str]) -> float:
+        """The share of the detector's votes for this object that named a fixture."""
+        total = sum(track["votes"].values())
+        return sum(v for k, v in track["votes"].items() if k in fixtures) / total if total else 0.0
+
+    def doorish(self, fixtures: set[str] | None = None) -> set[int]:
+        """The ids of objects named a fixture at least FIXTURE_VOTE_SHARE of the
+        time but not called one: a door that won as "wardrobe"."""
+        fixtures = set(fixtures or ()) | set(FIXTURES)
+        return {t["id"] for t in self.tracks
+                if t["label"] not in fixtures and self.fixture_share(t, fixtures) >= FIXTURE_VOTE_SHARE
+                and sum(v for k, v in t["votes"].items() if k in fixtures) >= MIN_FIXTURE_VOTES}
 
     def all_detections(self) -> dict[str, list[dict]]:
         """{frame: detections} for every frame something shows in (densify.json's "detections")."""

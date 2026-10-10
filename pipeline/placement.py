@@ -198,6 +198,18 @@ def loose_roles(space: Path) -> set[str]:
     return names
 
 
+def fixture_names(space: Path) -> set[str]:
+    """Doors and windows, plus the object list's fixture-role names."""
+    names = {"door", "window"}
+    try:
+        for o in json.loads((Path(space) / "objects.json").read_text()).get("objects") or []:
+            if o.get("role") == "fixture":
+                names.add(o["name"])
+    except (OSError, ValueError):
+        pass
+    return names
+
+
 def on_top(piece: list, loose: list) -> bool:
     """Does at least ON_TOP_SHARE of the loose detection's rectangle lie inside the piece's?"""
     ix = max(0, min(piece[2], loose[2]) - max(piece[0], loose[0]))
@@ -257,17 +269,25 @@ def mask_evidence(space: Path, label: str, segmenter=None, log=print) -> dict:
     loose = loose_roles(space)
     hits = {name: [d for d in dets if d["label"] == label and d.get("score", 1) >= MIN_DETECTION]
             for name, dets in detections.items()}
-    seen = spaced(sorted(n for n, d in hits.items() if d))
-    unseen = spaced(sorted(n for n, d in hits.items() if not d))
-    views = views_of(space, seen + unseen)
     tracks = None
-    if seen and all("track" in d for n in seen for d in hits[n]):
+    if any(hits.values()) and all("track" in d for dets in hits.values() for d in dets):
         import sys
 
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from tracking import Tracks
 
         tracks = Tracks.load(space / "workspace" / "tracks")
+    if tracks is not None:
+        # A tracked object the detector part-named a door or window is evidence
+        # for that fixture, not for a piece: the pan's door, which won its vote
+        # as "wardrobe", would otherwise be where the wardrobe's masks are.
+        fixtures = fixture_names(space)
+        if label not in fixtures:
+            doorish = tracks.doorish(fixtures)
+            hits = {name: [d for d in dets if d.get("track") not in doorish] for name, dets in hits.items()}
+    seen = spaced(sorted(n for n, d in hits.items() if d))
+    unseen = spaced(sorted(n for n, d in hits.items() if not d))
+    views = views_of(space, seen + unseen)
     masks: dict[str, np.ndarray] = {}
     if tracks is not None:
         for name in seen:

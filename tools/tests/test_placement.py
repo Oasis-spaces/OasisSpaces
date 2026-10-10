@@ -189,6 +189,32 @@ def test_with_tracks_the_evidence_is_every_frame_the_object_shows_in_with_what_l
     assert mask[int(115 * mask.shape[0] / 256), int(90 * mask.shape[1] / 256)]     # the blanket on the bed counts
     assert not mask[int(20 * mask.shape[0] / 256), int(20 * mask.shape[1] / 256)]  # the stray one does not
     assert pl.spaced(list("abcdefgh"), 3) == ["a", "e", "h"] and pl.spaced(list("ab"), 3) == ["a", "b"]
+    # a "wardrobe" track the detector part-named a door is not wardrobe evidence: its frames drop out
+    # of the seen set when nothing else of the kind shows there, and its mask out of the union
+    doorway = np.zeros((256, 256), bool); doorway[20:200, 200:240] = True
+    tracks = tracking.Tracks(frames, (W, H), [
+        {"id": 0, "label": "wardrobe", "votes": {"wardrobe": 3.7, "door": 1.9}, "seed": frames[0],
+         "frames": {f: {"box": box(doorway), "score": 0.95} for f in frames[:90]}},
+        {"id": 1, "label": "wardrobe", "votes": {"wardrobe": 2.0}, "seed": frames[0],
+         "frames": {f: {"box": box(big), "score": 0.9} for f in frames[:10]}},
+    ], {**{tracking.Tracks.key(0, f): np.packbits(doorway) for f in frames[:90]},
+        **{tracking.Tracks.key(1, f): np.packbits(big) for f in frames[:10]}})
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        tracks.save(space / "workspace" / "tracks")
+        (space / "densify.json").write_text(json.dumps({"detections": tracks.all_detections()}))
+        kept = pl.views_of
+        pl.views_of = lambda space, names: {n: views[n] for n in names if n in views}
+        try:
+            evidence = pl.mask_evidence(space, "wardrobe", log=lambda *_: None)
+            as_door = pl.mask_evidence(space, "door", log=lambda *_: None)
+        finally:
+            pl.views_of = kept
+    assert sorted(evidence["frames"]) == frames[:10]                       # only the real wardrobe's frames
+    mask = evidence["frames"][frames[0]]["mask"]
+    assert not mask[int(100 * mask.shape[0] / 256), int(220 * mask.shape[1] / 256)]   # the doorway is not in it
+    # frames with only the door: unseen (capped like the seen ones); "door" itself has no door-labelled track
+    assert len(evidence["unseen"]) == pl.MAX_EVIDENCE_FRAMES and as_door["frames"] == {}
 
 
 if __name__ == "__main__":
