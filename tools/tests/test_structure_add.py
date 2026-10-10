@@ -178,7 +178,7 @@ def test_masks_place_a_dropped_piece_at_once_and_anything_else_waits_for_the_fin
     assert advisor.asked == []                                               # nobody is asked mid-review
 
 
-def settled(pending, phone=(), answers=()):
+def settled(pending, phone=(), answers=(), measure=None):
     """settle_pieces on a room on disk; returns (boxes, what was recorded, what Claude was asked)."""
     import json
     advisor = Answers(*answers)
@@ -186,6 +186,8 @@ def settled(pending, phone=(), answers=()):
     (agent_.space / "shapes.json").write_text(json.dumps(room()))
     agent_._pending_pieces = pending
     agent_.phone_objects = lambda: list(phone)
+    if measure is not None:
+        agent_.measure_room = measure
     recorded, ran = [], []
     agent_.judged = lambda stage, verdict, note: recorded.append(note)
     agent_.run = lambda command, stage, note: ran.append(note) or (True, "")
@@ -212,6 +214,12 @@ def test_on_the_finished_room_the_phone_is_heard_first_and_claude_only_where_not
     # nothing pending and nothing from the phone: the room is left as it is
     boxes, recorded, asked, ran = settled({})
     assert boxes == [] and recorded == [] and ran == []
+    # the phone's piece lowers the measured score (it stands over a measured one): undone
+    worse_with_more = lambda shapes=None: {"score": round(0.5 - 0.3 * len(shapes["boxes"]), 3)}
+    boxes, recorded, asked, ran = settled(dict(pending), phone=[wardrobe], measure=worse_with_more)
+    assert boxes == [] and ran == []
+    assert recorded[0].startswith("added B0 wardrobe") and "rolled back what the second opinion added" in recorded[0]
+    assert "from 0.50 to 0.20" in recorded[0]
 
 
 def test_no_whole_piece_means_nothing_is_added():
@@ -301,12 +309,30 @@ def test_an_edit_that_lowers_the_measured_room_score_is_rolled_back():
             "width_m": 1.2, "depth_m": 0.6, "height_m": 0.75, "why": "the desk"}
     applied = agent.Agent.apply_structure_review(
         agent_, shapes, {"drop_boxes": [{"id": "B1", "why": "a guess"}], "add_boxes": [item]})
-    assert applied == ["dropped B1", "rolled back drop_boxes: it lowered the measured room score from 0.60 to 0.30",
+    assert applied == ["dropped B1", "rolled back dropping B1: it lowered the measured room score from 0.60 to 0.30",
                        "added B2 table against W1, from its corner with W2"]
     assert all(b["build"] for b in shapes["boxes"]) and len(shapes["boxes"]) == 3   # the drop undone, the add kept
+    # two boxes measured on one spot: dropping the first removes their overlap and is kept,
+    # dropping the second loses a piece the frames show and is undone
+    def overlap_aware(shapes=None):
+        built = [b for b in shapes["boxes"] if b.get("build", True)]
+        both = sum(1 for b in built if b.get("label") == "wardrobe") == 2
+        return {"score": round(0.3 * len(built) - (0.5 if both else 0.0), 3)}
+    agent_.measure_room = overlap_aware
+    shapes["boxes"] = [{"label": "wardrobe", "detected": "wardrobe", "source": "detected", "build": True, "points": 300,
+                        "min": [-20.0, 10.0, -11.5], "max": [-14.0, 15.0, 7.0]},
+                       {"label": "wardrobe", "detected": "chest of drawers", "source": "detected", "build": True, "points": 400,
+                        "min": [-20.0, 10.5, -11.5], "max": [-14.0, 15.0, 7.0]},
+                       {"label": "bed", "detected": "bed", "source": "detected", "build": True, "points": 5000,
+                        "min": [-16.0, -4.0, -11.5], "max": [-7.0, 5.0, -6.0]}]
+    applied = agent.Agent.apply_structure_review(
+        agent_, shapes, {"drop_boxes": [{"id": "B0", "why": "a sliver"}, {"id": "B1", "why": "another"}]})
+    assert applied == ["dropped B0", "dropped B1",
+                       "rolled back dropping B1: it lowered the measured room score from 0.60 to 0.30"]
+    assert [b["build"] for b in shapes["boxes"]] == [False, True, True]
     # without a measurement, the review's word stands
     agent_.measure_room = lambda shapes=None: (_ for _ in ()).throw(FileNotFoundError("no densify.json"))
-    shapes["boxes"] = shapes["boxes"][:2]
+    shapes["boxes"][0]["build"] = True
     applied = agent.Agent.apply_structure_review(agent_, shapes, {"drop_boxes": [{"id": "B1", "why": "a guess"}]})
     assert applied == ["dropped B1"] and not shapes["boxes"][1]["build"]
 

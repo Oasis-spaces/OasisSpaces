@@ -1034,6 +1034,11 @@ class Agent:
         shapes_path = self.space / "shapes.json"
         shapes = json.loads(shapes_path.read_text())
         before = len(shapes["boxes"])
+        # What the second opinion adds is measured like the review's edits: a
+        # piece the phone places over one already measured (its thin front
+        # matched no box, the box it stands in does) is undone.
+        measured = self.safe(self.measure_room, shapes)
+        snapshot = copy.deepcopy(shapes["boxes"])
         notes = self.safe(self.phone_second_opinion, shapes, default=[]) or []
         for label, piece in pending.items():
             family = placement.furniture_family(self.space, label)
@@ -1049,6 +1054,12 @@ class Agent:
                 notes += self.safe(self.ask_where_piece_stands, shapes, label, piece["dropped"], default=[]) or []
         if not notes:
             return
+        if measured is not None and shapes["boxes"] != snapshot:
+            after = self.safe(self.measure_room, shapes)
+            if after is not None and room_score.compare(measured, after) == "worse":
+                shapes["boxes"] = snapshot
+                notes.append("rolled back what the second opinion added: it lowered the measured room "
+                             f"score from {measured['score']:.2f} to {after['score']:.2f}")
         shapes_path.write_text(json.dumps(shapes, indent=1) + "\n")
         self.judged("structure", {"second_opinion": notes, "applied": notes}, "; ".join(notes))
         if len(shapes["boxes"]) != before or any(note.startswith("grew") for note in notes):
@@ -1217,9 +1228,12 @@ class Agent:
             boxes[i]["build"] = False
             boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
             applied.append(f"dropped {ident}")
-        if settle("drop_boxes", snapshot):
-            boxes = shapes["boxes"]
-        snapshot = checkpoint()
+            # One box at a time: dropping the first of two boxes measured on
+            # one spot removes their overlap (kept); dropping the second loses
+            # a piece the frames show (undone), whatever the review said.
+            if settle(f"dropping {ident}", snapshot):
+                boxes = shapes["boxes"]
+            snapshot = checkpoint()
         for item in verdict.get("relabel_boxes") or []:
             ident, new = str(item.get("id", "")), item.get("label")
             i = int(ident[1:]) if ident[:1] == "B" and ident[1:].isdigit() else None
@@ -1231,9 +1245,9 @@ class Agent:
                 applied.append(f"relabelled {ident} {boxes[i].get('label')} -> {new}")
                 boxes[i]["label"] = new
                 boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
-        if settle("relabel_boxes", snapshot):
-            boxes = shapes["boxes"]
-        snapshot = checkpoint()
+                if settle(f"relabelling {ident}", snapshot):
+                    boxes = shapes["boxes"]
+                snapshot = checkpoint()
         units = self.densify_metrics().get("colmap_units_per_metre")
         for n, item in enumerate(verdict.get("add_boxes") or []):
             what = f"an added {item.get('label')}"
@@ -1248,7 +1262,9 @@ class Agent:
                 corner = item.get("from_corner_with")
                 applied.append(f"added B{len(boxes) - 1} {placed['label']} against {item.get('against')}"
                                + (f", from its corner with {corner}" if corner else ""))
-        settle("add_boxes", snapshot)
+                if settle(f"adding B{len(boxes) - 1}", snapshot):
+                    boxes = shapes["boxes"]
+                snapshot = checkpoint()
         return applied
 
     def build_front(self, shapes: dict, i: int, why: str) -> str:
