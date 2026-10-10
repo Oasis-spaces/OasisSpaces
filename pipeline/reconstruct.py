@@ -283,13 +283,47 @@ def gpu_flags(subcommand: str, new_prefix: str, old_prefix: str) -> list[str]:
     """
     if sys.platform == "darwin" or cuda_available():
         return []
-    result = subprocess.run(
-        ["colmap", subcommand, "--help"], capture_output=True, text=True
-    )
-    help_text = result.stdout + result.stderr
+    _, help_text = colmap_help(subcommand)
     for prefix in (new_prefix, old_prefix):
         if f"--{prefix}.use_gpu" in help_text:
             return [f"--{prefix}.use_gpu", "0"]
+    return []
+
+
+_colmap_help: dict[str, tuple[int, str]] = {}
+
+
+def colmap_help(subcommand: str) -> tuple[int, str]:
+    """One probe of `colmap <subcommand> --help` per subcommand, cached:
+    what this build understands is asked of the binary, never assumed from
+    a version number."""
+    if subcommand not in _colmap_help:
+        result = subprocess.run(
+            ["colmap", subcommand, "--help"], capture_output=True, text=True
+        )
+        _colmap_help[subcommand] = (result.returncode, result.stdout + result.stderr)
+    return _colmap_help[subcommand]
+
+
+def colmap_recognizes(subcommand: str) -> bool:
+    """Whether this COLMAP build has the subcommand at all (3.x has no
+    global_mapper, for instance): asking for its help succeeds only then."""
+    return colmap_help(subcommand)[0] == 0
+
+
+def feature_type_flags(subcommand: str, prefix: str, wanted: str) -> list[str]:
+    """The feature-type selector, only where this build understands it.
+
+    COLMAP 4.x picks SIFT or learned features with --FeatureExtraction.type /
+    --FeatureMatching.type; a 3.x build rejects the very option. SIFT is all
+    a 3.x build has and its default, so there the flag is simply dropped —
+    but a learned type must not silently degrade to SIFT.
+    """
+    if f"--{prefix}.type" in colmap_help(subcommand)[1]:
+        return [f"--{prefix}.type", wanted]
+    if not wanted.startswith("SIFT"):
+        sys.exit(f"this COLMAP build has no --{prefix}.type, so it cannot run "
+                 f"{wanted}; install COLMAP 4.x or use --features sift")
     return []
 
 
@@ -414,7 +448,7 @@ def sparse_reconstruction(
          "--image_path", str(images_dir),
          "--ImageReader.camera_model", "OPENCV",
          "--ImageReader.single_camera", "1",
-         "--FeatureExtraction.type", extractor_type,
+         *feature_type_flags("feature_extractor", "FeatureExtraction", extractor_type),
          *gpu_flags("feature_extractor", "FeatureExtraction", "SiftExtraction")],
         log,
     )
@@ -424,7 +458,7 @@ def sparse_reconstruction(
     run(
         ["colmap", matcher,
          "--database_path", str(database),
-         "--FeatureMatching.type", matcher_type,
+         *feature_type_flags(matcher, "FeatureMatching", matcher_type),
          *gpu_flags(matcher, "FeatureMatching", "SiftMatching")],
         log,
     )
@@ -434,6 +468,12 @@ def sparse_reconstruction(
                     "--output_path", str(sparse_dir)]
     if mapper == "priors":
         triangulate_priors(workspace, images_dir, database, sparse_dir, log)
+    if mapper == "global" and not colmap_recognizes("global_mapper"):
+        # Not a property of the capture: a pre-4.x build simply lacks the
+        # subcommand, so don't burn the seed attempts blaming the solve.
+        print("This COLMAP build has no global_mapper (pre-4.x); "
+              "using the incremental mapper.")
+        mapper = "incremental"
     if mapper == "global":
         rejected = workspace / "sparse-global-rejected"
         shutil.rmtree(rejected, ignore_errors=True)

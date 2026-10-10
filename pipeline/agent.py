@@ -39,6 +39,7 @@ import argparse
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -369,6 +370,39 @@ def keep_filled(before: dict, after: dict | None) -> tuple[bool, str]:
                   f"{before.get('reprojection') or 0:.2f}")
 
 
+def root_cause(output: str) -> str:
+    """The failing step's final error line. A step that says only
+    "see log: <file>" (COLMAP writes to its own log) is followed there, so
+    the gate's why names the real error — a rejected flag or a denied
+    download, not just "did not complete"."""
+    lines = [line.strip() for line in output.strip().splitlines() if line.strip()]
+    if not lines:
+        return ""
+    last = lines[-1]
+    if "see log: " in last:
+        try:
+            logged = Path(last.rsplit("see log: ", 1)[1]).read_text(errors="replace")
+        except OSError:
+            return last
+        # COLMAP colours its log lines even into a file, and the log is
+        # appended to across steps and runs: strip the colours and read only
+        # the failed step's own section (after the last "=== command" header).
+        logged = re.sub(r"\x1b\[[0-9;]*m", "", logged).strip().splitlines()
+        for i in range(len(logged) - 1, -1, -1):
+            if logged[i].startswith("=== "):
+                logged = logged[i + 1:]
+                break
+        section = [line.strip() for line in logged if line.strip()]
+        # glog errors and fatals first; otherwise any line that says error,
+        # but not an info line mentioning one in passing.
+        errors = ([line for line in section if line[:2] in ("E2", "F2")]
+                  or [line for line in section
+                      if "error" in line.lower() and not line.startswith("I2")])
+        if errors:
+            return f"{last.split(', see log')[0]}: {errors[-1]}"
+    return last
+
+
 WALK_PROMPT = """Two maps of the same phone video of a room, each drawn from a camera solve. Both show the room from above: the measured points in their colours, the floor shaded by how often it was seen, and the walk from start (green) to end (red) with a tick where the camera looked.
 
 Map 1 is COLMAP's own solve: it could place {before} of the video's {total} frames in one piece. Map 2 adds the frames it lost, placed by MapAnything from COLMAP's cameras and then triangulated and adjusted together with them: {after} frames. Numbers: {facts}.
@@ -407,6 +441,7 @@ class Agent:
         self.advice: list[str] = []
         self.judgements: list[dict] = []
         self.gates: dict[str, dict] = {}
+        self.last_error = ""                   # the failing step's root cause (run)
         self.use_claude = use_claude
         self.advisor = Advisor(enabled=use_claude)
 
@@ -566,9 +601,12 @@ class Agent:
             log.write(f"\n=== {stage} ({seconds}s): {' '.join(args)}\n")
             log.write(result.stdout + result.stderr)
         if result.returncode != 0:
+            self.last_error = root_cause(result.stdout + result.stderr)
             print(f"    failed after {seconds}s; see {self.log_path}")
-            print("   ", (result.stderr or result.stdout).strip().splitlines()[-1:])
+            if self.last_error:
+                print(f"    {self.last_error}")
         else:
+            self.last_error = ""
             print(f"    done in {seconds}s")
         return result.returncode == 0, result.stdout
 
@@ -1696,7 +1734,8 @@ class Agent:
              "--name", self.name, "--fps", str(self.fps)],
             "reconstruct", "SIFT features, global mapper")
         if not ok:
-            self.decide("reconstruct", "stop", "COLMAP could not build any model")
+            self.decide("reconstruct", "stop", "COLMAP could not build any model"
+                        + (f" — {self.last_error}" if self.last_error else ""))
             return False
         first = self.reconstruction_metrics()
         first_seconds = round(time.time() - started, 1)
@@ -1771,7 +1810,8 @@ class Agent:
         ok, _ = self.run([sys.executable, str(ROOT / "pipeline/densify.py"),
                           str(self.space)], "densify", "MoGe-2 + object detection and outlines")
         if not ok:
-            self.decide("densify", "stop", "densify failed")
+            self.decide("densify", "stop", "densify failed"
+                        + (f" — {self.last_error}" if self.last_error else ""))
             return False
         metrics = self.densify_metrics()
         spread = metrics.get("scale_spread")
@@ -1795,7 +1835,8 @@ class Agent:
             ok, _ = self.run([sys.executable, str(ROOT / "pipeline/densify.py"),
                               str(self.space)], "densify", "again, with the revised object list")
             if not ok:
-                self.decide("densify", "stop", "densify failed with the revised object list")
+                self.decide("densify", "stop", "densify failed with the revised object list"
+                            + (f" — {self.last_error}" if self.last_error else ""))
                 return False
             metrics = self.densify_metrics()
             labels = json.loads((self.space / "densify.json").read_text()).get("labels", {})
@@ -1819,7 +1860,8 @@ class Agent:
         ok, _ = self.run([sys.executable, str(ROOT / "pipeline/shapes.py"),
                           str(self.space)], "shapes", "planes and labelled boxes")
         if not ok:
-            self.decide("shapes", "stop", "shape detection failed")
+            self.decide("shapes", "stop", "shape detection failed"
+                        + (f" — {self.last_error}" if self.last_error else ""))
             return False
         self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"),
                   str(self.space), "--no-finish"], "classify", "label and sanity-check boxes")
@@ -2379,7 +2421,9 @@ class Agent:
             if m["models"] == 0:
                 return "stop", "no camera model was built"
             if m["fraction"] >= MIN_REGISTERED_FRACTION:
-                return "pass", f"{m['frames']}/{m['total']} frames placed in one model"
+                return "pass", (f"{m['frames']}/{m['total']} frames placed in "
+                                + ("one model" if m["models"] == 1 else
+                                   f"the best of {m['models']} models"))
             if m["fraction"] >= PARTIAL_REGISTERED_FRACTION:
                 return "warn", (f"only {m['fraction']:.0%} of frames placed: the model is "
                                 "coherent but covers part of the room")
@@ -2465,9 +2509,14 @@ class Agent:
         if missing:
             status, why = "stop", missing
         else:
+            # A step may shrug off a helper's failure; don't let that error
+            # label a later stage that stops without running anything.
+            self.last_error = ""
             step = {"reconstruct": self.step_reconstruct, "densify": self.step_densify,
                     "shapes": self.step_shapes, "splat": self.step_splat}[stage]
-            status, why = self.gate(stage) if step() else ("stop", f"{stage} did not complete")
+            status, why = (self.gate(stage) if step() else
+                           ("stop", f"{stage} did not complete"
+                            + (f" — {self.last_error}" if self.last_error else "")))
         self.gates[stage] = {"status": status, "why": why}
         print(f"\n*** {stage}: {status.upper()} - {why}")
         return status
