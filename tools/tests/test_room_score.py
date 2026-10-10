@@ -141,6 +141,44 @@ def test_a_piece_standing_where_the_frames_show_the_door_is_penalised():
     assert aside["doorway"] < once["doorway"]
 
 
+def test_a_tracked_object_the_detector_part_named_a_door_counts_as_one():
+    import tempfile
+
+    import tracking
+
+    door = {"min": [8.0, 15.0, 0.0], "max": [15.0, 15.6, 18.0]}
+    positions = ((11.0, 2.0, 12.0), (9.5, 0.0, 12.0), (13.0, 4.0, 12.0))
+    frames = [f"frame_{n:05d}.jpg" for n in range(3)]
+    views = {}
+    masks, seen = {}, {}
+    for name, position in zip(frames, positions):
+        v = view(position, [11.5, 15.3, 2.0])
+        views[name] = v
+        shape = (v["height"] // pl.GRID, v["width"] // pl.GRID)
+        sil = pl.silhouette(np.array(door["min"]), np.array(door["max"]), v, shape)
+        from PIL import Image
+        small = np.asarray(Image.fromarray(sil.astype(np.uint8) * 255).resize((256, 256), Image.NEAREST)) > 0
+        masks[tracking.Tracks.key(7, name)] = np.packbits(small)
+        seen[name] = {"box": tracking.mask_box(small, v["width"], v["height"]), "score": 0.95}
+    tracks = tracking.Tracks(frames, (1080, 1920), [
+        {"id": 7, "label": "almirah", "votes": {"almirah": 3.7, "door": 1.9}, "seed": frames[0], "frames": seen}], masks)
+    shapes = room()
+    shapes["boxes"] = [dict(BED), dict(CUPBOARD, min=list(door["min"]), max=list(door["max"]))]
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        tracks.save(space / "workspace" / "tracks")
+        kept = pl.views_of
+        pl.views_of = lambda space_, names: {n: views[n] for n in names if n in views}
+        try:
+            by_votes = rs.doorways_by_votes(space, shapes, VOCAB)
+            result = rs.room_score(space, shapes, evidence(), VOCAB)
+        finally:
+            pl.views_of = kept
+    assert set(by_votes) == {"B1"} and abs(by_votes["B1"] - 1.9 / 5.6) < 0.05      # all of it, by a third of the votes
+    assert abs(result["doorways"]["B1"] - by_votes["B1"]) < 1e-3 and "B1 stands in a doorway" in rs.describe(result)
+    assert rs.doorways_by_votes(Path("/nonexistent"), shapes, VOCAB) == {}
+
+
 def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():
     shapes = room()
     shapes["boxes"] = [dict(CUPBOARD, detected="wardrobe"),                       # another storage name: same kind

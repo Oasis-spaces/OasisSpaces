@@ -51,6 +51,8 @@ MIN_SILHOUETTE = 0.005    # a piece filling less of a frame than this is not jud
 DOORWAY_SHARE = 0.5       # a piece counts as standing in a fixture when this much of it lies in the outline
                           # (a piece beside a door overlaps its outline a little from some angles)
 DOORWAY_SHARE_ONE = 0.6   # ... or this much in a single frame (a door is often seen in one keyframe only)
+FIXTURE_VOTE_SHARE = 0.25 # a tracked object the detector named a door or window this share of the time is
+                          # partly one, whatever name won: the pan's door was "wardrobe 3.7, door 1.9"
 EPS = 0.02                # scores closer than this are the same room
 
 
@@ -126,6 +128,48 @@ def in_doorways(shapes: dict, evidence_for, vocabulary) -> dict[str, float]:
     return found
 
 
+def doorways_by_votes(space: Path, shapes: dict, vocabulary) -> dict[str, float]:
+    """With tracks (tracking.py): a built piece filling the outline of a
+    tracked object that the detector named a door or window at least
+    FIXTURE_VOTE_SHARE of the time stands in a doorway by that share, whatever
+    name won the vote. The pan's door was "wardrobe 3.7, door 1.9": every
+    outline of it counted as wardrobe evidence, and no door outline was left
+    to catch the box built in it."""
+    from tracking import Tracks
+
+    tracks = Tracks.load(Path(space) / "workspace" / "tracks")
+    if tracks is None:
+        return {}
+    fixtures = set(FIXTURES) | set(vocabulary.with_role("fixture"))
+    suspects = []
+    for t in tracks.tracks:
+        total = sum(t["votes"].values())
+        share = sum(v for k, v in t["votes"].items() if k in fixtures) / total if total else 0.0
+        if share >= FIXTURE_VOTE_SHARE and t["label"] not in fixtures:
+            suspects.append((t, share))
+    if not suspects:
+        return {}
+    frames = sorted({f for t, _ in suspects for f in t["frames"]})
+    views = placement.views_of(space, placement.spaced(frames))
+    found = {}
+    for t, vote_share in suspects:
+        for i, b in built_pieces(shapes):
+            lo, hi = np.array(b["min"], float), np.array(b["max"], float)
+            shares = []
+            for name, view in views.items():
+                if name not in t["frames"]:
+                    continue
+                shape = (view["height"] // placement.GRID, view["width"] // placement.GRID)
+                mask = tracks.mask(t["id"], name, shape)
+                sil = placement.silhouette(lo, hi, view, shape)
+                if mask is None or sil.sum() < MIN_SILHOUETTE * sil.size:
+                    continue
+                shares.append(float((sil & mask).sum() / sil.sum()))
+            if shares and np.mean(shares) >= DOORWAY_SHARE:
+                found[f"B{i}"] = max(found.get(f"B{i}", 0.0), float(np.mean(shares)) * vote_share)
+    return found
+
+
 def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None) -> dict:
     """The score of `shapes` (a shapes.json in memory), with its parts."""
     space = Path(space)
@@ -163,6 +207,8 @@ def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None) -> dict
     walk = inside / len(cameras) if cameras else 0.0
 
     doorways = in_doorways(shapes, evidence_for, vocabulary)
+    for box_id, share in doorways_by_votes(space, shapes, vocabulary).items():
+        doorways[box_id] = max(doorways.get(box_id, 0.0), share)
     doorway = max(doorways.values(), default=0.0)
 
     score = (agreement or 0.0) - COLLISION_WEIGHT * collision - WALK_WEIGHT * walk - DOORWAY_WEIGHT * doorway

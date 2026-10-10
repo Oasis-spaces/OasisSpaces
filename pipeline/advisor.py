@@ -45,6 +45,30 @@ RELAY_WAIT_SECONDS = 1800
 RELAY_IMAGE_LONG_SIDE = 1600
 
 
+def first_json(text: str) -> dict:
+    """The claude CLI's answer from its --output-format json output. At a
+    session limit the CLI prints its notice as a second JSON document after
+    the first (seen 2026-10-10: "Extra data: line 2 column 1"), so the whole
+    output is not one document: the first is taken, and when it carries no
+    result and a later document is an error, that error is the answer."""
+    text = (text or "").strip()
+    if not text:
+        return {}
+    decoder = json.JSONDecoder()
+    payload, end = decoder.raw_decode(text)
+    payload = payload if isinstance(payload, dict) else {}
+    rest = text[end:].strip()
+    while rest and not payload.get("result") and not payload.get("is_error"):
+        try:
+            extra, end = decoder.raw_decode(rest)
+        except ValueError:
+            break
+        if isinstance(extra, dict) and extra.get("is_error"):
+            return extra
+        rest = rest[end:].strip()
+    return payload
+
+
 class Advisor:
     """One place to ask Claude, whichever way this machine can reach it."""
 
@@ -88,7 +112,7 @@ class Advisor:
         try:
             result = subprocess.run(command, capture_output=True, text=True,
                                     timeout=self.timeout)
-            payload = json.loads(result.stdout or "{}")
+            payload = first_json(result.stdout)
         except subprocess.TimeoutExpired:
             self._disable(f"the claude CLI did not answer within {self.timeout}s")
             return None
