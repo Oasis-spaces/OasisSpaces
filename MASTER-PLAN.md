@@ -247,4 +247,4 @@ pip3 install --break-system-packages --no-deps \
 
 **Pushing from this Mac's network:** uploads faster than ~170 KB/s are corrupted, so run `python3 tools/paced_proxy.py` and push with `git -c http.proxy=http://127.0.0.1:8899 push origin main`. Never commit clouds, splats or videos.
 
-**Tests:** `for t in tools/tests/test_*.py; do python3 $t; done` on the Mac; `swift test` in `apps/OasisCapture/Packages/CaptureRules` and `apps/OasisLink`; `pytest relay/tests`.
+**Tests:** `for t in tools/tests/test_*.py; do python3 $t; done` on the Mac; `swift test` in `apps/OasisCapture/Packages/CaptureRules` and `apps/OasisLink`; `cd relay && pytest tests`.
