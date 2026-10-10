@@ -51,6 +51,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from semantics import SEGMENTER_ID, default_device  # noqa: E402
 
 MASK_SIZE = 256           # the model's own mask raster, kept as the stored one
+# The names worth carrying through the video: the pieces, the surfaces and the
+# openings a room model is made of. Clothes, bags and brushes are labelled per
+# keyframe as before; tracking costs frames x objects, and a walkthrough with
+# forty names did not finish inside a Colab session.
+TRACKED_ROLES = ("furniture", "storage", "fixture", "unreliable", "hanging", "floor_covering")
+HALF_ON_CUDA = True       # float16 on CUDA: half the memory traffic of the per-object loop
 MATCH_IOU = 0.5           # a detection lands on a tracked object
 DUPLICATE_IOU = 0.7       # two objects trace the same thing
 DUPLICATE_FRAMES = 3      # ... judged over at least this many shared frames
@@ -78,6 +84,28 @@ def mask_box(mask: np.ndarray, width: int, height: int) -> list[float] | None:
         return None
     sx, sy = width / mask.shape[1], height / mask.shape[0]
     return [float(cols[0] * sx), float(rows[0] * sy), float((cols[-1] + 1) * sx), float((rows[-1] + 1) * sy)]
+
+
+def tracked_names(vocabulary) -> set[str]:
+    """The vocabulary's names in TRACKED_ROLES."""
+    return set(vocabulary.with_role(*TRACKED_ROLES))
+
+
+def split_prompts(prompts: dict[str, list[dict]], tracked: set[str]) -> tuple[dict, dict]:
+    """The detections to track and the rest, each as {frame: detections}."""
+    to_track = {name: [d for d in dets if d["label"] in tracked] for name, dets in prompts.items()}
+    rest = {name: [d for d in dets if d["label"] not in tracked] for name, dets in prompts.items()}
+    return {n: d for n, d in to_track.items() if d}, {n: d for n, d in rest.items() if d}
+
+
+def merge_detections(tracked: dict[str, list[dict]], rest: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """densify.json's "detections": the tracked objects in every frame they
+    show in, plus the untracked detections of the prompt frames."""
+    merged = {name: list(dets) for name, dets in tracked.items()}
+    for name, dets in rest.items():
+        merged.setdefault(name, []).extend(
+            {"label": d["label"], "score": d["score"], "box": [round(v) for v in d["box"]]} for d in dets)
+    return merged
 
 
 def prompt_frames(frames: list[str], keyframes: list[str], count: int = PROMPT_FRAMES) -> list[str]:
@@ -185,7 +213,8 @@ class Tracker:
 
         self.torch = torch
         self.device = device or default_device()
-        self.model = Sam2VideoModel.from_pretrained(SEGMENTER_ID).to(self.device).eval()
+        self.dtype = torch.float16 if (self.device == "cuda" and HALF_ON_CUDA) else torch.float32
+        self.model = Sam2VideoModel.from_pretrained(SEGMENTER_ID, dtype=self.dtype).to(self.device).eval()
 
     def pixels(self, path: Path):
         from PIL import Image
@@ -199,7 +228,7 @@ class Tracker:
 
         return Sam2VideoInferenceSession(video=None, video_height=height, video_width=width,
                                          inference_device=self.device, inference_state_device=self.device,
-                                         video_storage_device="cpu", dtype=self.torch.float32)
+                                         video_storage_device="cpu", dtype=self.dtype)
 
     def run(self, image_dir: Path, frames: list[str], prompts: dict[str, list[dict]], log=print) -> Tracks:
         """Track everything in `prompts` ({frame: detections}) through `frames`."""
@@ -246,7 +275,7 @@ class Tracker:
         def add_box(session, obj_id, f, box):
             x0, y0, x1, y1 = box
             coords = torch.tensor([[[[x0 * INPUT / width, y0 * INPUT / height],
-                                     [x1 * INPUT / width, y1 * INPUT / height]]]], dtype=torch.float32)
+                                     [x1 * INPUT / width, y1 * INPUT / height]]]], dtype=self.dtype)
             labels = torch.tensor([[[2, 3]]], dtype=torch.int32)        # SAM's box corners
             session.add_point_inputs(session.obj_id_to_idx(obj_id), f,
                                      {"point_coords": coords, "point_labels": labels})
@@ -300,7 +329,7 @@ class Tracker:
                         mask = torch.from_numpy(mask.reshape(1, 1, MASK_SIZE, MASK_SIZE).astype(np.float32))
                         mask = torch.nn.functional.interpolate(mask, size=(INPUT, INPUT), mode="bilinear",
                                                                align_corners=False) >= 0.5
-                        session.add_mask_inputs(session.obj_id_to_idx(obj_id), f, mask.float())
+                        session.add_mask_inputs(session.obj_id_to_idx(obj_id), f, mask.to(self.dtype))
                     if seeded:
                         session.obj_with_new_inputs = seeded
                     if session.get_obj_num():
@@ -433,15 +462,17 @@ def main() -> None:
         prompts[name] = detector.detect(Image.open(image_dir / name))
         print(f"  {name}: " + (", ".join(sorted({d['label'] for d in prompts[name]})) or "nothing"))
     del detector
+    to_track, rest = split_prompts(prompts, tracked_names(vocabulary))
     tracker = Tracker()
-    print(f"Tracking with {SEGMENTER_ID} (video) on {tracker.device}")
-    tracks = tracker.run(image_dir, frames, prompts)
+    print(f"Tracking with {SEGMENTER_ID} (video) on {tracker.device}, {tracker.dtype}: "
+          + ", ".join(sorted({d['label'] for dets in to_track.values() for d in dets})))
+    tracks = tracker.run(image_dir, frames, to_track)
     tracks.save(space / "workspace" / "tracks")
     for t in tracks.tracks:
         votes = ", ".join(f"{k} {v:.1f}" for k, v in sorted(t["votes"].items(), key=lambda kv: -kv[1]))
         print(f"  object {t['id']}: {t['label']} in {len(t['frames'])} frames (votes: {votes})")
     if args.update_densify and meta:
-        meta["detections"] = tracks.all_detections()
+        meta["detections"] = merge_detections(tracks.all_detections(), rest)
         meta["tracks"] = tracks.summary()
         meta_path.write_text(json.dumps(meta, indent=2) + "\n")
         print(f"densify.json: detections now from the tracks, {len(meta['detections'])} frames")

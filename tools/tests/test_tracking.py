@@ -34,6 +34,29 @@ def test_a_rectangle_comes_back_from_an_outline_in_frame_pixels():
     assert abs(tracking.box_iou([0, 0, 10, 10], [5, 0, 15, 10]) - 1 / 3) < 1e-9
 
 
+def test_only_the_rooms_names_are_tracked_and_the_rest_stay_per_keyframe():
+    from semantics import Vocabulary
+
+    vocabulary = Vocabulary([{"name": "bed", "role": "furniture", "build_as": "bed"},
+                             {"name": "door", "role": "fixture", "build_as": None},
+                             {"name": "mirror", "role": "unreliable", "build_as": None},
+                             {"name": "curtain", "role": "hanging", "build_as": None},
+                             {"name": "laptop", "role": "loose", "build_as": None},
+                             {"name": "pillow", "role": "on_furniture", "build_as": "block"}])
+    assert tracking.tracked_names(vocabulary) == {"bed", "door", "mirror", "curtain"}
+    prompts = {"f1": [{"label": "bed", "score": 0.9, "box": [0, 0, 10, 10]}, {"label": "laptop", "score": 0.8, "box": [1, 1, 2, 2.4]}],
+               "f2": [{"label": "pillow", "score": 0.5, "box": [3, 3, 4, 4]}],
+               "f3": [{"label": "door", "score": 0.6, "box": [5, 5, 9, 9]}]}
+    to_track, rest = tracking.split_prompts(prompts, tracking.tracked_names(vocabulary))
+    assert sorted(to_track) == ["f1", "f3"] and [d["label"] for d in to_track["f1"]] == ["bed"]
+    assert sorted(rest) == ["f1", "f2"] and [d["label"] for d in rest["f1"]] == ["laptop"]
+    merged = tracking.merge_detections({"f1": [{"label": "bed", "score": 0.99, "box": [0, 0, 10, 10], "track": 0}],
+                                        "f4": [{"label": "bed", "score": 0.98, "box": [0, 0, 9, 9], "track": 0}]}, rest)
+    assert sorted(merged) == ["f1", "f2", "f4"]
+    assert [d["label"] for d in merged["f1"]] == ["bed", "laptop"] and merged["f1"][1]["box"] == [1, 1, 2, 2]
+    assert merged["f2"][0]["label"] == "pillow" and "track" not in merged["f2"][0]
+
+
 def test_prompt_frames_are_the_keyframes_plus_a_spaced_sample():
     frames = [f"f{i:03d}" for i in range(100)]
     chosen = tracking.prompt_frames(frames, ["f037", "f090", "not-a-frame"], count=20)

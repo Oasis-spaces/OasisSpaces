@@ -39,7 +39,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
 from semantics import (SEGMENTER_ID, Detector, Segmenter, planned_vocabulary,
                        default_device, pixel_labels)
-from tracking import PROMPT_FRAMES, Tracker, prompt_frames
+from tracking import (PROMPT_FRAMES, Tracker, merge_detections, prompt_frames, split_prompts,
+                      tracked_names)
 from mirrors import fill_unreliable
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
@@ -439,10 +440,14 @@ def main():
         tracks = None
         if label_index is not None and tracking_on and any(prompts.values()):
             try:
+                # The room's names (pieces, surfaces, openings) are tracked;
+                # the rest keep their per-keyframe detections, outlined below.
+                to_track, rest = split_prompts(prompts, tracked_names(vocabulary))
                 tracker = Tracker(device=device)
-                print(f"Object tracking: {SEGMENTER_ID} (video) on {tracker.device}, "
-                      f"{len(prompts)} prompt frames of {len(all_names)}")
-                tracks = tracker.run(workspace / "images", all_names, prompts, log=print)
+                print(f"Object tracking: {SEGMENTER_ID} (video) on {tracker.device} ({tracker.dtype}), "
+                      f"{len(prompts)} prompt frames of {len(all_names)}; tracking "
+                      + (", ".join(sorted({d["label"] for dets in to_track.values() for d in dets})) or "nothing"))
+                tracks = tracker.run(workspace / "images", all_names, to_track, log=print)
                 del tracker
                 release_model_memory(torch)
                 tracks.save(workspace / "tracks")
@@ -450,8 +455,9 @@ def main():
                 # the detector's votes over the whole video; and every frame
                 # an object shows in is recorded for stage 3.
                 for f in frames:
-                    f["detections"] = tracks.detections(images[f["id"]]["name"], work_size=1024)
-                meta["detections"] = tracks.all_detections()
+                    name = images[f["id"]]["name"]
+                    f["detections"] = tracks.detections(name, work_size=1024) + list(rest.get(name, []))
+                meta["detections"] = merge_detections(tracks.all_detections(), rest)
                 meta["tracks"] = tracks.summary()
                 meta["outlines"] = SEGMENTER_ID + " (video)"
                 counts = tracks.summary()["labels"]
@@ -463,25 +469,29 @@ def main():
         elif label_index is not None and not tracking_on and args.track == "auto":
             print(f"Object tracking: off on {device} (about a second an object and frame here; "
                   "--track on forces it)")
-        if label_index is not None and tracks is None:
+        if label_index is not None:
             # A rectangle around a bed also holds floor and curtain; cut each
-            # one down to the object's own outline before labelling points.
-            meta["outlines"] = "boxes"
-            if not args.no_outlines and any(f["detections"] for f in frames):
+            # one down to the object's own outline before labelling points
+            # (with tracks, only the untracked names still need one).
+            if tracks is None:
+                meta["outlines"] = "boxes"
+            todo = {f["id"]: [d for d in f["detections"] if "mask" not in d] for f in frames}
+            if not args.no_outlines and any(todo.values()):
                 try:
                     segmenter = Segmenter(device=device)
                     print(f"Object outlines: SAM 2.1 hiera-tiny on {segmenter.device}")
                     for f in frames:
+                        if not todo[f["id"]]:
+                            continue
                         name = images[f["id"]]["name"]
-                        done = segmenter.outline(Image.open(workspace / "images" / name),
-                                                 f["detections"])
-                        print(f"  {name}: {done}/{len(f['detections'])} outlined")
+                        done = segmenter.outline(Image.open(workspace / "images" / name), todo[f["id"]])
+                        print(f"  {name}: {done}/{len(todo[f['id']])} outlined")
                     del segmenter
                     release_model_memory(torch)
-                    meta["outlines"] = SEGMENTER_ID
+                    meta["outlines"] = SEGMENTER_ID if tracks is None else SEGMENTER_ID + " (video and image)"
                 except Exception as exc:  # weights missing, or the model failed
-                    for f in frames:
-                        for det in f["detections"]:
+                    for dets in todo.values():
+                        for det in dets:
                             det.pop("mask", None)
                     print(f"Object outlines unavailable ({exc}); "
                           "labelling whole detection rectangles")
