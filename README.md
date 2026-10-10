@@ -215,7 +215,11 @@ the agent's judgement:
    SAM 2.1's video model carries each thing it found through every frame in
    between and back to the start: one object, one identity over the whole
    video, named by the detector's votes for it, with an outline in every
-   frame it shows in. The keyframes' points are labelled by those outlines;
+   frame it shows in. Only the names a room model is made of are tracked
+   (furniture, storage, fixtures, mirrors and windows, hanging things, floor
+   coverings); clothes, bags and the like keep their per-keyframe detections,
+   since tracking costs frames times objects and a walkthrough with forty
+   names did not finish inside a Colab session. The keyframes' points are labelled by those outlines;
    `workspace/tracks/` keeps every object's outline per frame, which the
    placement search below scores against instead of a dozen keyframes; and
    `densify.json`'s `detections` list every frame each object shows in. Meta's
