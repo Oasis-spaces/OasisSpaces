@@ -49,8 +49,10 @@ public struct ObservationMatch: Sendable, Equatable {
 /// most (the busiest connected part), so the stray depths fall away. An object
 /// remembers every voxel its observations covered, with a hit count, so its
 /// box is the extent of everything seen of it from every angle, not of the
-/// current view; once the object is established a voxel needs two hits, and
-/// more than one glimpse of it (seen at length, or again later), which drops
+/// current view; once the object is established a voxel needs two hits (a
+/// hit next to a cell already seen counts for that cell: depth jitters by
+/// about a cell between frames), and more than one glimpse of it (seen at
+/// length, or again later), which drops
 /// the stray points of a bad depth frame and a mask that was wrong for a
 /// moment, and the extent on each axis
 /// runs out from the busiest part over everything connected to it (see
@@ -92,6 +94,27 @@ public final class ObjectTracker {
         /// Where it was last seen from, and where its sighting's middle was (see sameSight).
         var seenFrom: SIMD3<Float>?
         var seenAt = SIMD3<Float>(repeating: 0)
+
+        /// One more sighting of the voxel at `key`. Depth jitters by about a voxel from
+        /// frame to frame, so the same patch of a surface seldom lands in the same 5 cm
+        /// cell twice: a hit on a new cell next to one seen in an earlier frame counts for
+        /// that one, and "seen twice" means seen twice within a cell of itself. (Only an
+        /// earlier frame's cell: the new cells of one sighting must not vouch for each other.)
+        mutating func hit(_ key: SIMD3<Int32>, frame: Int) {
+            let one = Hits(count: 1, first: frame, last: frame)
+            if voxels[key] != nil {
+                voxels[key]!.add(one)
+                return
+            }
+            for step in [SIMD3<Int32>(1, 0, 0), SIMD3(-1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, -1, 0), SIMD3(0, 0, 1), SIMD3(0, 0, -1)] {
+                let neighbour = key &+ step
+                if let seen = voxels[neighbour], seen.last < frame {
+                    voxels[neighbour]!.add(one)
+                    return
+                }
+            }
+            voxels[key] = one
+        }
     }
 
     /// How often a voxel was seen as part of an object, and over which frames.
@@ -234,7 +257,7 @@ public final class ObjectTracker {
         for (pi, p) in prepared.enumerated() {
             let o = observations[p.index]
             if let ti = matchOf[pi] {
-                for key in p.voxels { tracks[ti].voxels[key, default: Hits(count: 0, first: frame, last: frame)].add(Hits(count: 1, first: frame, last: frame)) }
+                for key in p.voxels { tracks[ti].hit(key, frame: frame) }
                 tracks[ti].votes[o.classIndex, default: 0] += o.confidence
                 tracks[ti].observations += 1
                 tracks[ti].lastSeen = frame

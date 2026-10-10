@@ -578,7 +578,11 @@ phone (no model calls, no network while recording). Build and install with
   own door a "wardrobe door"): it joins the wardrobe whichever was seen
   first, and is outlined as "wardrobe" from then on. A standing piece's
   footprint is its lower body's: cabinets that run on over a doorway at
-  head height belong to the wardrobe, not to the floor it covers. What is
+  head height belong to the wardrobe, not to the floor it covers. A hit on
+  a new 5 cm cell next to one seen in an earlier frame counts for that cell:
+  depth jitters by about a cell between frames, and without this the far
+  end of a bed, seen six times, counted or not depending on which of two
+  tracks one frame happened to join. What is
   seen again from the same standpoint in the same direction is the same
   thing, wherever that frame's depth put it: turning on the spot gives the
   depth nothing to hold on to, and one monitor became three in a row along
