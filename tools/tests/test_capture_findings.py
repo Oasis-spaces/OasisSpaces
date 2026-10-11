@@ -34,6 +34,10 @@ def test_every_finding_carries_its_evidence_and_the_input_to_take():
     quiet = bare_agent()
     quiet.capture_advice({"rejected_global": False, "fraction": 1.0}, {}, None, {})
     assert quiet.advice == []
+    # A run that died before COLMAP made any model counted no frames: nothing to report.
+    crashed = bare_agent()
+    crashed.capture_advice({"models": 0, "frames": 0, "total": 0, "fraction": 0.0}, {}, None, {})
+    assert crashed.advice == []
 
 
 def test_the_prompt_takes_exactly_the_evidence_the_run_measured():
@@ -43,7 +47,7 @@ def test_the_prompt_takes_exactly_the_evidence_the_run_measured():
     assert "diagnose THIS capture" in filled and "abstain" in filled
     assert "{recon}" not in filled and "{limit}" not in filled and "{coverage}" not in filled
     assert "a set of photos" in filled and "not that the camera did not move" in filled
-    assert "scale was guessed" in filled                     # metres off a guessed scale are not evidence
+    assert "only guessed they are left out" in filled        # metres off a guessed scale are not evidence
 
 
 def test_an_unfurnished_room_is_not_told_its_furniture_was_missed():
@@ -135,6 +139,24 @@ def test_the_last_measured_wall_table_and_the_sampling_are_read_back():
         assert sampling["frames_kept"] == 2 and sampling["candidates_fps"] == 6.0
         assert "not the person" in sampling["note"]
         assert a.capture_map_metrics() == {}                       # no capture map on disk
+
+
+def test_a_guessed_scale_hides_the_sizes_and_floor_shares_measured_on_it():
+    """Before densify the map's scale is a guess that put one room 95 m high;
+    the advisor cited such numbers though told not to, so it never sees them."""
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        record = {"frames": 30, "path_m": 11.21, "footprint_m2": 98.4, "size_m": [124.5, 194.1],
+                  "height_m": 95.2, "floor_well_seen": 0.0, "floor_never_seen": 1.0,
+                  "directions_faced": "1 of 12", "directions_never_faced_deg": [0, 30],
+                  "scale_from": "the phone held 1.4 m up (guessed)"}
+        (space / "capture-map.json").write_text(json.dumps(record))
+        read = bare_agent(space).capture_map_metrics()
+        assert not set(agent_module.SCALED_MAP_FIELDS) & set(read)
+        assert read["directions_faced"] == "1 of 12" and read["frames"] == 30 and "guessed" in read["left_out"]
+        # Measured by densify, every number is read as it is.
+        (space / "capture-map.json").write_text(json.dumps(dict(record, scale_from="densify's measurement")))
+        assert bare_agent(space).capture_map_metrics()["height_m"] == 95.2
 
 
 def test_a_malformed_advisor_reply_never_loses_the_report():

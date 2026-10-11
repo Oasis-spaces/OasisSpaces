@@ -58,6 +58,10 @@ def test_a_mostly_unfaced_room_asks_for_one_loop_and_a_covered_one_for_nothing()
     covered = space_with({"directions_never_faced_deg": [], "directions_faced": "12 of 12",
                           "floor_never_seen": 0.05})
     assert shot_list.build(covered, log=lambda *_: None) == []
+    # On a guessed scale the floor share is not evidence: a floor in every frame has read 100% unseen.
+    guessed = space_with({"directions_never_faced_deg": [], "directions_faced": "12 of 12",
+                          "floor_never_seen": 1.0, "scale_from": "the phone held 1.4 m up (guessed)"})
+    assert shot_list.build(guessed, log=lambda *_: None) == []
     # An occluded wall is hidden, not unfilmed: no pass for it.
     assert shot_list.wall_passes(
         {"planes": [{"kind": "wall", "normal": [0, 1, 0], "center": [0, 0, 0],

@@ -106,7 +106,10 @@ def build(space: Path, walls_measured: dict | None = None, log=print) -> list[di
                           "evidence": "directions_never_faced_deg on the capture map",
                           "arc": [start, end]})
     shots += wall_passes(shapes, walls_measured or {}, units)
-    if (capture.get("floor_never_seen") or 0) > FLOOR_UNSEEN:
+    # The floor share rests on the map's scale (seen means within a few metres);
+    # on a guessed scale it has read 100% unseen for floors filmed throughout.
+    if (capture.get("floor_never_seen") or 0) > FLOOR_UNSEEN and \
+            "guessed" not in str(capture.get("scale_from", "")):
         shots.append({"take": "a sweep across the unseen floor, camera tilted down, "
                               "keeping each wall's base in frame as it passes",
                       "evidence": f"floor never seen: {capture['floor_never_seen']:.0%}"})

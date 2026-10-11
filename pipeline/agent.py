@@ -83,6 +83,8 @@ MIN_REGISTERED_FRACTION = 0.60
 GAP_MIN_FRAMES = 3               # this many frames left out of the main model are worth placing with MapAnything
 MIN_PIECE_FRAMES = 3             # a second model is a piece of the capture with this many frames...
 MIN_PIECE_POINTS = 0.1           # ...and this share of the main model's points; smaller ones are leftovers
+# Capture-map fields measured on its scale: meaningless while that scale is a guess.
+SCALED_MAP_FIELDS = ("path_m", "footprint_m2", "size_m", "height_m", "floor_well_seen", "floor_never_seen")
 GAP_REPROJ_SLACK_PX = 0.3        # the joined solve may be this much looser than COLMAP's own
 PARTIAL_REGISTERED_FRACTION = 0.35
 # Keyframes of a sound model agree on metric scale within ~6%; past the good
@@ -498,7 +500,7 @@ how the run ended: {stopped}
 
 How to read them:
 - cameras: frames of total is how many frames the main model holds; models counts real pieces of the capture (leftover_models are fragments of a few frames that do not matter); path_jump is the largest camera move between consecutive frames as a share of the scene, and null means too few points to judge it, not that the camera did not move; rejected_global means the global solve was replaced by the incremental one, and the other numbers describe that replacement.
-- coverage: when scale_from says the scale was guessed, every size in metres (path, room size, height, footprint) is a guess that can be off several times over; reason from shares, counts and directions, never from those metres.
+- coverage: path_m is the length of the camera's walk and footprint_m2 the floor area of the room, not of the walk; floor shares count a floor cell as seen only from within 5 m. Sizes and floor shares are measured on the map's scale, so when that scale was only guessed they are left out (left_out says so): do not infer them from the rest, and read the capture from counts and directions alone.
 - sampling: from a video the pipeline chose how many frames to take, not the person; a set of photos is the person's own.
 
 Report findings on this capture:
@@ -2576,10 +2578,22 @@ class Agent:
 
     # ---------------------------------------------------------------- advice
     def capture_map_metrics(self) -> dict:
+        """capture-map.json as the advisor reads it. Until densify measures the
+        scale, the map's metres come from a guessed phone height, and on the
+        test clips that guess was off up to tenfold either way (a room 95 m
+        high, a 23 s walk through two rooms 1.1 m long); the floor shares rest
+        on it too, since a floor cell counts as seen only within 5 m of a
+        camera. Asked to ignore those numbers, the advisor still cited them, so
+        they are left out and only counts and directions are read."""
         try:
-            return json.loads((self.space / "capture-map.json").read_text())
+            record = json.loads((self.space / "capture-map.json").read_text())
         except (OSError, ValueError):
             return {}
+        if isinstance(record, dict) and "guessed" in str(record.get("scale_from", "")):
+            record = {k: v for k, v in record.items() if k not in SCALED_MAP_FIELDS}
+            record["left_out"] = ("sizes in metres and floor shares: the scale was guessed, "
+                                  "not measured, so they could be off several times over")
+        return record
 
     def measured_walls(self) -> dict:
         """The last in-place wall measurement this run recorded (room_score)."""
@@ -2612,7 +2626,10 @@ class Agent:
                 "together, so the incremental mapper was used.",
                 f"sparse-global-rejected holds a model; {recon.get('models')} model(s) kept",
                 "one closed loop ending where it started, so the pieces share overlap")
-        if recon.get("fraction", 1) < 0.9:
+        # No frame counted (the run died before COLMAP made a model, e.g. a tool
+        # crash) is no measurement of the capture: "0% of 0 frames" sent people
+        # to film again for a failure that was not theirs.
+        if recon.get("total") and recon.get("fraction", 1) < 0.9:
             self.advise(
                 f"Only {recon.get('fraction', 0):.0%} of this capture's frames were placed.",
                 f"{recon.get('frames')} of {recon.get('total')} frames in the main model",

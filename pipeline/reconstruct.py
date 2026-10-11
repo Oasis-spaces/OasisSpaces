@@ -495,6 +495,11 @@ def sparse_reconstruction(
                 problem = "the global mapper failed"
             elif not solved_models(sparse_dir):
                 problem = "the global mapper registered nothing"
+            elif not any(model_points(m) for m in solved_models(sparse_dir)):
+                # A slow slide across a large room: the global solve placed 10
+                # of 14 frames with no point, where the incremental mapper
+                # placed all 14 and triangulated 4,000.
+                problem = "the global mapper placed frames but triangulated no point"
             elif sequential:
                 # Check the model everything downstream uses: the one with the
                 # most points.
