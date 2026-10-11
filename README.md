@@ -184,7 +184,10 @@ the agent's judgement:
    fixtures; a thing seen only through a doorway, a mirror or a screen is
    recorded as "elsewhere" and knowingly left out of the search, so a bathtub
    glimpsed through a door is not tracked through the living room). Mirrors,
-   windows and screens are always searched for. Without
+   windows and screens are always searched for. An empty or unfurnished
+   space keeps the short list Claude named (a window, a door) rather than
+   falling back to the furniture list, and stage 3 then passes with no
+   furniture instead of warning that none was found. Without
    Claude, or through `process_video.sh`, a general default list is used;
    an `objects.json` already in the space is reused, so edit it and re-run
    densify to change what is found. The list used is recorded in

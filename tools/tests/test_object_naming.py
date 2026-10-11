@@ -42,6 +42,76 @@ def test_the_review_leaves_an_elsewhere_add_out_and_says_so():
     assert same.names == vocabulary.names and changes == []
 
 
+def test_an_empty_room_keeps_its_empty_list_not_the_default_furniture():
+    import json
+    import tempfile
+
+    from semantics import planned_vocabulary
+
+    assert Vocabulary.from_json({"source": "claude", "objects": []}).names == []
+    assert Vocabulary.from_json({"objects": []}).source == "default"     # nobody looked: the default list
+    assert Vocabulary.from_json(None).source == "default"
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "objects.json").write_text(json.dumps({"source": "claude", "objects": []}))
+        searched = planned_vocabulary(Path(tmp)).names
+        assert "bed" not in searched and "sofa" not in searched
+        assert "window" in searched and "mirror" in searched                # depth is wrong on these anyway
+
+
+class Answers:
+    available, reason, calls = True, None, 0
+
+    def __init__(self, reply):
+        self.reply = reply
+
+    def ask_json(self, *args, **kwargs):
+        return self.reply
+
+
+def naming_agent(tmp: Path, reply) -> Agent:
+    a = Agent.__new__(Agent)
+    a.space, a.chosen, a.judgements = tmp, {}, []
+    (tmp / "workspace" / "images").mkdir(parents=True)
+    (tmp / "workspace" / "images" / "frame_00001.jpg").write_bytes(b"")
+    a.advisor = Answers(reply)
+    return a
+
+
+def test_naming_an_unfurnished_room_writes_what_was_named():
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        a = naming_agent(Path(tmp), {"objects": [{"name": "window", "role": "unreliable", "build_as": None},
+                                                 {"name": "door", "role": "fixture", "build_as": None}],
+                                     "room": "an empty room"})
+        a.name_objects()
+        written = json.loads((Path(tmp) / "objects.json").read_text())
+        assert [o["name"] for o in written["objects"]] == ["window", "door"]
+    with tempfile.TemporaryDirectory() as tmp:
+        a = naming_agent(Path(tmp), {"objects": "a sofa and a bed"})          # junk: no list
+        a.name_objects()
+        assert not (Path(tmp) / "objects.json").exists()                     # the default list is used
+
+
+def test_an_unfurnished_room_passes_stage_3_but_unbuilt_furniture_still_warns():
+    import json
+    import tempfile
+
+    wall = {"kind": "wall", "build": True}
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        (space / "shapes.json").write_text(json.dumps({"planes": [wall, wall, {"kind": "floor"}], "boxes": []}))
+        a = Agent.__new__(Agent)
+        a.space, a.judgements, a.use_claude = space, [], False
+        (space / "densify.json").write_text(json.dumps({"objects": {"source": "claude", "objects": []}}))
+        status, why = a.gate("shapes")
+        assert status == "pass" and "no furniture was named" in why
+        (space / "densify.json").write_text(json.dumps({"objects": {"source": "claude", "objects": [
+            {"name": "sofa", "role": "furniture", "build_as": "seat"}]}}))
+        assert a.gate("shapes") == ("warn", "no furniture was recognised")
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

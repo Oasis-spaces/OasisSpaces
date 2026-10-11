@@ -17,8 +17,7 @@ def bare_agent(space: Path | None = None) -> Agent:
     a = Agent.__new__(Agent)
     a.advice = []
     a.stages = []
-    if space is not None:
-        a.space = space
+    a.space = space if space is not None else Path(tempfile.gettempdir()) / "no-such-space"
     return a
 
 
@@ -39,10 +38,84 @@ def test_every_finding_carries_its_evidence_and_the_input_to_take():
 
 def test_the_prompt_takes_exactly_the_evidence_the_run_measured():
     filled = CAPTURE_ADVICE_PROMPT.format(
-        recon="{}", dense="{}", shapes="{}", capture="{}", walls="{}",
-        sampling="{}", stopped="\"the run finished\"", limit=4)
+        capture="a set of photos", recon="{}", dense='"not run"', shapes='"not run"', coverage="{}",
+        walls='"not run"', sampling="{}", stopped="\"the run finished\"", limit=4)
     assert "diagnose THIS capture" in filled and "abstain" in filled
-    assert "{recon}" not in filled and "{limit}" not in filled
+    assert "{recon}" not in filled and "{limit}" not in filled and "{coverage}" not in filled
+    assert "a set of photos" in filled and "not that the camera did not move" in filled
+    assert "scale was guessed" in filled                     # metres off a guessed scale are not evidence
+
+
+def test_an_unfurnished_room_is_not_told_its_furniture_was_missed():
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        (space / "densify.json").write_text(json.dumps({"objects": {"source": "claude", "objects": [
+            {"name": "window", "role": "unreliable", "build_as": None}]}}))
+        a = bare_agent(space)
+        a.capture_advice({"fraction": 1.0}, {}, {"objects": [], "planes": 5}, {})
+        assert not any("furniture" in f["detection"] for f in a.advice)
+        # A furnished room whose furniture never became a box still hears it.
+        (space / "densify.json").write_text(json.dumps({"objects": {"source": "claude", "objects": [
+            {"name": "bed", "role": "furniture", "build_as": "bed"}]}}))
+        a = bare_agent(space)
+        a.capture_advice({"fraction": 1.0}, {}, {"objects": [], "planes": 5}, {})
+        assert any("No furniture" in f["detection"] for f in a.advice)
+
+
+def test_a_stage_never_reached_reads_not_run_not_empty():
+    """The advisor once read the empty depth and wall records of a run that
+    stopped at stage 1 as "nothing in this footage was solid enough to fit a
+    single wall"; a stage that never ran is marked so."""
+    asked = []
+
+    class Recorder:
+        available, reason, backend, calls = True, None, "test", 0
+
+        def ask_json(self, prompt, images=(), max_tokens=1024):
+            asked.append(prompt)
+            return {"findings": [], "abstain": True, "why": "thin"}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        a = bare_agent(Path(tmp))
+        a.name, a.source, a.do_splat, a.splat_steps = "probe", Path(tmp) / "clip.mp4", False, []
+        a.gates, a.judgements, a.use_claude = {"reconstruct": {"status": "stop", "why": "no points"}}, [], True
+        a.advisor = Recorder()
+        a.finish(0.0, ["reconstruct"], stopped_at="reconstruct")
+        assert 'depth: "not run"' in asked[0] and 'structure: "not run"' in asked[0]
+        assert "a phone video" in asked[0]                   # named by its extension, though not on disk
+
+
+def test_a_photo_set_is_never_offered_denser_sampling():
+    asked = []
+
+    class Recorder:
+        available, reason, backend, calls = True, None, "test", 0
+
+        def ask_json(self, prompt, images=(), max_tokens=1024):
+            asked.append(prompt)
+            return {"action": "accept", "why": "fine", "capture_problems": []}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        photos = Path(tmp) / "photos"
+        photos.mkdir()
+        a = bare_agent(Path(tmp) / "space")
+        a.source, a.judgements, a.advisor = photos, [], Recorder()
+        a.draw_capture_map = lambda out=None: None          # no solve on disk to map
+        a.capture_verdict({"models": 1, "frames": 5, "total": 20, "fraction": 0.25, "path_jump": None})
+        assert "retry_denser" not in asked[0] and "the person's own photos" in asked[0]
+        assert "cannot add views the capture never took" in asked[0]
+        a.source = Path(tmp) / "walk.mp4"
+        a.capture_verdict({"models": 1, "frames": 5, "total": 20, "fraction": 0.25, "path_jump": None})
+        assert "retry_denser" in asked[1]
+
+
+def test_the_capture_is_named_as_what_it_is():
+    from agent import capture_phrase
+    with tempfile.TemporaryDirectory() as tmp:
+        assert capture_phrase(tmp) == "a set of photos"
+        assert capture_phrase(Path(tmp) / "walk.MOV") == "a phone video"     # elsewhere, not on disk here
+        assert capture_phrase(Path(tmp) / "mystery") == "a phone video or a set of photos"
+        assert capture_phrase(None) == "a phone video or a set of photos"
 
 
 def test_the_last_measured_wall_table_and_the_sampling_are_read_back():

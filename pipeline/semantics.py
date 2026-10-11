@@ -137,7 +137,11 @@ class Vocabulary:
 
     @classmethod
     def from_json(cls, data) -> "Vocabulary":
-        if isinstance(data, dict) and data.get("objects"):
+        """A recorded list. An empty one counts when someone looked at the room
+        and named nothing (an empty, unfurnished room): falling back to the
+        default list there would send the detector looking for beds and sofas."""
+        if isinstance(data, dict) and isinstance(data.get("objects"), list) and (
+                data["objects"] or data.get("source") not in (None, "default")):
             return cls(data["objects"], data.get("source", "file"))
         return cls.default()
 

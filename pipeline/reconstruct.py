@@ -84,6 +84,12 @@ def registered_images(model: Path) -> int:
         return struct.unpack("<Q", f.read(8))[0]
 
 
+def model_points(model: Path) -> int:
+    """Number of 3D points a model triangulated (points3D.bin header)."""
+    with open(model / "points3D.bin", "rb") as f:
+        return struct.unpack("<Q", f.read(8))[0]
+
+
 def solved_models(sparse_dir: Path) -> list[Path]:
     """Model folders (COLMAP 4 also leaves a project.ini beside them)."""
     return sorted(d for d in sparse_dir.iterdir() if (d / "images.bin").exists())
@@ -547,6 +553,13 @@ def sparse_reconstruction(
               f"{registered_images(model)} of {total_frames} frames")
         if n > best_points:
             best_ply, best_model, best_points = model_ply, model, n
+    if best_points == 0:
+        sys.exit(
+            f"COLMAP placed {max(registered_images(m) for m in models)} of {total_frames} frames "
+            "but triangulated no 3D point. That happens when the camera barely moves compared "
+            "with how far away the room is (a slow slide or a pan from one spot): too little "
+            "parallax to measure depth from."
+        )
     if len(models) > 1:
         print(
             f"Note: reconstruction fragmented into {len(models)} pieces "
@@ -618,9 +631,10 @@ def main() -> None:
     parser.add_argument("--fps", type=float, default=2.0,
                         help="frames per second to extract from video (default 2)")
     parser.add_argument("--features", choices=list(FEATURE_TYPES), default="sift",
-                        help="feature type: COLMAP's SIFT, or learned ALIKED + "
-                             "LightGlue (slower on a CPU-only build, better on "
-                             "low-texture walls)")
+                        help="feature type: COLMAP's SIFT, or learned ALIKED "
+                             "(brute-force matched; about twice as slow to extract, "
+                             "and in this project's tests it never placed more "
+                             "frames than SIFT with the same mapper)")
     parser.add_argument("--mapper", choices=["global", "incremental", "priors"],
                         default="global",
                         help="COLMAP mapper (default global; incremental is "

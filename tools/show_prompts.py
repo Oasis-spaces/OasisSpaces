@@ -23,13 +23,16 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Prompts the code fills in with .format(), where {{ }} stand for the braces Claude sees.
 FORMATTED = {"FRAME_CHOICE_PROMPT", "CAPTURE_ADVICE_PROMPT", "OBJECT_NAMING_PROMPT", "LABEL_REVIEW_PROMPT", "RECHECK_NOTE", "START_VIEW_PROMPT",
-             "FILL_REVIEW_PROMPT", "REVIEW_PROMPT", "PROMPT"}
+             "FILL_REVIEW_PROMPT", "REVIEW_PROMPT", "PROMPT", "WALK_PROMPT"}
 
 # (stage, what it decides, file, what holds the prompt, the images that go with it)
 ASKS = [
     (1, "Was the capture solved well enough, or should the solve be retried another way?",
      "pipeline/agent.py", ("method", "capture_verdict"),
-     "3 frames from the start, middle and end"),
+     "3 frames from the start, middle and end, and the capture map"),
+    (1, "Are the frames MapAnything added to COLMAP's solve in the right place?",
+     "pipeline/agent.py", ("constant", "WALK_PROMPT"),
+     "the capture map of COLMAP's solve and of the joined one"),
     (2, "Which frames of the video should every later question be asked with?",
      "pipeline/agent.py", ("constant", "FRAME_CHOICE_PROMPT"),
      "one contact sheet of 36 numbered frames from across the video"),
@@ -42,6 +45,9 @@ ASKS = [
     (3, "Which measured walls and furniture boxes are real, and what is each one?",
      "pipeline/agent.py", ("method", "structure_review"),
      "the floor plan, each box in the 2 frames that saw it best, 3 frames of the room"),
+    (3, "Where does a piece the review dropped as fragments really stand?",
+     "pipeline/agent.py", ("method", "ask_where_piece_stands"),
+     "the floor plan, the boxes in their best frames, frames of the room"),
     (3, "Does the built room look plausible?",
      "pipeline/agent.py", ("method", "render_verdict"),
      "a render of the room, the same from above, 1 frame"),
@@ -78,8 +84,9 @@ def readable(node: ast.AST) -> str:
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return readable(node.left) + readable(node.right)
     if isinstance(node, ast.IfExp):          # a part added only in some runs
+        other = readable(node.orelse).strip()
         return ("[only when " + ast.unparse(node.test) + ": " + readable(node.body).strip() + "]"
-                + readable(node.orelse))
+                + (f"[otherwise: {other}]" if other else ""))
     if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "format":
         return readable(node.func.value)
     return "{" + ast.unparse(node) + "}"
@@ -88,7 +95,6 @@ def readable(node: ast.AST) -> str:
 def unescape(text: str, formatted: bool) -> str:
     """A .format() prompt writes {{ and }} for the braces Claude sees."""
     return text.replace("{{", "{").replace("}}", "}") if formatted else text
-    return "{" + ast.unparse(node) + "}"
 
 
 def source_of(path: Path, kind: str, name: str) -> str:

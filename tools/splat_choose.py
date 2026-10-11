@@ -300,17 +300,18 @@ def draw_sheets(order: list[dict], shots: list[dict], renders: dict, out_dir: Pa
     return sheets
 
 
-PROMPT = """You are the final quality judge for 3D room reconstructions (Gaussian splats) made from one phone video.
-Each image shows one moment of the video: the real video frame on the far left, then renders of {count} candidate
+PROMPT = """You are the final quality judge for 3D reconstructions of an indoor space (Gaussian splats) made from one phone
+capture. The candidate you rank first is the one people open and walk through, unless it measures clearly worse than
+another. Each image shows one moment of the capture: the real frame on the far left, then renders of {count} candidate
 reconstructions (labelled {letters}) from that camera position. A good candidate looks like the photo.
 
 There are two kinds of images, named above the photo:
 - "trained view": the candidates were built from this frame, so each can look good here by copying the photo.
-- "NEW VIEW (not trained on)": a real video frame none of the candidates was built from, rendered from a camera placed
-  between the frames around it. This is what a person walking through the room sees, so weigh new views more heavily.
+- "NEW VIEW (not trained on)": a real frame none of the candidates was built from, rendered from a camera placed
+  between the frames around it. This is what a person walking through the space sees, so weigh new views more heavily.
   The camera is interpolated, so a small shift in framing against the photo is expected; judge the reconstruction.
 
-Compare the candidates against the photo and against each other, and judge what a person walking through the room would notice:
+Compare the candidates against the photo and against each other, and judge what a person walking through the space would notice:
 - blotches, streaks or smears on surfaces that are plain in the photo (curtains, walls, bedding)
 - black holes or see-through gaps
 - haze, fog or floating specks in front of things that are sharp in the photo

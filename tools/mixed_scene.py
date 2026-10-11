@@ -566,20 +566,20 @@ def write_glb(path: Path, meshes: list) -> None:
 
 
 # ------------------------------------------------------------------ review
-REVIEW_PROMPT = """You are the last check on a 3D scene built from one phone video of a room, before people open it.
+REVIEW_PROMPT = """You are the last check on a 3D scene built from one phone capture of an indoor space (a video or a set of photos), before people open it.
 
-WHAT THE SCENE IS. The room's flat surfaces (floor, walls, ceiling) have become textured meshes; each piece of furniture is a separate object that a person can click, drag across the floor, turn, hide, or swap between its scan and a clean model. So every decision below changes what someone can do in the room, not just how it looks. The bar is a room that looks smooth and polished from any angle and behaves sensibly when things are moved, not a faithful copy of a messy video.
+WHAT THE SCENE IS. The room's flat surfaces (floor, walls, ceiling) have become textured meshes; each piece of furniture is a separate object that a person can click, drag across the floor, turn, hide, or swap between its scan and a clean model. So every decision below changes what someone can do in the room, not just how it looks. The bar is a room that looks smooth and polished from any angle and behaves sensibly when things are moved, not a faithful copy of a messy capture.
 
 WHAT YOU ARE GIVEN. Sheet 1 the surfaces, sheet 2 the pieces, sheet 3 the room with every piece named, {faces_sheet}then frames of the real room. Judge only from these; where they do not show you something, say so in the reason rather than guessing.
 
-SHEET 1, SURFACES. One row per surface: on the left what the video actually filmed of it (magenta = never filmed, or hidden behind furniture), on the right the finished texture, where an inpainting model continued the filmed part into the magenta. Surfaces: {surfaces}.
+SHEET 1, SURFACES. One row per surface: on the left what the capture actually filmed of it (magenta = never filmed, or hidden behind furniture), on the right the finished texture, where an inpainting model continued the filmed part into the magenta. Surfaces: {surfaces}.
 For each surface choose "use":
 - "keep": the finished texture is believable everywhere. Paint continues as paint, tiles as tiles; real things on the wall (a door, a window, a curtain, a switch, a board, a picture) may stay, and so may honest wear.
 - "filmed": the filmed part is right but the continued part is not. The filmed part stays and the rest becomes plain paint, blended over a few centimetres. Choose this when the continuation invented objects, smeared furniture across the wall, or broke into seams and blotches.
 - "plain": even the filmed part is wrong for a clean surface, so the whole surface becomes flat paint in the room's own colour. Choose this when furniture or clutter is printed flat onto the surface, when it is heavily blurred, or when almost nothing was filmed and the texture is a guess.
 A surface is the background behind everything else, so a wrong texture is worse than a plain one: when you are undecided between "keep" and "filmed", choose "filmed"; between "filmed" and "plain", prefer the one that leaves no invented object visible.
 
-SHEET 2, PIECES. One row per piece: the scan from where the video saw it best; the same scan from round the side and above, an angle nobody filmed; then the video frame. Pieces: {pieces}.
+SHEET 2, PIECES. One row per piece: the scan from where the capture saw it best; the same scan from round the side and above, an angle nobody filmed; then the real frame. Pieces: {pieces}. When that is none (an empty room), there is no sheet 2: answer {{}} for "pieces" and "relations".
 People move and turn these pieces and look at the room from above, so the second picture is what they will mostly see. A scan is a cloud of soft blobs that only looks right from where it was filmed. Every piece also has a clean simple model of its kind, built to its measured size in its own colours.
 For each piece choose "use":
 - "scan": the scan is recognisably that object and still clean from the unfilmed angle, with no haze, streaks or smears hanging off it.
@@ -597,7 +597,7 @@ The same kind of object can rest on different things in different rooms, so deci
 {faces_ask}
 Reply as JSON: {{"surfaces": {{"<name>": {{"use": "keep|filmed|plain", "why": "..."}}, ...}}, "pieces": {{"<id>": {{"use": "scan|model|drop", "why": "..."}}, ...}}, "relations": {{"<id>": {{"on": "<id>|floor|wall", "why": "..."}}, ...}}, "faces": {{"<name>": {{"use": "keep|plain", "why": "..."}}, ...}}, "summary": "one sentence on how the room will look and what moves with what"}}"""
 
-FACES_NOTE = ("sheet 4 the sides of those models that the video filmed flat-on, as photographs to put on the model "
+FACES_NOTE = ("sheet 4 the sides of those models that the capture filmed flat-on, as photographs to put on the model "
               "(left: what was filmed, magenta = never seen or hidden; right: finished, the magenta continued by an "
               "inpainting model; faces: {faces}),")
 FACES_ASK = """

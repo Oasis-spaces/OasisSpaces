@@ -41,8 +41,9 @@ RELAY_ENV = "OASIS_CLAUDE_RELAY"
 # call takes 20 s to 2 min) plus Claude's own answer.
 RELAY_WAIT_SECONDS = 1800
 # Relayed images travel as one bundle per question, each image no larger than
-# this on its long side (about what Claude reads an image at anyway).
-RELAY_IMAGE_LONG_SIDE = 1600
+# this on its long side: the most Claude reads of an image (the high-resolution
+# tier of Claude 4.7 and later; a 36-frame contact sheet needs every pixel).
+RELAY_IMAGE_LONG_SIDE = 2576
 
 
 def first_json(text: str) -> dict:

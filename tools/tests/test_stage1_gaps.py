@@ -16,6 +16,43 @@ def joined(**changes):
     return {"frames": 183, "total": 186, "models": 1, "reprojection": 0.78, "path_jump": 0.09, **changes}
 
 
+def test_leftover_components_are_not_pieces_and_an_unjudged_path_is_none():
+    """COLMAP 4.2+ returns tiny leftover components beside a whole solve
+    (pexels-27975847: 18/18 frames with 5,689 points, and 5 frames sharing 2
+    points); and a model too thin to size the scene cannot be judged for
+    jumps, which once read to the advisor as "no motion at all"."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        (space / "workspace" / "images").mkdir(parents=True)
+        for k in range(18):
+            (space / "workspace" / "images" / f"frame_{k:05d}.jpg").write_bytes(b"")
+        sparse = space / "workspace" / "sparse"
+        sizes = {"0": (5, 2), "1": (18, 5689)}
+        for name in sizes:
+            (sparse / name).mkdir(parents=True)
+            (sparse / name / "images.bin").write_bytes(b"")
+            (sparse / name / "points3D.bin").write_bytes(b"x" * sizes[name][1])
+        saved = (agent.registered_images, agent.model_points, agent.camera_path, agent.camera_path_jump)
+        try:
+            agent.registered_images = lambda m: sizes[m.name][0]
+            agent.model_points = lambda m: sizes[m.name][1]
+            agent.camera_path_jump = lambda m, skip=(): 0.02
+            agent.camera_path = lambda m: object()
+            a = agent.Agent.__new__(agent.Agent)
+            a.space = space
+            m = a.reconstruction_metrics()
+            assert m["models"] == 1 and m["leftover_models"] == 1
+            assert m["frames"] == 18 and m["points"] == 5689 and m["path_jump"] == 0.02
+            sizes["0"] = (6, 900)                                 # a real second piece still counts
+            assert a.reconstruction_metrics()["models"] == 2
+            agent.camera_path = lambda m: None                    # too few points to size the scene
+            assert a.reconstruction_metrics()["path_jump"] is None
+        finally:
+            agent.registered_images, agent.model_points, agent.camera_path, agent.camera_path_jump = saved
+
+
 def test_the_walkthrough_joined_is_kept():
     keep, why = agent.keep_filled(COLMAP, joined())
     assert keep and "183 of 186" in why

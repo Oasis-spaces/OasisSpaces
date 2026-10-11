@@ -60,7 +60,8 @@ import numpy as np  # noqa: E402
 import placement  # noqa: E402
 import room_score  # noqa: E402
 from reconstruct import (  # noqa: E402
-    MAX_PATH_JUMP, camera_path_jump, mean_reprojection, registered_images, solved_models,
+    MAX_PATH_JUMP, VIDEO_EXTENSIONS, camera_path, camera_path_jump, mean_reprojection, model_points,
+    registered_images, solved_models,
 )
 
 STAGES = ["reconstruct", "densify", "shapes", "splat"]
@@ -80,6 +81,8 @@ OPENSPLAT = os.environ.get("OPENSPLAT") or str(ROOT / "tools/opensplat")
 # partial mark, later stages would only rebuild a fragment of the room.
 MIN_REGISTERED_FRACTION = 0.60
 GAP_MIN_FRAMES = 3               # this many frames left out of the main model are worth placing with MapAnything
+MIN_PIECE_FRAMES = 3             # a second model is a piece of the capture with this many frames...
+MIN_PIECE_POINTS = 0.1           # ...and this share of the main model's points; smaller ones are leftovers
 GAP_REPROJ_SLACK_PX = 0.3        # the joined solve may be this much looser than COLMAP's own
 PARTIAL_REGISTERED_FRACTION = 0.35
 # Keyframes of a sound model agree on metric scale within ~6%; past the good
@@ -129,54 +132,60 @@ MAX_GPU_IMAGE_CACHE_GB = 1.5
 OBJECT_NAMING_FRAMES = 10
 ROOM_FRAMES = 6                  # how many frames of the room itself Claude picks
 FRAME_CHOICES = 36               # candidates it picks them from
-FRAME_CHOICE_PROMPT = """You are choosing which frames of a phone video of a room the rest of a 3D pipeline will look at.
+FRAME_CHOICE_PROMPT = """You are choosing which frames of {capture} of an indoor space the rest of a 3D pipeline will look at. The pipeline turns the capture into an editable 3D model of the space (walls and floor, furniture a person can move, and a photoreal splat), and every later question it asks about the space (what it holds, which walls are real, whether the built model matches) is asked with the frames you choose.
 
-The attached contact sheet holds {count} frames taken evenly across the video, each numbered in its corner. They are small here; the ones you choose are sent full size to every later question. Nothing later sees any frame you do not choose, so a thing shown in no chosen frame is invisible to the pipeline from now on.
+The attached contact sheet holds {count} frames spread evenly from the first to the last, each numbered in its corner. They are small here; the ones you choose are sent full size to every later question. Nothing later sees any frame you do not choose, so a thing shown in no chosen frame is invisible to the pipeline from now on.
+
+The capture may show one room, an open-plan space, or walk through several rooms. Cover every room the camera enters, in both sets; a corridor, or a room seen only through a doorway, needs no frame of its own.
 
 Choose for two purposes.
 
-"room": {room} frames that together show the room itself best: its walls, floor, corners and how it is laid out. Prefer frames looking into the room from far enough back that walls meet and the floor is visible, steady and sharp, well lit, with the camera roughly level. Avoid close-ups of one object, frames looking mostly at a wall, a floor or a ceiling, the corridor or another room, blurred frames, and frames where a hand, a door or a curtain covers most of the view. Spread them around the room rather than three of the same corner.
+"room": {room} frames that together show the space itself best: its walls, floor, corners and how it is laid out. Prefer frames looking into the space from far enough back that walls meet and the floor is visible, steady and sharp, well lit, with the camera roughly level. Avoid close-ups of one object, frames looking mostly at a wall, a floor or a ceiling, blurred frames, and frames where a hand, a door or a curtain covers most of the view. Spread them across the space and its rooms rather than three of the same corner.
 
-"objects": {objects} frames that together show as much of the room's contents as possible: every piece of furniture, every storage unit, every mirror, window and screen, and any large loose clutter. Judge them as a set, not one by one: a frame earns its place by showing something the others do not. Closer frames are welcome here, and so is a frame that shows one important object well if nothing else shows it.
+"objects": {objects} frames that together show as much of the contents as possible: every piece of furniture, every storage unit, every appliance and fitted unit (kitchen units, a bathtub, a desk), every mirror, window and screen, and any large loose clutter. Judge them as a set, not one by one: a frame earns its place by showing something the others do not. Closer frames are welcome here, and so is a frame that shows one important object well if nothing else shows it.
 
-A frame may serve both purposes. Where two frames show the same thing, keep the sharper, better lit one.
+A frame may serve both purposes. Where two frames show the same thing, keep the sharper, better lit one. When the capture is one close view (a corner, a bedside), choose the best there are: fewer frames than asked is fine when the rest only repeat them.
 
 Fields: {{"room": [numbers, best first], "objects": [numbers, best first], "why": one sentence on what the objects set covers}}"""
 
-OBJECT_NAMING_PROMPT = """You are preparing object detection for a 3D reconstruction of a room, filmed on a phone by an ordinary person. The {count} attached frames are spread across the whole video.
+OBJECT_NAMING_PROMPT = """You are preparing object detection for a 3D model of an indoor space, captured by an ordinary person on a phone ({capture}). The {count} attached frames are spread across the whole capture.
 
-Name every kind of thing in the room that the reconstruction needs to know about. An open-vocabulary detector (GroundingDINO) will search every keyframe for exactly your names, so anything you leave out is never found, and anything you name that is not there can mislabel something else. Each name's role tells the pipeline what to do with the points the detector labels.
+Name every kind of thing in the space that the model needs to know about. An open-vocabulary detector (GroundingDINO) will search every keyframe for exactly your names, so anything you leave out is never found, and anything you name that is not there can mislabel something else. Each name's role tells the pipeline what to do with the points the detector labels: furniture and storage become separate pieces a person can move in the finished model, glass and screens are removed because their depth is wrong, and the rest stay part of the room or are left out.
 
 Naming rules:
-- Short, plain English nouns a general detector knows, 1 to 3 words, no commas: "wardrobe" for an almirah, "sofa" for a couch, "shelf" for a wall rack. The plainest common word wins.
+- Short, plain English nouns a general detector knows, 1 to 3 words, no commas, whatever language any labels in the space are in: "wardrobe" for an almirah, "sofa" for a couch, "shelf" for a wall rack. The plainest common word wins.
 - One name per kind of thing, even if there are several (one "chair" for four chairs).
+- Whole objects, not their parts: a headboard is part of the bed and a drawer part of its chest, so neither gets a name of its own; a headboard panel fixed to the wall on its own is a fixture.
 - Never give one object names in two different roles: a cupboard front that looks like a door is "wardrobe", not also "door". Two storage names for the same piece are fine (a "wardrobe" with a "chest of drawers" base).
-- Only things you can actually see in these frames. Leave out walls, floor, ceiling, skirting, beams, tiles, light switches and anything smaller than a shoebox, unless it is glass or a screen.
-- This room only. A thing seen only through a doorway into another room, only in a mirror, or only on a screen gets role "elsewhere": the detector would otherwise find it in this room (a bathtub named from a glimpse through a door was once tracked through a living room).
+- Only things you can actually see in these frames. Leave out walls, floor, ceiling, skirting, beams, tiles, light switches and anything smaller than a shoebox (plates, cutlery, remotes, books, napkins), unless it is glass or a screen.
+- Every room the camera enters counts when the capture walks through several. Role "elsewhere" is only for a space the camera never enters: a thing seen only through a doorway, only in a mirror, or only on a screen. The detector would otherwise find it where it is not (a bathtub named from a glimpse through a door was once tracked through a living room).
 - Always include every mirror, window, glass door or glass panel, television and monitor you see: depth on them is wrong and those points must be removed.
+- People and pets are not part of the space: name any that appear ("person", "dog") with role "loose", so their points are left out.
+- An empty or nearly empty space is a valid answer: name only what is there (a window, a door, a radiator) and never add furniture to fill the list.
 - Most important first, at most {limit} names.
 
 Roles:
-- "furniture": a piece of furniture or an appliance standing on the floor. build_as: "bed"; "seat" for anything sat on (sofa, chair, stool, bench, pouffe); "table" for tables, desks, dressing tables, counters; "block" for anything else solid (fridge, washing machine, air cooler, trunk, bin, stacked boxes).
-- "storage": wardrobes, almirahs, cupboards, cabinets, shelves, bookcases, chests of drawers, sideboards, TV units standing on the floor. build_as "wardrobe" (it is built from the floor up). A tall closed unit that could be storage or an appliance (a grey steel almirah can look like a fridge) is storage: storage names are grouped even when the detector sees the unit in parts, so a wrong appliance name splits it.
-- "on_furniture": decor that sits on other furniture and belongs in a model of the room (table lamp, potted plant, vase, pillow). build_as "block".
-- "loose": belongings that do not belong in a model of the room, wherever they lie (clothes, bags, laptops, keyboards, towels, shoes, toys, bottles). build_as null.
+- "furniture": a piece of furniture or an appliance standing on the floor, fixed ones included (a kitchen island, a bathtub, a toilet). build_as: "bed"; "seat" for anything sat on (sofa, chair, office chair, stool, bench, pouffe); "table" for tables, desks, dressing tables, counters, kitchen islands; "block" for anything else solid (fridge, cooker, washing machine, air cooler, bathtub, toilet, trunk, bin, stacked boxes).
+- "storage": wardrobes, almirahs, cupboards, cabinets, shelves, bookcases, chests of drawers, sideboards, TV units, fitted kitchen base units and vanity units standing on the floor. build_as "wardrobe" (it is built from the floor up). A tall closed unit that could be storage or an appliance (a grey steel almirah can look like a fridge) is storage: storage names are grouped even when the detector sees the unit in parts, so a wrong appliance name splits it.
+- "on_furniture": decor that sits on other furniture and belongs in a model of the space (table lamp, potted plant, vase, pillow). build_as "block".
+- "loose": things that do not belong in a model of the space, wherever they are (clothes, bags, laptops, keyboards, towels, shoes, toys, bottles, people, pets). build_as null.
 - "floor_covering": rugs, mats, carpets lying on the floor. build_as "block".
 - "unreliable": mirrors, windows, glass doors and panels, televisions, monitors. build_as null.
 - "hanging": curtains, blinds, clothes or towels hanging in front of a wall. build_as null.
-- "fixture": part of the room itself: doors, door frames, pinboards, pictures, air conditioners, ceiling fans, radiators, and shelves or cabinets mounted on a wall that do not reach the floor. build_as null.
-- "elsewhere": not in this room — seen only through a doorway into another room, only reflected in a mirror, or only on a screen. It is knowingly left out of the search; naming it here records the glimpse without building it into this room. build_as null.
+- "fixture": part of the room itself: doors, door frames, stairs, pinboards, pictures, air conditioners, ceiling fans, radiators, sinks, and shelves or cabinets mounted on a wall that do not reach the floor. build_as null.
+- "elsewhere": not in this capture's space — seen only through a doorway into a room the camera never enters, only reflected in a mirror, or only on a screen. It is knowingly left out of the search; naming it here records the glimpse without building it into the model. build_as null.
 
-Fields: {{"objects": [{{"name": string, "role": string, "build_as": string or null}}], "room": one sentence describing the room}}"""
+Fields: {{"objects": [{{"name": string, "role": string, "build_as": string or null}}], "room": one sentence describing the space}}"""
 # Claude picks the view a splat opens at from this many rendered options.
 START_VIEW_CHOICES = 6
 START_VIEW_TILE = (384, 240)       # the viewer's 16:10 shape
-START_VIEW_PROMPT = """You choose the opening view of a 3D capture of a room (a Gaussian splat made from a phone video):
+START_VIEW_PROMPT = """You choose the opening view of a 3D capture of an indoor space (a Gaussian splat made from {capture}):
 the first thing a person sees when they open it, before they move. The first image shows {count} candidate views,
-labelled {letters}, rendered from the reconstruction. The other images are frames of the real room from the video.
+labelled {letters}, rendered from the reconstruction. The other images are frames of the real space from the capture.
 
-Pick the view that best shows this room to someone seeing it for the first time:
-- the room reads as a room: some floor, walls and the main furniture, rather than a close-up of one surface
+Pick the view that best shows this space to someone seeing it for the first time (in a capture of several rooms,
+the main room the capture spends longest in):
+- the space reads as a room: some floor, walls and the main furniture, rather than a close-up of one surface
 - what is in view is sharp and solid, like the real frames: no smears, streaks, fog, floating specks, holes or black areas
 - not staring at a blank wall, into a corner, into a curtain, or pressed against furniture
 Prefer the clean view over the wide one if the wide one shows reconstruction damage.
@@ -190,7 +199,7 @@ RECHECK_NOTE = """
 
 This is a second look. The room built from the first review was rendered and checked, and the check found these
 structural problems: {problems}. The last {count} image(s) are that render from an angle, the room from straight
-above, and, when there are three, a sheet of rows, each a video frame beside the room rendered from that frame's own
+above, and, when there are three, a sheet of rows, each a real frame beside the room rendered from that frame's own
 camera (grey shapes are walls, floor and furniture boxes). Use the same actions to fix them where the images show what
 is wrong: drop a box that is not a free-standing object of its own (part of the bed, a panel, a sliver of a cupboard)
 or that duplicates another, drop a wall that stands free or duplicates a wall, add a piece of furniture the frames
@@ -289,19 +298,24 @@ def place_added_box(shapes: dict, item: dict, units: float) -> dict | str:
 
 
 # After detection, Claude checks the boxes against the list (see review_labels).
-LABEL_REVIEW_PROMPT = """You check object detection for a 3D reconstruction of a room filmed on a phone.
+LABEL_REVIEW_PROMPT = """You check object detection for a 3D model of an indoor space captured on a phone ({capture}).
+The detector's labels decide what becomes a movable piece of furniture in the finished model, what is removed (glass and
+screens, whose depth is wrong) and what stays part of the room; after your revision the detector runs once more with
+the revised list, and that run is final.
 An open-vocabulary detector (GroundingDINO) searched {keyframes} for exactly the names in this list; each name has a
 role that tells the pipeline what to do with the points it labels:
 {listing}
 The first image shows {shown} of those frames with every detection box drawn and named (name and confidence). The other
-images are plain frames from the same video.
+images are plain frames from the same capture.
 
-Revise the list so the detector finds what is really in the room, and nothing else:
-- "add": objects clearly visible in the frames that no box covers and that matter to the room model: furniture, storage,
-  glass or screens, curtains, and loose belongings big enough to confuse the furniture boxes (a heap of clothes, a bag on
-  the floor). Skip anything smaller than a shoebox that is not glass or a screen. Same roles and build_as as the list.
-  Never add a thing seen only through a doorway into another room, only in a mirror, or only on a screen: give it role
-  "elsewhere" and it is knowingly left out of the search instead of being found in this room.
+Revise the list so the detector finds what is really in the space, and nothing else:
+- "add": objects clearly visible in the frames that no box covers and that matter to the model: furniture, storage,
+  appliances and fitted units, glass or screens, curtains, and loose belongings big enough to confuse the furniture
+  boxes (a heap of clothes, a bag on the floor), and any person or pet (role "loose", so their points are left out).
+  Skip anything smaller than a shoebox that is not glass or a screen. Same roles and build_as as the list.
+  Every room the camera enters counts. Never add a thing seen only through a doorway into a room the camera never
+  enters, only in a mirror, or only on a screen: give it role "elsewhere" and it is knowingly left out of the search
+  instead of being found where it is not.
 - "rename": a name whose object is visible but was never or rarely boxed, where a plainer, more common English word would
   help the detector ("almirah" -> "wardrobe", "monitor" -> "computer screen").
 - "remove": a name whose boxes land on something else (a "chest of drawers" box on the side of a bed, a "wardrobe" box
@@ -312,21 +326,22 @@ Fields: {{"objects_seen": array of short phrases, "missed": array of objects no 
 "name: what its boxes are really on", "add": [{{"name": string, "role": string, "build_as": string or null}}],
 "rename": [{{"from": string, "to": string}}], "remove": [{{"name": string, "why": string}}], "why": one sentence}}"""
 
-FILL_REVIEW_PROMPT = """You review an automatic fill in a 3D room reconstruction (a Gaussian splat) made from a phone video.
-The reconstruction has gaps where the camera never saw a surface clearly: black holes, see-through patches or smears on
-floors, walls and furniture. A fill adds new surface there, continuing the texture around it.
+FILL_REVIEW_PROMPT = """You review an automatic fill in a 3D model of an indoor space (a Gaussian splat) made from {capture}.
+The model has gaps where the camera never saw a surface clearly: black holes, see-through patches or smears on
+floors, walls and furniture. A fill adds new surface there, continuing the texture around it. A fill you keep ships in
+the splat people open; one you reject leaves the gap as it was, which is the safe default.
 
-Each image is one filled surface ({surfaces}): on the left a real video frame, then the reconstruction rendered from
+Each image is one filled surface ({surfaces}): on the left a real frame of the capture, then the model rendered from
 exactly that camera before the fill and after it. Decide for each surface whether to keep its fill.
 
-Some filled areas were never seen clearly by any video frame (seen_by_video false): for those the left image is only the
-nearest video frame, from a different angle, to show what the room's floor and walls look like, and the before/after
+Some filled areas were never seen clearly by any frame (seen_by_video false): for those the left image is only the
+nearest frame, from a different angle, to show what the room's floor and walls look like, and the before/after
 renders come from a nearby viewpoint. Judge those by whether the holes are now covered by believable surface that matches
 the room, without new artefacts.
 
 Keep it only if the after image is better: holes or see-through patches are now covered by surface that looks like its
-surroundings in the video frame, and nothing that looked right before looks worse.
-Reject it if anything got worse, even if some gaps were covered: blotches, streaks or stains that are not in the video frame;
+surroundings in the real frame, and nothing that looked right before looks worse.
+Reject it if anything got worse, even if some gaps were covered: blotches, streaks or stains that are not in the real frame;
 a patch whose colour, brightness or texture visibly differs from its surroundings; hard edges or a pasted-on look; a door,
 window, doorway, shelf opening, curtain or any object painted over, darkened or partly erased; or if you see no real
 difference (then the fill only adds risk).
@@ -390,6 +405,41 @@ def default_retry(first: dict, video: bool) -> tuple[str, str]:
                             "features grip low-texture walls better")
 
 
+def is_video(source) -> bool | None:
+    """A video file, a folder of photos, or unknown (None). Judged by the name
+    too, so a later stage run on another machine, where the video is not on
+    disk, still knows what was captured."""
+    if source is None:
+        return None
+    path = Path(source)
+    if path.is_dir():
+        return False
+    if path.suffix.lower() in VIDEO_EXTENSIONS or path.is_file():
+        return True
+    return None
+
+
+def capture_phrase(source) -> str:
+    """How every question names what the person captured: reconstruct.py takes
+    a video or a folder of photos, and a photo set has no walk to sample."""
+    return {True: "a phone video", False: "a set of photos"}.get(
+        is_video(source), "a phone video or a set of photos")
+
+
+def spread(items: list, count: int) -> list:
+    """At most `count` items evenly spread from the first to the last, so the
+    end of a long capture is never cut off (48 frames once lost its last 12,
+    the whole bedroom of a walkthrough, to a step that rounded down to 1)."""
+    if count <= 0 or not items:
+        return []
+    if len(items) <= count:
+        return list(items)
+    if count == 1:
+        return [items[len(items) // 2]]
+    step = (len(items) - 1) / (count - 1)
+    return [items[round(i * step)] for i in range(count)]
+
+
 def findings_of(verdict: dict | None) -> list[dict]:
     """The advisor's findings, whatever shape came back: a list as asked, a
     single finding sent bare, or junk (which is no finding). The report must
@@ -435,31 +485,36 @@ def root_cause(output: str) -> str:
     return last
 
 
-CAPTURE_ADVICE_PROMPT = """A room was filmed once on a phone and processed by our 3D pipeline. You are reading the measurements of that one capture — diagnose THIS capture, not filming in general.
+CAPTURE_ADVICE_PROMPT = """An indoor space was captured once on a phone ({capture}) and processed by our 3D pipeline, which turns it into an editable 3D model: cameras, depth, the walls, floor and furniture as shapes, and a splat. You are reading the measurements of that one capture — diagnose THIS capture, not capturing in general. Your findings are shown to the person as what to capture next, so a wrong cause sends them to capture again for nothing.
 
-Measured, from the capture provided:
+Measured, from the capture provided ("not run" marks a stage this run never reached, which says nothing about the capture):
 cameras: {recon}
 depth: {dense}
 structure: {shapes}
-coverage (the capture map; directions are the camera's bearings in degrees): {capture}
+coverage (the capture map; directions are the camera's bearings in degrees): {coverage}
 walls measured in place (body, seam, interior, occluded, support per wall): {walls}
-sampling (the pipeline chose the frame count, not the person): {sampling}
+sampling: {sampling}
 how the run ended: {stopped}
+
+How to read them:
+- cameras: frames of total is how many frames the main model holds; models counts real pieces of the capture (leftover_models are fragments of a few frames that do not matter); path_jump is the largest camera move between consecutive frames as a share of the scene, and null means too few points to judge it, not that the camera did not move; rejected_global means the global solve was replaced by the incremental one, and the other numbers describe that replacement.
+- coverage: when scale_from says the scale was guessed, every size in metres (path, room size, height, footprint) is a guess that can be off several times over; reason from shares, counts and directions, never from those metres.
+- sampling: from a video the pipeline chose how many frames to take, not the person; a set of photos is the person's own.
 
 Report findings on this capture:
 - "detection": one sentence naming a problem in this capture, read from the numbers above.
 - "evidence": the field(s) and value(s) it rests on, quoted from above.
-- "take": the concrete input to capture next in this room — which wall, corner or area, from roughly where, moving how — or null when no new footage would fix it.
+- "take": the concrete input to capture next in this space — which wall, corner or area, from roughly where, moving how (or which photos to add) — or null when no new footage would fix it.
 
-Rules: every finding cites its evidence; never blame the person for frame counts or sampling; no general filming tips; at most {limit} findings, the most damaging first. If the run ended on a tool or network failure rather than the capture, or the measurements are too thin to diagnose, abstain.
+Rules: every finding cites its evidence; a cause these numbers do not show is not a finding (lens switches, lighting, walking speed and hand shake are not measured here); a stage that was not run is not a problem of the capture; never blame the person for frame counts or sampling; no general capturing tips; at most {limit} findings, the most damaging first. If the run ended on a tool or network failure rather than the capture, or the measurements are too thin to diagnose, abstain.
 Fields: {{"findings": [{{"detection": string, "evidence": string, "take": string or null}}], "abstain": boolean, "why": one sentence}}"""
 
 
-WALK_PROMPT = """Two maps of the same phone video of a room, each drawn from a camera solve. Both show the room from above: the measured points in their colours, the floor shaded by how often it was seen, and the walk from start (green) to end (red) with a tick where the camera looked.
+WALK_PROMPT = """Two maps of the same capture of an indoor space ({capture}), each drawn from a camera solve. Every later step of the 3D model (depth, walls, furniture, splat) is built on the cameras you keep, so a misplaced frame here bends everything after it. Both maps show the space from above: the measured points in their colours, the floor shaded by how often it was seen, and the camera path from start (green) to end (red) with a tick where the camera looked.
 
-Map 1 is COLMAP's own solve: it could place {before} of the video's {total} frames in one piece. Map 2 adds the frames it lost, placed by MapAnything from COLMAP's cameras and then triangulated and adjusted together with them: {after} frames. Numbers: {facts}.
+Map 1 is COLMAP's own solve: it could place {before} of the capture's {total} frames in one piece. Map 2 adds the frames it lost, placed by MapAnything from COLMAP's cameras and then triangulated and adjusted together with them: {after} frames. Numbers: {facts}.
 
-The measurements say map 2 is at least as tight as map 1. What they cannot see is whether the frames it added are in the right place. Judge the walk: a person walked through this room once with a phone, so the path should be one continuous, unhurried line with no teleports, no loops through furniture or walls, no stretch that doubles back on itself for no reason, and the added part should continue the walk where map 1's ends or has a gap. The room itself should keep its shape.
+The measurements say map 2 is at least as tight as map 1. What they cannot see is whether the frames it added are in the right place. Judge the path: a person moved through this space once with a phone, so the path should be one continuous, unhurried line with no teleports, no loops through furniture or walls, no stretch that doubles back on itself for no reason, and the added part should continue the path where map 1's ends or has a gap. A capture filmed from one spot (a pan) has a small cluster for a path, and the added frames belong in or right next to it. The space itself should keep its shape.
 
 Reply as JSON: {{"keep": true if map 2 is a plausible walk and room, false if the added frames are clearly misplaced, "why": "one or two sentences on what you saw"}}"""
 
@@ -497,17 +552,13 @@ class Agent:
         self.use_claude = use_claude
         self.advisor = Advisor(enabled=use_claude)
 
+    @property
+    def capture(self) -> str:
+        return capture_phrase(getattr(self, "source", None))
+
     def sample_frames(self, count: int = 3) -> list[Path]:
         """Frames spread across the capture, for Claude to look at."""
-        images = sorted((self.space / "workspace" / "images").glob("*.jpg"))
-        if not images or count <= 0:
-            return []
-        if count == 1:
-            return [images[len(images) // 2]]
-        if len(images) <= count:
-            return images
-        step = (len(images) - 1) / (count - 1)
-        return [images[round(i * step)] for i in range(count)]
+        return spread(sorted((self.space / "workspace" / "images").glob("*.jpg")), count)
 
     def room_frames(self, count: int = 3) -> list[Path]:
         """Frames of the room: Claude's own picks (choose_frames), else the
@@ -591,11 +642,11 @@ class Agent:
             return None
         if not self.advisor.available:
             return None
-        step = max(1, round(len(images) / FRAME_CHOICES))
-        candidates = images[::step][:FRAME_CHOICES]
+        candidates = spread(images, FRAME_CHOICES)
         sheet = self.contact_sheet(candidates, self.space / "frame-choices.png")
         verdict = self.advisor.ask_json(
-            FRAME_CHOICE_PROMPT.format(count=len(candidates), room=ROOM_FRAMES, objects=OBJECT_NAMING_FRAMES),
+            FRAME_CHOICE_PROMPT.format(capture=self.capture, count=len(candidates), room=ROOM_FRAMES,
+                                       objects=OBJECT_NAMING_FRAMES),
             [sheet], max_tokens=800)
         if not verdict:
             print("    claude (frames): no usable answer; frames are picked by the old rules")
@@ -689,31 +740,49 @@ class Agent:
         """Claude looks at the capture and picks how to retry the solve."""
         if not self.advisor.available:
             return None
+        video = is_video(self.source) is not False
         prompt = (
-            "You are running a photogrammetry pipeline on a phone video of a room. "
-            "COLMAP solved the camera positions using SIFT features and a global "
-            f"mapper, and reported: {json.dumps(metrics)}. A 'model' is one connected "
-            "reconstruction, so more than one means the capture broke into pieces. "
-            "The pipeline sampled the frame count from the video; the person did "
-            "not choose it.\n"
-            "The attached frames come from the start, middle and end of the capture.\n"
+            f"You are the first check of a pipeline that turns {self.capture} of an indoor space "
+            "into an editable 3D model. COLMAP has just placed the cameras, using SIFT "
+            "features and a global mapper; every later step (depth, walls, furniture, "
+            "the splat) is built on these cameras, so carrying on with a broken solve "
+            "wastes the whole run, while a retry costs a few minutes.\n"
+            f"COLMAP reported: {json.dumps(metrics)}. How to read it: frames of total "
+            "is how many frames the main model holds, the number that matters; models "
+            "counts real pieces of the capture (leftover_models are fragments of a few "
+            "frames that do not matter); path_jump is the largest camera move between "
+            "consecutive frames as a share of the scene (a coherent capture stays under "
+            "0.1; null means too few points to judge); rejected_global means the global "
+            "solve joined pieces wrongly and was already replaced by the incremental "
+            "one, which these numbers describe. "
+            + ("The pipeline sampled the frames from the video; the person did not "
+               "choose how many.\n" if video else "The frames are the person's own photos.\n")
+            + "The attached frames come from the start, middle and end of the capture.\n"
+            "A retry solves the same footage another way: it can place frames the first "
+            "solve lost, or untangle a solve that jumps, but it cannot add views the "
+            "capture never took. A floor never filmed or a wall never faced is reported "
+            "to the person later; it is not a reason to retry. Judge the solve, not the "
+            "coverage.\n"
             "Choose exactly one action:\n"
-            '  "accept": good enough to carry on;\n'
-            '  "retry_denser": redo with three times as many frames sampled from the '
-            "same video, so consecutive views overlap — the first thing to try when "
-            "few frames were kept and they share too little;\n"
-            '  "retry_aliked": redo with learned features (ALIKED), which find far '
-            "more on textureless surfaces but take about 2.5 times as long to "
+            '  "accept": the main model holds the frames well enough to carry on;\n'
+            + ('  "retry_denser": redo with three times as many frames sampled from the '
+               "same video, so consecutive views overlap — for a solve that lost frames "
+               "because neighbouring views share too little;\n" if video else "")
+            + '  "retry_aliked": redo with learned features (ALIKED), which find more '
+            "on plain walls and repeated patterns but take about 2.5 times as long to "
             "extract;\n"
             '  "retry_incremental": redo with the incremental mapper, slower, but it '
-            "never joins pieces that do not belong together.\n"
+            "never joins pieces that do not belong together — for a solve whose path "
+            "jumps or splits.\n"
             'Fields: {"action": string, "why": one short sentence, '
             '"capture_problems": array of short phrases}')
         drawn = self.safe(self.draw_capture_map)
         images = self.sample_frames(3) + ([self.space / "capture-map.png"] if drawn else [])
         if drawn:
-            prompt += ("\nThe last image is a map of the solve from above: the walk, the floor shaded by how "
-                       "often it was seen (red never), and a compass of the directions the camera faced.")
+            prompt += ("\nThe last image is a map of the solve from above: the camera path, the floor shaded by "
+                       "how often it was seen (red never), and a compass of the directions the camera faced. "
+                       "Read it for whether the path is one coherent line; its coverage is the capture's, "
+                       "which no retry changes.")
         verdict = self.advisor.ask_json(prompt, images)
         if verdict:
             problems = ", ".join(verdict.get("capture_problems") or [])
@@ -818,7 +887,7 @@ class Agent:
         maps = [self.space / "capture-map-colmap.png", self.space / "capture-map.png"]
         if not self.advisor.available or not all(m.exists() for m in maps):
             return None
-        verdict = self.advisor.ask_json(WALK_PROMPT.format(before=before["frames"], total=before["total"],
+        verdict = self.advisor.ask_json(WALK_PROMPT.format(capture=self.capture, before=before["frames"], total=before["total"],
                                                            after=after["frames"], facts=facts), maps)
         if verdict:
             self.judged("reconstruct", {"walk_keep": verdict.get("keep"), "why": verdict.get("why")},
@@ -841,18 +910,22 @@ class Agent:
             return
         frames = self.picked_frames("objects", OBJECT_NAMING_FRAMES) or self.sample_frames(OBJECT_NAMING_FRAMES)
         verdict = self.advisor.ask_json(
-            OBJECT_NAMING_PROMPT.format(count=len(frames), limit=MAX_OBJECTS - 4),
+            OBJECT_NAMING_PROMPT.format(capture=self.capture, count=len(frames), limit=MAX_OBJECTS - 4),
             frames, max_tokens=2000)
-        listed = (verdict or {}).get("objects") or []
+        listed = (verdict or {}).get("objects")
+        if not isinstance(listed, list):
+            print("    object list: no usable answer, the detector uses the default list"
+                  + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
+            return
+        listed = [o for o in listed if isinstance(o, dict)]
         # A glimpse through a doorway, a mirror or a screen is recorded, never
         # searched: the detector once found a "bathtub" in a living room.
         elsewhere = sorted({clean_name(o.get("name", "")) for o in listed
                             if o.get("role") == "elsewhere"} - {""})
         vocabulary = Vocabulary([o for o in listed if o.get("role") != "elsewhere"], "claude")
         if not vocabulary.furniture:
-            print("    object list: no usable answer, the detector uses the default list"
-                  + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
-            return
+            print("    object list: no furniture named, so the detector searches only for what was "
+                  "named and the surfaces whose depth is wrong")
         path.write_text(json.dumps({**vocabulary.to_json(), "room": verdict.get("room"),
                                     "elsewhere": elsewhere,
                                     "frames": [f.name for f in frames]}, indent=1) + "\n")
@@ -894,6 +967,7 @@ class Agent:
                     "tracked through the rest, so a box is a tracked outline's rectangle)"
                     if dense.get("tracks") else f"{len(dense.get('detections') or {})} keyframes")
         verdict = self.advisor.ask_json(LABEL_REVIEW_PROMPT.format(
+            capture=self.capture,
             keyframes=searched, shown=len(frames),
             listing=json.dumps(listing), limit=MAX_OBJECTS - 4),
             [sheet] + (self.picked_frames("objects", 4) or self.sample_frames(4)), max_tokens=2000)
@@ -982,14 +1056,20 @@ class Agent:
         sheet = self.space / "object-frames.png"
         picked = self.safe(draw_object_frames, self.space, sheet, default={}) or {}
         prompt = (
-            "You are reviewing the room structure our 3D pipeline measured from a phone "
-            "video. The first image is a floor plan seen from above: darker areas are "
+            f"You are reviewing the structure our 3D pipeline measured from {self.capture} of "
+            "an indoor space, before it is built into an editable model: each wall you keep "
+            "becomes a wall surface, and each built box a piece of furniture a person can "
+            "move. Each group of your edits is then measured against the reconstructed "
+            "points and undone if it makes the model fit them worse, so act where the images "
+            "show what the points cannot: what an object is, and whether a flat surface is a "
+            "wall, a wardrobe front or a door. "
+            "The first image is a floor plan seen from above: darker areas are "
             "dense reconstructed points, the blue outline is the floor, red numbered "
             "lines (W) are wall candidates, green numbered rectangles (B) are furniture "
             "boxes that will be built, grey ones were rejected by our checks, and the "
             "small blue dots joined by a line are where the phone was as it filmed, so "
             "nothing solid stands there. "
-            + ("The second image shows, for each box, the two video frames where it is "
+            + ("The second image shows, for each box, the two frames where it is "
                "seen best, cropped around it, with the box's outline drawn in green, its "
                "B number and size: judge each box from its own crops, since an object at "
                "the side of the room may not appear in any other frame. A door sits flush "
@@ -997,16 +1077,21 @@ class Agent:
                "in front of a wall with depth, and often handles, drawers, shelves or a "
                "decorated top. Filmed side-on, a cupboard's front can look like a door, "
                "so check both crops. " if picked else "")
-            + "The remaining images are frames looking into the room.\n"
+            + "The remaining images are frames looking into the space.\n"
             f"Candidates (sizes in {'metres' if units else 'scene units'}): "
             f"{json.dumps(candidates)}\n"
+            "The space need not be a closed box: an open-plan area, an L-shaped room or a "
+            "capture through several rooms has openings, and walls the camera never faced "
+            "are simply absent. A missing wall is not a reason to drop or add anything.\n"
             "Decide what each candidate is. You cannot move or resize anything; the "
             "measurements stay. You may drop a wall that duplicates another wall or is "
             "not a wall (for example a wardrobe front), drop a box that is not a real "
             "object, or relabel a built box as one of: bed, seat, table, wardrobe, block. "
             "Boxes are built as free-standing furniture, so drop any box that is part of "
             "the room or of another object: a door, a door frame or jamb, a curtain, a "
-            "wall patch, or a fragment of a bigger piece of furniture. Relabel only boxes "
+            "wall patch, or a fragment of a bigger piece of furniture. Fitted units that "
+            "stand on the floor (kitchen base units, a vanity, a kitchen island) count as "
+            "furniture here, not as part of the room. Relabel only boxes "
             "that are a whole piece of furniture of their own; 'block' is for real "
             "furniture that fits no other type, not for leftovers. "
             "Rejected boxes stay rejected. "
@@ -1517,12 +1602,15 @@ class Agent:
         sheet = self.safe(self.view_sheet, default=None)
         prompt = (
             f"{'Four' if sheet else 'Three'} images. The first is a perspective render of a parametric room "
-            "our pipeline built from a phone video: grey shapes are walls, floor "
-            "and furniture boxes. The second is the same room seen from straight "
-            "above, like a floor plan. The third is a frame from the video.\n"
-            + ("The fourth is a sheet of rows: on the left a video frame, on the right "
+            f"our pipeline built from {self.capture} of an indoor space: grey shapes are walls, floor "
+            "and furniture boxes, the editable model a person will open and rearrange. A "
+            "structural problem you report sends the room back for a second structure "
+            "review, and whichever of the two rooms fits the measured points better is kept. "
+            "The second is the same room seen from straight "
+            "above, like a floor plan. The third is a frame from the capture.\n"
+            + ("The fourth is a sheet of rows: on the left a real frame of the capture, on the right "
                "the room rendered from that frame's own camera position and lens, so "
-               "whatever the video shows should appear in the render in the same place "
+               "whatever the frame shows should appear in the render in the same place "
                "and at the same size, apart from what the render lacks by design "
                "(real colours, doors, windows, curtains, small objects). In these "
                "renders the floor is sand-coloured, walls pale grey and furniture "
@@ -1539,8 +1627,9 @@ class Agent:
             "a bed is a wide low base with a slightly smaller mattress on top and a "
             "pillow, and a wardrobe is a tall box with doors.\n"
             "Judge only what was reconstructed. Walls the camera never faced cannot "
-            "appear, so a capture filmed from one spot gives a partial room; that "
-            "alone does not make it implausible. Ask whether what is there sits "
+            "appear, so a capture filmed from one spot gives a partial room, and an "
+            "open-plan space has openings rather than walls; neither alone makes it "
+            "implausible. Ask whether what is there sits "
             "plausibly: walls upright and meeting sensibly, furniture on the floor "
             "at a believable size and place, nothing floating or cutting through "
             "walls. List what is missing separately from what is wrong.\n"
@@ -1548,14 +1637,15 @@ class Agent:
             "standing free or ending in open floor, walls not meeting, the floor or "
             "ceiling running past the walls, the room far too big or small for the "
             "video, furniture floating, sunk into the floor or cutting through a wall"
-            + (", or a piece the rows show standing where the video shows none, or far "
-               "from where the video shows it" if sheet else "") + ". "
+            + (", or a piece the rows show standing where the frame shows none, or far "
+               "from where the frame shows it" if sheet else "") + ". "
             "minor: everything else, such as furniture proportions or placement "
             "details. A room with any structural problem is not plausible.\n"
             'Fields: {"plausible": boolean, "problems": array of {"what": short '
             'phrase, "severity": "structural" or "minor"} (things that are wrong), '
             '"missing": array of short phrases (not captured), "advice": array of '
-            'short instructions for the next capture}')
+            'the footage that would fix a structural problem above, each naming the wall or area '
+            'and where to film it from (empty when none would; never general filming tips)}')
         images = [render] + ([plan] if plan.exists() else []) + self.room_frames(1) + ([sheet] if sheet else [])
         verdict = self.advisor.ask_json(prompt, images)
         if not verdict:
@@ -1749,12 +1839,21 @@ class Agent:
         total = sum(1 for p in images.iterdir()
                     if p.suffix.lower() in IMAGE_EXTENSIONS) if images.exists() else 0
         frames = registered_images(best)
+        points = model_points(best)
+        # COLMAP 4.2+ returns every connected component, down to a few frames
+        # sharing a couple of points (5 frames and 2 points beside an 18-frame
+        # model on a clean solve): those are leftovers, not pieces of the capture.
+        pieces = [m for m in models if m == best or (
+            registered_images(m) >= MIN_PIECE_FRAMES and model_points(m) >= MIN_PIECE_POINTS * max(points, 1))]
         return {
-            "models": len(models),
+            "models": len(pieces),
+            **({"leftover_models": len(models) - len(pieces)} if len(models) > len(pieces) else {}),
             "frames": frames,
             "total": total,
             "fraction": round(frames / total, 3) if total else 0.0,
-            "path_jump": round(camera_path_jump(best), 3),
+            "points": points,
+            # None when too few points to size the scene: unjudged, not "no motion".
+            "path_jump": (round(camera_path_jump(best), 3) if camera_path(best) is not None else None),
             # Misplaced frames reconstruct.py removed (see detour_frames).
             "dropped_frames": (json.loads(dropped.read_text()).get(best.name, [])
                                if (dropped := self.space / "workspace"
@@ -2265,7 +2364,8 @@ class Agent:
             draw.text((x + 4, y + 4), letter, fill="black", font=font)
         sheet_path = self.space / f"{ply.stem}-start-views.png"
         sheet.save(sheet_path)
-        verdict = self.advisor.ask_json(START_VIEW_PROMPT.format(count=len(views), letters=", ".join(letters)),
+        verdict = self.advisor.ask_json(START_VIEW_PROMPT.format(capture=self.capture, count=len(views),
+                                                                   letters=", ".join(letters)),
                                         [sheet_path] + self.room_frames(2), max_tokens=1000)
         pick = verdict.get("best") if verdict else None
         chosen = views[letters.index(pick)] if pick in letters else views[0]
@@ -2345,6 +2445,7 @@ class Agent:
         verdicts = {}
         if rows and self.advisor.available:
             answer = self.advisor.ask_json(FILL_REVIEW_PROMPT.format(
+                capture=self.capture,
                 surfaces=json.dumps([{"id": r["id"], "surface": r["surface"],
                                       "seen_by_video": not r["unseen"]} for r in rows])),
                 sheets, max_tokens=2000)
@@ -2459,7 +2560,7 @@ class Agent:
         sheet = Image.new("RGB", (3 * (TILE_W + 8), TILE_H + 26), "white")
         draw = ImageDraw.Draw(sheet)
         font = ImageFont.load_default(size=15)
-        first = "nearest video frame (other angle)" if unseen else "video"
+        first = "nearest frame (other angle)" if unseen else "real frame"
         for k, (image, label) in enumerate(((frame, first), (Image.fromarray(img_b), "before"),
                                             (Image.fromarray(img_a), "after"))):
             sheet.paste(image, (k * (TILE_W + 8), 26))
@@ -2515,7 +2616,9 @@ class Agent:
             self.advise(
                 f"Only {recon.get('fraction', 0):.0%} of this capture's frames were placed.",
                 f"{recon.get('frames')} of {recon.get('total')} frames in the main model",
-                "a slower pass over the unplaced stretch, side-stepping rather than panning")
+                ("more photos over the unplaced stretch, each a step to the side of the last"
+                 if is_video(getattr(self, "source", None)) is False else
+                 "a slower pass over the unplaced stretch, side-stepping rather than panning"))
         if (dense.get("scale_spread") or 0) > 0.15:
             self.advise(
                 f"Keyframes disagree about this capture's scale by {dense['scale_spread']:.0%}: "
@@ -2528,7 +2631,7 @@ class Agent:
                 f"{dense['points_dropped_unreliable']:,} points dropped on mirrors, "
                 "windows and screens",
                 "the same room with curtains closed, screens off, mirrors filmed obliquely")
-        if shapes and not shapes.get("objects"):
+        if shapes and not shapes.get("objects") and room_vocabulary(self.space).furniture:
             self.advise(
                 "No furniture was recognised in this capture.",
                 "shapes.json has no detected boxes",
@@ -2604,8 +2707,10 @@ class Agent:
                                     + ", ".join(problem_text(p) for p in shown[:3]))
             if s["walls"] < 2:
                 return "warn", f"only {s['walls']} wall(s) found"
-            if not s["objects"]:
+            if not s["objects"] and room_vocabulary(self.space).furniture:
                 return "warn", "no furniture was recognised"
+            if not s["objects"]:
+                return "pass", f"{s['walls']} walls; no furniture was named in this space, and none was built"
             return "pass", (f"{s['walls']} walls, {s['built_boxes']} boxes to build "
                             f"({', '.join(s['objects'])})")
         if stage == "splat":
@@ -2706,10 +2811,15 @@ class Agent:
                         if isinstance(a, str):
                             self.advise(a, "the render check against this capture's own frames")
             if self.advisor.available:
+                def measured(stage: str, value: dict) -> str:
+                    return json.dumps(value) if value or stage in self.gates else '"not run"'
+
                 verdict = self.safe(self.advisor.ask_json, CAPTURE_ADVICE_PROMPT.format(
-                    recon=json.dumps(recon), dense=json.dumps(dense), shapes=json.dumps(shapes),
-                    capture=json.dumps(self.capture_map_metrics()),
-                    walls=json.dumps(self.measured_walls()),
+                    capture=self.capture,
+                    recon=json.dumps(recon), dense=measured("densify", dense),
+                    shapes=measured("shapes", shapes),
+                    coverage=json.dumps(self.capture_map_metrics()),
+                    walls=measured("shapes", self.measured_walls()),
                     sampling=json.dumps(self.sampling_metrics()),
                     stopped=json.dumps({"stopped_at": stopped_at,
                                         "why": (self.gates.get(stopped_at) or {}).get("why")}
