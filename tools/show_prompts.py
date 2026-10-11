@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Prompts the code fills in with .format(), where {{ }} stand for the braces Claude sees.
-FORMATTED = {"FRAME_CHOICE_PROMPT", "OBJECT_NAMING_PROMPT", "LABEL_REVIEW_PROMPT", "RECHECK_NOTE", "START_VIEW_PROMPT",
+FORMATTED = {"FRAME_CHOICE_PROMPT", "CAPTURE_ADVICE_PROMPT", "OBJECT_NAMING_PROMPT", "LABEL_REVIEW_PROMPT", "RECHECK_NOTE", "START_VIEW_PROMPT",
              "FILL_REVIEW_PROMPT", "REVIEW_PROMPT", "PROMPT"}
 
 # (stage, what it decides, file, what holds the prompt, the images that go with it)
@@ -61,9 +61,9 @@ ASKS = [
      "tools/mixed_scene.py", ("constant", "REVIEW_PROMPT"),
      "the surfaces sheet, the pieces sheet (each scan as filmed and from an unfilmed angle, "
      "beside the real frame), the room with every piece named, the model sides sheet, 2 frames"),
-    (4, "What should the person change when filming the next room?",
-     "pipeline/agent.py", ("method", "finish"),
-     "no images: the run's own numbers and judgements"),
+    (4, "What is wrong with this capture, on what evidence, and what input to take next?",
+     "pipeline/agent.py", ("constant", "CAPTURE_ADVICE_PROMPT"),
+     "no images: the capture's own measurements (metrics, capture map, wall table, sampling)"),
 ]
 
 

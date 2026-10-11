@@ -407,6 +407,26 @@ def root_cause(output: str) -> str:
     return last
 
 
+CAPTURE_ADVICE_PROMPT = """A room was filmed once on a phone and processed by our 3D pipeline. You are reading the measurements of that one capture — diagnose THIS capture, not filming in general.
+
+Measured, from the capture provided:
+cameras: {recon}
+depth: {dense}
+structure: {shapes}
+coverage (the capture map; directions are the camera's bearings in degrees): {capture}
+walls measured in place (body, seam, interior, occluded, support per wall): {walls}
+sampling (the pipeline chose the frame count, not the person): {sampling}
+how the run ended: {stopped}
+
+Report findings on this capture:
+- "detection": one sentence naming a problem in this capture, read from the numbers above.
+- "evidence": the field(s) and value(s) it rests on, quoted from above.
+- "take": the concrete input to capture next in this room — which wall, corner or area, from roughly where, moving how — or null when no new footage would fix it.
+
+Rules: every finding cites its evidence; never blame the person for frame counts or sampling; no general filming tips; at most {limit} findings, the most damaging first. If the run ended on a tool or network failure rather than the capture, or the measurements are too thin to diagnose, abstain.
+Fields: {{"findings": [{{"detection": string, "evidence": string, "take": string or null}}], "abstain": boolean, "why": one sentence}}"""
+
+
 WALK_PROMPT = """Two maps of the same phone video of a room, each drawn from a camera solve. Both show the room from above: the measured points in their colours, the floor shaded by how often it was seen, and the walk from start (green) to end (red) with a tick where the camera looked.
 
 Map 1 is COLMAP's own solve: it could place {before} of the video's {total} frames in one piece. Map 2 adds the frames it lost, placed by MapAnything from COLMAP's cameras and then triangulated and adjusted together with them: {after} frames. Numbers: {facts}.
@@ -1706,7 +1726,10 @@ class Agent:
             "dropped_frames": (json.loads(dropped.read_text()).get(best.name, [])
                                if (dropped := self.space / "workspace"
                                    / "dropped-frames.json").exists() else []),
-            "rejected_global": (self.space / "workspace" / "sparse-global-rejected").exists(),
+            # Only a rejected MODEL means the global solve joined wrong pieces;
+            # the empty directory is left behind when the subcommand failed.
+            "rejected_global": any(
+                (self.space / "workspace" / "sparse-global-rejected").glob("**/images.bin")),
         }
 
     def densify_metrics(self) -> dict:
@@ -2408,33 +2431,71 @@ class Agent:
                 "damaged": round(float((diff[solid] > FILL_DAMAGE_STEP).mean()) if solid.any() else 0.0, 4)}
 
     # ---------------------------------------------------------------- advice
+    def capture_map_metrics(self) -> dict:
+        try:
+            return json.loads((self.space / "capture-map.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def measured_walls(self) -> dict:
+        """The last in-place wall measurement this run recorded (room_score)."""
+        for entry in reversed(self.stages):
+            walls = (entry.get("metrics") or {}).get("walls")
+            if isinstance(walls, dict) and walls:
+                return walls
+        return {}
+
+    def sampling_metrics(self) -> dict:
+        """How the pipeline sampled the video — the person chose none of it."""
+        try:
+            grid = json.loads((self.space / "workspace" / "video-grid" / "frames.json").read_text())
+        except (OSError, ValueError):
+            return {}
+        return {"frames_kept": len(grid.get("frames") or {}),
+                "candidates_fps": grid.get("fps"),
+                "note": "the pipeline extracted and chose the frames, not the person"}
+
+    def advise(self, detection: str, evidence: str, take: str | None = None) -> None:
+        """One finding about the capture provided: what is wrong (detection),
+        the measurement it rests on (evidence), and the concrete input to
+        take next for this room (take) — never a general filming tip."""
+        self.advice.append({"detection": detection, "evidence": evidence, "take": take})
+
     def capture_advice(self, recon: dict, dense: dict, shapes: dict, row: dict) -> None:
         if recon.get("rejected_global"):
-            self.advice.append(
-                "The global solve joined pieces that do not belong together, so the "
-                "incremental mapper was used. Walk a closed loop and return to where "
-                "you started, so the pieces have overlap to connect through.")
+            self.advise(
+                "The global solve joined pieces of this capture that do not belong "
+                "together, so the incremental mapper was used.",
+                f"sparse-global-rejected holds a model; {recon.get('models')} model(s) kept",
+                "one closed loop ending where it started, so the pieces share overlap")
         if recon.get("fraction", 1) < 0.9:
-            self.advice.append(
-                f"Only {recon.get('fraction', 0):.0%} of frames were placed. Walk "
-                "slower with more overlap between frames, and never pan in place.")
+            self.advise(
+                f"Only {recon.get('fraction', 0):.0%} of this capture's frames were placed.",
+                f"{recon.get('frames')} of {recon.get('total')} frames in the main model",
+                "a slower pass over the unplaced stretch, side-stepping rather than panning")
         if (dense.get("scale_spread") or 0) > 0.15:
-            self.advice.append(
-                f"Keyframes disagreed about scale by {dense['scale_spread']:.0%}, which "
-                "means thin geometry. More parallax (move sideways, not just forward) helps.")
+            self.advise(
+                f"Keyframes disagree about this capture's scale by {dense['scale_spread']:.0%}: "
+                "thin geometry.",
+                f"scale_spread {dense['scale_spread']:.2f} in densify.json",
+                "a sideways pass (parallax), not more forward walking")
         if dense.get("points_dropped_unreliable"):
-            self.advice.append(
-                f"{dense['points_dropped_unreliable']:,} points were dropped on mirrors, "
-                "windows and screens. Close curtains and avoid filming into mirrors.")
+            self.advise(
+                "Reflective surfaces cost this capture points.",
+                f"{dense['points_dropped_unreliable']:,} points dropped on mirrors, "
+                "windows and screens",
+                "the same room with curtains closed, screens off, mirrors filmed obliquely")
         if shapes and not shapes.get("objects"):
-            self.advice.append(
-                "No furniture was recognised. Film each piece of furniture from closer, "
-                "with the lights on.")
+            self.advise(
+                "No furniture was recognised in this capture.",
+                "shapes.json has no detected boxes",
+                "a closer pass around each piece, lights on")
         if (row.get("wall_rms_pct") or 0) > NOISY_WALL_RMS_PCT:
-            self.advice.append(
-                f"Walls came out rough ({row['wall_rms_pct']:.2f}% of the room's size). "
-                "Blank walls need texture: film along them, and add a few pieces of "
-                "painter's tape or sticky notes.")
+            self.advise(
+                f"This capture's walls came out rough.",
+                f"wall rms {row['wall_rms_pct']:.2f}% of the room's size",
+                "a pass along each blank wall with some texture in frame "
+                "(painter's tape or sticky notes)")
 
     # ------------------------------------------------------------------- run
     # ----------------------------------------------------------------- gates
@@ -2592,23 +2653,34 @@ class Agent:
             self.capture_advice(recon, dense, shapes, row)
             for j in self.judgements:
                 if j["stage"] == "densify" and j.get("missed") and not j.get("applied"):
-                    self.advice.append(
-                        "The detector missed " + ", ".join(map(str, j["missed"][:6]))
-                        + ", so they stay leftover points instead of furniture.")
+                    self.advise(
+                        "The detector missed objects this capture shows, so they stay "
+                        "leftover points instead of furniture.",
+                        "missed by the label review: " + ", ".join(map(str, j["missed"][:6])),
+                        "a closer pass around each of them")
                 if j["stage"] == "blender" and j.get("plausible") is False:
-                    self.advice += [a for a in (j.get("advice") or [])[:3] if isinstance(a, str)]
+                    for a in (j.get("advice") or [])[:3]:
+                        if isinstance(a, str):
+                            self.advise(a, "the render check against this capture's own frames")
             if self.advisor.available:
-                written = self.safe(self.advisor.ask,
-                    "A room capture was processed by our 3D pipeline. Measurements:\n"
-                    f"cameras {json.dumps(recon)}\ndepth {json.dumps(dense)}\n"
-                    f"structure {json.dumps(shapes)}\n"
-                    "Write at most four short, concrete instructions for re-shooting this "
-                    "room so the reconstruction comes out better. One instruction per "
-                    "line, no numbering, no preamble.")
-                for line in (written or "").splitlines():
-                    line = line.strip("-* \t")
-                    if len(line) > 15:
-                        self.advice.append(line)
+                verdict = self.safe(self.advisor.ask_json, CAPTURE_ADVICE_PROMPT.format(
+                    recon=json.dumps(recon), dense=json.dumps(dense), shapes=json.dumps(shapes),
+                    capture=json.dumps(self.capture_map_metrics()),
+                    walls=json.dumps(self.measured_walls()),
+                    sampling=json.dumps(self.sampling_metrics()),
+                    stopped=json.dumps({"stopped_at": stopped_at,
+                                        "why": (self.gates.get(stopped_at) or {}).get("why")}
+                                       if stopped_at else "the run finished"),
+                    limit=4), [])
+            else:
+                verdict = None
+            if verdict and not verdict.get("abstain"):
+                for f in (verdict.get("findings") or [])[:4]:
+                    if isinstance(f, dict) and f.get("detection") and f.get("evidence"):
+                        self.advise(str(f["detection"]), str(f["evidence"]),
+                                    str(f["take"]) if f.get("take") else None)
+            elif verdict and verdict.get("abstain"):
+                print(f"    capture advice: Claude abstained ({verdict.get('why', 'no reason given')})")
 
         report = {
             "space": self.name,
@@ -2649,9 +2721,12 @@ class Agent:
                   f"{f'{rms:.2f}% rms' if rms is not None else 'not measured'}, "
                   f"splat {row.get('splat') or 0:,} gaussians")
         if self.advice:
-            print("  capture advice:")
+            print("  findings on this capture:")
             for item in self.advice:
-                print(f"    - {item}")
+                print(f"    - {item['detection']}")
+                print(f"        evidence: {item['evidence']}")
+                if item.get("take"):
+                    print(f"        take: {item['take']}")
         print(f"  report: {self.space / 'agent-report.json'}")
         if stopped_at:
             return 1 if self.gates[stopped_at]["status"] == "stop" else 3
