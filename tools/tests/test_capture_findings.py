@@ -34,6 +34,13 @@ def test_every_finding_carries_its_evidence_and_the_input_to_take():
     quiet = bare_agent()
     quiet.capture_advice({"rejected_global": False, "fraction": 1.0}, {}, None, {})
     assert quiet.advice == []
+    # A global solve rejected for having no point is too little camera motion, not pieces.
+    flat = bare_agent()
+    flat.capture_advice({"rejected_global": True, "fraction": 1.0, "total": 14, "frames": 14,
+                         "rejected_global_why": "the global mapper placed frames but triangulated no point"},
+                        {}, None, {})
+    assert len(flat.advice) == 1 and "moved too little" in flat.advice[0]["detection"]
+    assert "sideways" in flat.advice[0]["take"] and "joined" not in flat.advice[0]["detection"]
     # A run that died before COLMAP made any model counted no frames: nothing to report.
     crashed = bare_agent()
     crashed.capture_advice({"models": 0, "frames": 0, "total": 0, "fraction": 0.0}, {}, None, {})
@@ -171,14 +178,16 @@ def test_a_malformed_advisor_reply_never_loses_the_report():
     assert findings_of(None) == [] and findings_of({}) == []
 
 
-def test_the_default_retry_is_denser_sampling_on_a_thin_video_solve():
-    from agent import default_retry
-    action, why = default_retry({"total": 12, "fraction": 0.17}, video=True)
-    assert action == "retry_denser" and "12 frames" in why
-    action, _ = default_retry({"total": 120, "fraction": 0.4}, video=True)
-    assert action == "retry_aliked"
-    action, _ = default_retry({"total": 12, "fraction": 0.17}, video=False)
-    assert action == "retry_aliked"                 # photos cannot be resampled
+def test_the_default_retry_is_the_mapper_for_small_camera_moves():
+    """On the 16 test clips it was the only retry that rescued a failed solve;
+    denser sampling and ALIKED features rescued none."""
+    from agent import RETRIES, default_retry
+    for first, video in (({"total": 12, "fraction": 0.17}, True), ({"total": 120, "fraction": 0.4}, True),
+                         ({"total": 12, "fraction": 0.17}, False)):
+        action, why = default_retry(first, video)
+        assert action == "retry_incremental" and f"{first['fraction']:.0%}" in why
+    assert RETRIES["retry_incremental"] == ["--mapper", "small-baseline"]
+    assert "retry_aliked" not in RETRIES
 
 
 if __name__ == "__main__":

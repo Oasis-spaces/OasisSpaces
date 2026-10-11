@@ -392,19 +392,18 @@ def keep_filled(before: dict, after: dict | None) -> tuple[bool, str]:
 
 
 DENSER_FACTOR = 3         # a denser retry samples the video at this multiple of the fps
-DENSER_BELOW_FRAMES = 30  # a video solve this thin tries denser sampling before new features
+RETRIES = {"retry_denser": [],                       # the same video, DENSER_FACTOR x the fps
+           "retry_incremental": ["--mapper", "small-baseline"]}
 
 
 def default_retry(first: dict, video: bool) -> tuple[str, str]:
-    """The retry to try when the judge has no say. On a video that kept few
-    frames, consecutive views share too little whatever the features, so
-    denser sampling comes first (the white-bedroom clip failed on overlap,
-    and its ALIKED retry changed nothing); otherwise learned features."""
-    if video and (first.get("total") or 0) < DENSER_BELOW_FRAMES:
-        return "retry_denser", (f"only {first.get('total')} frames were sampled from the "
-                                "video; denser sampling gives consecutive views overlap")
-    return "retry_aliked", (f"only {first['fraction']:.0%} of frames placed; learned "
-                            "features grip low-texture walls better")
+    """The retry to try when the judge has no say: the incremental mapper set
+    for small camera moves. On the 16 test clips it was the only retry that
+    rescued a failed solve (the white-bedroom slide: 12 of 12 frames, where
+    three times the frames placed 11 of 36 and ALIKED features 2 of 12)."""
+    return "retry_incremental", (f"only {first['fraction']:.0%} of frames placed; the "
+                                 "incremental mapper set for small camera moves places "
+                                 "frames the global solve cannot")
 
 
 def is_video(source) -> bool | None:
@@ -499,7 +498,7 @@ sampling: {sampling}
 how the run ended: {stopped}
 
 How to read them:
-- cameras: frames of total is how many frames the main model holds; models counts real pieces of the capture (leftover_models are fragments of a few frames that do not matter); path_jump is the largest camera move between consecutive frames as a share of the scene, a check that the path has no teleports (a coherent capture stays under 0.1), not a measure of how far the camera travelled, and null means too few points to judge it, not that the camera did not move; rejected_global means the global solve was replaced by the incremental one, and the other numbers describe that replacement; points are the solve's sparse points, which the depth stage fills in later (the test clips ranged from 731 to 17,159, every one a sound solve), so a count alone is no finding.
+- cameras: frames of total is how many frames the main model holds; models counts real pieces of the capture (leftover_models are fragments of a few frames that do not matter); path_jump is the largest camera move between consecutive frames as a share of the scene, a check that the path has no teleports (a coherent capture stays under 0.1), not a measure of how far the camera travelled, and null means too few points to judge it, not that the camera did not move; rejected_global means the global solve was rejected (rejected_global_why says why) and replaced by the incremental one, and the other numbers describe that replacement; points are the solve's sparse points, which the depth stage fills in later (the test clips ranged from 731 to 17,159, every one a sound solve), so a count alone is no finding.
 - coverage: it is drawn from the frames the main model holds (its frames field), so when few frames were placed it describes those frames, not the capture. path_m is the length of the camera's walk and footprint_m2 the floor area of the room, not of the walk; floor shares count a floor cell as seen only from within 5 m. Sizes and floor shares are measured on the map's scale, so when that scale was only guessed they are left out (left_out says so): do not infer them from the rest, read the capture from counts and directions alone, and do not report the guess, which the depth stage replaces with a measurement.
 - sampling: from a video the pipeline chose how many frames to take, not the person; a set of photos is the person's own.
 
@@ -755,8 +754,8 @@ class Agent:
             "frames that do not matter); path_jump is the largest camera move between "
             "consecutive frames as a share of the scene (a coherent capture stays under "
             "0.1; null means too few points to judge); rejected_global means the global "
-            "solve joined pieces wrongly and was already replaced by the incremental "
-            "one, which these numbers describe. "
+            "solve was rejected (rejected_global_why says why) and already replaced by "
+            "the incremental one, which these numbers describe. "
             + ("The pipeline sampled the frames from the video; the person did not "
                "choose how many.\n" if video else "The frames are the person's own photos.\n")
             + "The attached frames come from the start, middle and end of the capture.\n"
@@ -767,16 +766,16 @@ class Agent:
             "coverage.\n"
             "Choose exactly one action:\n"
             '  "accept": the main model holds the frames well enough to carry on;\n'
-            + ('  "retry_denser": redo with three times as many frames sampled from the '
-               "same video, so consecutive views overlap — for a solve that lost frames "
-               "because neighbouring views share too little;\n" if video else "")
-            + '  "retry_aliked": redo with learned features (ALIKED), which find more '
-            "on plain walls and repeated patterns but take about 2.5 times as long to "
-            "extract;\n"
-            '  "retry_incremental": redo with the incremental mapper, slower, but it '
-            "never joins pieces that do not belong together — for a solve whose path "
-            "jumps or splits.\n"
-            'Fields: {"action": string, "why": one short sentence, '
+            + '  "retry_incremental": redo with the incremental mapper set for small '
+            "camera moves (it accepts narrower angles between views): slower, it never "
+            "joins pieces that do not belong together, and it places frames of a slow "
+            "slide or a pan that the global solve cannot. The usual retry: on the test "
+            "clips it was the only one that rescued a failed solve"
+            + (';\n  "retry_denser": redo with three times as many frames sampled from the '
+               "same video — only when the frames show the camera turning or moving so "
+               "fast that neighbouring frames share little of the room (on the test "
+               "clips, all filmed slowly, it rescued none).\n" if video else ".\n")
+            + 'Fields: {"action": string, "why": one short sentence, '
             '"capture_problems": array of short phrases}')
         drawn = self.safe(self.draw_capture_map)
         images = self.sample_frames(3) + ([self.space / "capture-map.png"] if drawn else [])
@@ -1860,10 +1859,14 @@ class Agent:
             "dropped_frames": (json.loads(dropped.read_text()).get(best.name, [])
                                if (dropped := self.space / "workspace"
                                    / "dropped-frames.json").exists() else []),
-            # Only a rejected MODEL means the global solve joined wrong pieces;
-            # the empty directory is left behind when the subcommand failed.
-            "rejected_global": any(
-                (self.space / "workspace" / "sparse-global-rejected").glob("**/images.bin")),
+            # Only a rejected MODEL says something about the capture (pieces
+            # joined wrongly, or frames placed with no point); the empty
+            # directory is left behind when the subcommand failed.
+            **({"rejected_global": True,
+                "rejected_global_why": (rejected / "why.txt").read_text().strip()
+                if (rejected / "why.txt").exists() else "unrecorded"}
+               if any((rejected := self.space / "workspace" / "sparse-global-rejected").glob("**/images.bin"))
+               else {"rejected_global": False}),
         }
 
     def densify_metrics(self) -> dict:
@@ -1932,8 +1935,7 @@ class Agent:
         # the measurement still has the final say on an obviously broken model.
         action, why = default_retry(first, self.source.is_file())
         verdict = self.safe(self.capture_verdict, first)
-        if verdict and verdict.get("action") in {"accept", "retry_denser", "retry_aliked",
-                                                 "retry_incremental"}:
+        if verdict and verdict.get("action") in {"accept", *RETRIES}:
             action = verdict["action"]
             why = f"Claude: {str(verdict.get('why', '')).strip()}"
             if action == "accept" and first["fraction"] < 0.35:
@@ -1941,15 +1943,13 @@ class Agent:
                 why = (f"Claude wanted to accept, but only {first['fraction']:.0%} of "
                        f"frames were placed, so the measurement wins: {retry_why}")
             if action == "retry_denser" and not self.source.is_file():
-                action = "retry_aliked"
-                why += " (photos cannot be resampled, so learned features instead)"
+                action = "retry_incremental"
+                why += " (photos cannot be resampled, so the incremental mapper instead)"
         if action == "accept":
             self.decide("reconstruct", "accept", why, first, first_seconds)
             return True
         retry_fps = self.fps * DENSER_FACTOR if action == "retry_denser" else self.fps
-        retry_args = {"retry_denser": [],
-                      "retry_aliked": ["--features", "aliked"],
-                      "retry_incremental": ["--mapper", "incremental"]}[action]
+        retry_args = RETRIES[action]
         self.decide("reconstruct", action, why, first, first_seconds)
         workspace = self.space / "workspace"
         kept = self.space / "workspace-sift"
@@ -2629,11 +2629,21 @@ class Agent:
         self.advice.append({"detection": detection, "evidence": evidence, "take": take})
 
     def capture_advice(self, recon: dict, dense: dict, shapes: dict, row: dict) -> None:
-        if recon.get("rejected_global"):
+        rejected_why = str(recon.get("rejected_global_why") or "")
+        if recon.get("rejected_global") and "no point" in rejected_why:
+            self.advise(
+                "The global solve placed frames of this capture but measured no depth from "
+                "them: the camera moved too little for how far away the room is, so the "
+                "incremental mapper was used.",
+                f"global solve rejected: {rejected_why}",
+                "a pass that steps sideways across the room, rather than turning or sliding "
+                "slowly from one spot")
+        elif recon.get("rejected_global"):
             self.advise(
                 "The global solve joined pieces of this capture that do not belong "
                 "together, so the incremental mapper was used.",
-                f"sparse-global-rejected holds a model; {recon.get('models')} model(s) kept",
+                f"global solve rejected: {rejected_why or 'a model in sparse-global-rejected'}; "
+                f"{recon.get('models')} model(s) kept",
                 "one closed loop ending where it started, so the pieces share overlap")
         # No frame counted (the run died before COLMAP made a model, e.g. a tool
         # crash) is no measurement of the capture: "0% of 0 frames" sent people

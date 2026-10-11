@@ -49,6 +49,14 @@ def test_leftover_components_are_not_pieces_and_an_unjudged_path_is_none():
             assert a.reconstruction_metrics()["models"] == 2
             agent.camera_path = lambda m: None                    # too few points to size the scene
             assert a.reconstruction_metrics()["path_jump"] is None
+            assert a.reconstruction_metrics()["rejected_global"] is False
+            # A rejected global model carries the reason reconstruct.py wrote beside it.
+            rejected = space / "workspace" / "sparse-global-rejected" / "0"
+            rejected.mkdir(parents=True)
+            (rejected / "images.bin").write_bytes(b"")
+            (rejected.parent / "why.txt").write_text("the global mapper placed frames but triangulated no point\n")
+            m = a.reconstruction_metrics()
+            assert m["rejected_global"] and "no point" in m["rejected_global_why"]
         finally:
             agent.registered_images, agent.model_points, agent.camera_path, agent.camera_path_jump = saved
 

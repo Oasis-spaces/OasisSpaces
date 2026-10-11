@@ -12,11 +12,13 @@ Usage:
     python3 pipeline/reconstruct.py walkthrough.mp4 --name loft --fps 2
     python3 pipeline/reconstruct.py photos/ --name office --dense
     python3 pipeline/reconstruct.py room.mov --name room --mapper incremental
+    python3 pipeline/reconstruct.py slide.mov --name room --mapper small-baseline
 
 Mapping uses COLMAP's global mapper (GLOMAP, built into COLMAP 4.x) by
 default: it solves all cameras at once and fragments hard captures far less
 than the incremental mapper, which remains available as --mapper incremental
-and as an automatic fallback.
+and as an automatic fallback. --mapper small-baseline is the incremental
+mapper with lower triangulation angles, for a camera that barely moves.
 
 Output lands in spaces/<name>/:
     workspace/   COLMAP database, extracted frames, sparse model
@@ -48,12 +50,23 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 MAX_PATH_JUMP = 0.3
 # Random seeds tried for the global mapper before falling back to incremental.
 GLOBAL_MAPPER_SEEDS = (0, 1, 2)
-# COLMAP 4.x feature types: classic SIFT, or the learned ALIKED detector, which
-# finds far more on the low-texture surfaces (white walls) that SIFT has
-# nothing to grip. ALIKED is matched by brute force, not LightGlue: on this
-# CPU-only build LightGlue took 99 s for one frame's neighbours and then
-# crashed inside Apple's ONNX runtime, while brute force matched 42 frames in
-# 3 s, and the pan capture solved 42/42 frames in one model with it.
+# The incremental mapper's triangulation angles for footage whose camera moves
+# little against the room's depth (a slow slide, a pan from one spot). COLMAP's
+# defaults (16 degrees for the first pair, 1.5 to keep a point) can refuse to
+# start such a model: on the 16 test clips these placed all 12 frames of a
+# sideways slide that every other option left at 0 to 3, and more frames than
+# the defaults on 7 clips (fewer on 1). Lowering only the first pair's angle
+# was not enough (3 of 12). COLMAP's FAQ gives the same advice for scenes
+# filmed from far away.
+SMALL_BASELINE_MAPPER = ["--Mapper.init_min_tri_angle", "4",
+                         "--Mapper.filter_min_tri_angle", "0.5",
+                         "--Mapper.tri_min_angle", "0.5"]
+# COLMAP 4.x feature types: classic SIFT, or the learned ALIKED detector.
+# ALIKED was meant for low-texture walls, but on the 16 test clips it never
+# placed more frames than SIFT with the same mapper and found fewer points on
+# 15, so nothing selects it automatically. It is matched by brute force, not
+# LightGlue: on this CPU-only build LightGlue took 99 s for one frame's
+# neighbours and then crashed inside Apple's ONNX runtime.
 FEATURE_TYPES = {
     "sift": ("SIFT", "SIFT_BRUTEFORCE"),
     "aliked": ("ALIKED_N16ROT", "ALIKED_BRUTEFORCE"),
@@ -518,13 +531,17 @@ def sparse_reconstruction(
             # Keep the latest rejected attempt for debugging, out of downstream's way.
             shutil.rmtree(rejected, ignore_errors=True)
             sparse_dir.rename(rejected)
+            (rejected / "why.txt").write_text(problem + "\n")   # read back for the capture advice
             sparse_dir.mkdir()
         else:
             print("Falling back to the incremental mapper.")
             mapper = "incremental"
-    if mapper == "incremental":
-        print("COLMAP: incremental mapping — this is the slow part")
-        run(["colmap", "mapper", *mapping_args], log)
+    if mapper in ("incremental", "small-baseline"):
+        print("COLMAP: incremental mapping"
+              + (" for small camera moves" if mapper == "small-baseline" else "")
+              + " — this is the slow part")
+        run(["colmap", "mapper", *mapping_args,
+             *(SMALL_BASELINE_MAPPER if mapper == "small-baseline" else [])], log)
 
     models = solved_models(sparse_dir)
     if not models:
@@ -640,10 +657,12 @@ def main() -> None:
                              "(brute-force matched; about twice as slow to extract, "
                              "and in this project's tests it never placed more "
                              "frames than SIFT with the same mapper)")
-    parser.add_argument("--mapper", choices=["global", "incremental", "priors"],
+    parser.add_argument("--mapper", choices=["global", "incremental", "small-baseline", "priors"],
                         default="global",
                         help="COLMAP mapper (default global; incremental is "
-                             "the pre-4.0 behaviour; priors triangulates with the "
+                             "the pre-4.0 behaviour; small-baseline is incremental "
+                             "with lower triangulation angles, for a camera that "
+                             "moves little (a slow slide, a pan); priors triangulates with the "
                              "cameras workspace/pose-priors.json places, e.g. from "
                              "pipeline/mapanything_solve.py)")
     parser.add_argument("--frames-only", action="store_true",
