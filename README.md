@@ -181,7 +181,10 @@ the agent's judgement:
    plain detector-friendly names ("wardrobe" for an almirah) and a role for
    each (furniture with what to build it as, storage, small things on
    furniture, floor coverings, unreliable glass and screens, hanging things,
-   fixtures). Mirrors, windows and screens are always searched for. Without
+   fixtures; a thing seen only through a doorway, a mirror or a screen is
+   recorded as "elsewhere" and knowingly left out of the search, so a bathtub
+   glimpsed through a door is not tracked through the living room). Mirrors,
+   windows and screens are always searched for. Without
    Claude, or through `process_video.sh`, a general default list is used;
    an `objects.json` already in the space is reused, so edit it and re-run
    densify to change what is found. The list used is recorded in

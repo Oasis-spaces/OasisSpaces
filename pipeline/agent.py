@@ -152,6 +152,7 @@ Naming rules:
 - One name per kind of thing, even if there are several (one "chair" for four chairs).
 - Never give one object names in two different roles: a cupboard front that looks like a door is "wardrobe", not also "door". Two storage names for the same piece are fine (a "wardrobe" with a "chest of drawers" base).
 - Only things you can actually see in these frames. Leave out walls, floor, ceiling, skirting, beams, tiles, light switches and anything smaller than a shoebox, unless it is glass or a screen.
+- This room only. A thing seen only through a doorway into another room, only in a mirror, or only on a screen gets role "elsewhere": the detector would otherwise find it in this room (a bathtub named from a glimpse through a door was once tracked through a living room).
 - Always include every mirror, window, glass door or glass panel, television and monitor you see: depth on them is wrong and those points must be removed.
 - Most important first, at most {limit} names.
 
@@ -164,6 +165,7 @@ Roles:
 - "unreliable": mirrors, windows, glass doors and panels, televisions, monitors. build_as null.
 - "hanging": curtains, blinds, clothes or towels hanging in front of a wall. build_as null.
 - "fixture": part of the room itself: doors, door frames, pinboards, pictures, air conditioners, ceiling fans, radiators, and shelves or cabinets mounted on a wall that do not reach the floor. build_as null.
+- "elsewhere": not in this room — seen only through a doorway into another room, only reflected in a mirror, or only on a screen. It is knowingly left out of the search; naming it here records the glimpse without building it into this room. build_as null.
 
 Fields: {{"objects": [{{"name": string, "role": string, "build_as": string or null}}], "room": one sentence describing the room}}"""
 # Claude picks the view a splat opens at from this many rendered options.
@@ -298,6 +300,8 @@ Revise the list so the detector finds what is really in the room, and nothing el
 - "add": objects clearly visible in the frames that no box covers and that matter to the room model: furniture, storage,
   glass or screens, curtains, and loose belongings big enough to confuse the furniture boxes (a heap of clothes, a bag on
   the floor). Skip anything smaller than a shoebox that is not glass or a screen. Same roles and build_as as the list.
+  Never add a thing seen only through a doorway into another room, only in a mirror, or only on a screen: give it role
+  "elsewhere" and it is knowingly left out of the search instead of being found in this room.
 - "rename": a name whose object is visible but was never or rarely boxed, where a plainer, more common English word would
   help the detector ("almirah" -> "wardrobe", "monitor" -> "computer screen").
 - "remove": a name whose boxes land on something else (a "chest of drawers" box on the side of a bed, a "wardrobe" box
@@ -786,17 +790,25 @@ class Agent:
         verdict = self.advisor.ask_json(
             OBJECT_NAMING_PROMPT.format(count=len(frames), limit=MAX_OBJECTS - 4),
             frames, max_tokens=2000)
-        vocabulary = Vocabulary((verdict or {}).get("objects") or [], "claude")
+        listed = (verdict or {}).get("objects") or []
+        # A glimpse through a doorway, a mirror or a screen is recorded, never
+        # searched: the detector once found a "bathtub" in a living room.
+        elsewhere = sorted({clean_name(o.get("name", "")) for o in listed
+                            if o.get("role") == "elsewhere"} - {""})
+        vocabulary = Vocabulary([o for o in listed if o.get("role") != "elsewhere"], "claude")
         if not vocabulary.furniture:
             print("    object list: no usable answer, the detector uses the default list"
                   + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
             return
         path.write_text(json.dumps({**vocabulary.to_json(), "room": verdict.get("room"),
+                                    "elsewhere": elsewhere,
                                     "frames": [f.name for f in frames]}, indent=1) + "\n")
-        self.judged("objects", {"objects": vocabulary.objects, "room": verdict.get("room")},
+        self.judged("objects", {"objects": vocabulary.objects, "room": verdict.get("room"),
+                                "elsewhere": elsewhere},
                     f"{len(vocabulary.names)} names: " + ", ".join(
                         f"{o['name']} ({o['role']})" for o in vocabulary.objects[:12])
-                    + (" ..." if len(vocabulary.names) > 12 else ""))
+                    + (" ..." if len(vocabulary.names) > 12 else "")
+                    + (f"; elsewhere, not searched: {', '.join(elsewhere)}" if elsewhere else ""))
 
     def review_labels(self) -> bool:
         """Claude checks what the detector found, on keyframes with every
@@ -870,7 +882,12 @@ class Agent:
                 changes.append(f"renamed '{old}' to '{new}'")
         for item in verdict.get("add") or []:
             name = clean_name(item.get("name", ""))
-            if name and name not in by_name and item.get("role") in ROLES:
+            if not name or name in by_name:
+                continue
+            if item.get("role") == "elsewhere":
+                changes.append(f"left out '{name}' (elsewhere, not in this room)")
+                continue
+            if item.get("role") in ROLES:
                 entry = {"name": name, "role": item["role"], "build_as": item.get("build_as")}
                 objects.append(entry)
                 by_name[name] = entry
