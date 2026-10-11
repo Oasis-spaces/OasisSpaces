@@ -48,16 +48,21 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 # Largest believable camera move between consecutive video frames, as a
 # fraction of the scene's size (coherent models stay under ~0.1).
 MAX_PATH_JUMP = 0.3
-# Random seeds tried for the global mapper before falling back to incremental.
+# Random seeds tried for the global mapper before falling back to incremental,
+# and for the incremental mapper, whose first pair is drawn at random.
 GLOBAL_MAPPER_SEEDS = (0, 1, 2)
+INCREMENTAL_MAPPER_SEEDS = (0, 1, 2)
+# A model with fewer points than this is no solve, however many frames it
+# placed (sound solves of the 16 test clips held 731 to 17,159).
+MIN_SOLVE_POINTS = 100
 # The incremental mapper's triangulation angles for footage whose camera moves
 # little against the room's depth (a slow slide, a pan from one spot). COLMAP's
 # defaults (16 degrees for the first pair, 1.5 to keep a point) can refuse to
-# start such a model: on the 16 test clips these placed all 12 frames of a
-# sideways slide that every other option left at 0 to 3, and more frames than
-# the defaults on 7 clips (fewer on 1). Lowering only the first pair's angle
-# was not enough (3 of 12). COLMAP's FAQ gives the same advice for scenes
-# filmed from far away.
+# start such a model: with seeds 0-2, these placed all 9 frames of the hotel
+# suite (29681899) where the defaults placed none on any seed, and all 9 of a
+# hotel bedroom (29814959) where the defaults placed 4, 9 and 4. Lowering only
+# the first pair's angle was not enough. COLMAP's FAQ gives the same advice for
+# scenes filmed from far away.
 SMALL_BASELINE_MAPPER = ["--Mapper.init_min_tri_angle", "4",
                          "--Mapper.filter_min_tri_angle", "0.5",
                          "--Mapper.tri_min_angle", "0.5"]
@@ -451,6 +456,41 @@ def triangulate_priors(workspace: Path, images_dir: Path, database: Path, sparse
     run(adjust, log)
 
 
+def incremental_mapping(workspace: Path, database: Path, images_dir: Path, sparse_dir: Path,
+                        options: list[str], log: Path) -> None:
+    """COLMAP's incremental mapper, run with a few seeds, keeping the best
+    model's run in sparse_dir. It picks its first pair at random: on the slow
+    studio slide (27975843) seeds 0 and 4 placed all 14 frames with 4,196
+    points and seeds 1-3 placed 11 with none, from the same database. A run
+    that places every frame with points ends the search."""
+    total = sum(1 for p in images_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
+    best, best_score = None, None
+    for seed in INCREMENTAL_MAPPER_SEEDS:
+        print("COLMAP: incremental mapping"
+              + (" for small camera moves" if options else "")
+              + f" with seed {seed} — this is the slow part")
+        out = workspace / f"sparse-incremental-{seed}"
+        shutil.rmtree(out, ignore_errors=True)
+        out.mkdir()
+        run(["colmap", "mapper", "--database_path", str(database), "--image_path", str(images_dir),
+             "--output_path", str(out), "--Mapper.random_seed", str(seed), *options], log, check=False)
+        # Points first: frames placed with no point to show for it are no solve.
+        score = max(((model_points(m) >= MIN_SOLVE_POINTS, registered_images(m), model_points(m))
+                     for m in solved_models(out)), default=(False, 0, 0))
+        print(f"  seed {seed}: {score[1]} of {total} frames, {score[2]:,} points in its main model")
+        if best_score is None or score > best_score:
+            if best is not None:
+                shutil.rmtree(best, ignore_errors=True)
+            best, best_score = out, score
+        else:
+            shutil.rmtree(out, ignore_errors=True)
+        if score[0] and score[1] == total:
+            break
+    for model in solved_models(best):
+        shutil.move(str(model), str(sparse_dir / model.name))
+    shutil.rmtree(best, ignore_errors=True)
+
+
 def sparse_reconstruction(
     workspace: Path, images_dir: Path, sequential: bool, mapper: str,
     features: str, log: Path
@@ -496,23 +536,37 @@ def sparse_reconstruction(
     if mapper == "global":
         rejected = workspace / "sparse-global-rejected"
         shutil.rmtree(rejected, ignore_errors=True)
+        calibrated = workspace / "database-calibrated.db"
         # The global solve varies from run to run on hard captures, and a
         # re-solve only costs the mapping (features and matches are reused),
-        # so try a few seeds before falling back to the slower incremental mapper.
-        for attempt, seed in enumerate(GLOBAL_MAPPER_SEEDS, 1):
-            print("COLMAP: global mapping (all cameras solved together)"
-                  + (f", attempt {attempt} with seed {seed}" if attempt > 1 else ""))
+        # so try a few seeds, then once more after view-graph calibration,
+        # before falling back to the slower incremental mapper.
+        attempts = [(seed, database) for seed in GLOBAL_MAPPER_SEEDS] + [(GLOBAL_MAPPER_SEEDS[0], calibrated)]
+        for attempt, (seed, attempt_db) in enumerate(attempts, 1):
+            if attempt_db == calibrated:
+                # COLMAP's view-graph calibration drops pairs whose geometry
+                # disagrees and re-estimates the rest. Run first, it cost points
+                # on every test clip that solved without it (one kept a single
+                # point); run after the global solve failed, it placed all 12
+                # frames of the white-bedroom slide (34208854) on every seed.
+                shutil.copy2(database, calibrated)
+                print("COLMAP: calibrating the view graph, then global mapping once more")
+                if not run(["colmap", "view_graph_calibrator", "--database_path", str(calibrated)],
+                           log, check=False):
+                    continue
+            else:
+                print("COLMAP: global mapping (all cameras solved together)"
+                      + (f", attempt {attempt} with seed {seed}" if attempt > 1 else ""))
             problem = None
             if not run(["colmap", "global_mapper", "--default_random_seed", str(seed),
-                        *mapping_args], log, check=False):
+                        "--database_path", str(attempt_db), *mapping_args[2:]], log, check=False):
                 problem = "the global mapper failed"
             elif not solved_models(sparse_dir):
                 problem = "the global mapper registered nothing"
-            elif not any(model_points(m) for m in solved_models(sparse_dir)):
+            elif max(model_points(m) for m in solved_models(sparse_dir)) < MIN_SOLVE_POINTS:
                 # A slow slide across a large room: the global solve placed 10
-                # of 14 frames with no point, where the incremental mapper
-                # placed all 14 and triangulated 4,000.
-                problem = "the global mapper placed frames but triangulated no point"
+                # of 14 frames with no point.
+                problem = "the global mapper placed frames but triangulated almost no point"
             elif sequential:
                 # Check the model everything downstream uses: the one with the
                 # most points.
@@ -537,11 +591,8 @@ def sparse_reconstruction(
             print("Falling back to the incremental mapper.")
             mapper = "incremental"
     if mapper in ("incremental", "small-baseline"):
-        print("COLMAP: incremental mapping"
-              + (" for small camera moves" if mapper == "small-baseline" else "")
-              + " — this is the slow part")
-        run(["colmap", "mapper", *mapping_args,
-             *(SMALL_BASELINE_MAPPER if mapper == "small-baseline" else [])], log)
+        incremental_mapping(workspace, database, images_dir, sparse_dir,
+                            SMALL_BASELINE_MAPPER if mapper == "small-baseline" else [], log)
 
     models = solved_models(sparse_dir)
     if not models:
@@ -575,10 +626,11 @@ def sparse_reconstruction(
               f"{registered_images(model)} of {total_frames} frames")
         if n > best_points:
             best_ply, best_model, best_points = model_ply, model, n
-    if best_points == 0:
+    if best_points < MIN_SOLVE_POINTS:
         sys.exit(
             f"COLMAP placed {max(registered_images(m) for m in models)} of {total_frames} frames "
-            "but triangulated no 3D point. That happens when the camera barely moves compared "
+            f"but triangulated {'no' if best_points == 0 else f'only {best_points}'} 3D points. "
+            "That happens when the camera barely moves compared "
             "with how far away the room is (a slow slide or a pan from one spot): too little "
             "parallax to measure depth from."
         )
@@ -696,8 +748,9 @@ def main() -> None:
     # A rerun must not mix with stale state: features/models/frames from a
     # previous attempt (or a different --fps / source) would corrupt the
     # solve. Wipe everything derived, including old frames.
-    for stale in [workspace / "database.db", workspace / "sparse",
-                  workspace / "sparse-global-rejected", workspace / "dense",
+    for stale in [workspace / "database.db", workspace / "database-calibrated.db", workspace / "sparse",
+                  workspace / "sparse-global-rejected", *workspace.glob("sparse-incremental-*"),
+                  workspace / "dense",
                   *([] if keep_frames else [images_dir]),
                   *workspace.glob("model_*.ply"), workspace / "sparse.ply",
                   workspace / "dropped-frames.json", *workspace.glob("dropped-frames-*.txt")]:

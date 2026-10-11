@@ -398,9 +398,10 @@ RETRIES = {"retry_denser": [],                       # the same video, DENSER_FA
 
 def default_retry(first: dict, video: bool) -> tuple[str, str]:
     """The retry to try when the judge has no say: the incremental mapper set
-    for small camera moves. On the 16 test clips it was the only retry that
-    rescued a failed solve (the white-bedroom slide: 12 of 12 frames, where
-    three times the frames placed 11 of 36 and ALIKED features 2 of 12)."""
+    for small camera moves, with a few seeds. Where the default mappers lost
+    frames on the test clips it placed every one on every seed tried (the hotel
+    suite: 9 of 9 against 0), while three times the frames and ALIKED features
+    rescued no failed solve."""
     return "retry_incremental", (f"only {first['fraction']:.0%} of frames placed; the "
                                  "incremental mapper set for small camera moves places "
                                  "frames the global solve cannot")
@@ -769,8 +770,8 @@ class Agent:
             + '  "retry_incremental": redo with the incremental mapper set for small '
             "camera moves (it accepts narrower angles between views): slower, it never "
             "joins pieces that do not belong together, and it places frames of a slow "
-            "slide or a pan that the global solve cannot. The usual retry: on the test "
-            "clips it was the only one that rescued a failed solve"
+            "slide or a pan that the default mappers lose. The usual retry: on the test "
+            "clips the other retries rescued no failed solve"
             + (';\n  "retry_denser": redo with three times as many frames sampled from the '
                "same video — only when the frames show the camera turning or moving so "
                "fast that neighbouring frames share little of the room (on the test "
