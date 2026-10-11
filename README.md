@@ -90,11 +90,19 @@ way: on a long walkthrough it once joined four separate pieces at scales
 400x apart into one "complete" model. So for video, each global model is
 checked, and if the camera jumps more than 30% of the scene's size between
 consecutive frames the model is rejected (kept in
-`workspace/sparse-global-rejected/`) and the incremental mapper runs
-instead. `--mapper incremental` forces the old behaviour, which is also the
-fallback if the global mapper fails. The log lists each model with how many
-frames it registered. `densify.py` adds a second check: it warns when
-keyframes disagree on metric scale by more than 30%.
+`workspace/sparse-global-rejected/`, with `why.txt`), and so is one that
+placed frames but triangulated almost no point. When the global mapper fails
+on all three seeds it runs once more after COLMAP's view-graph calibration,
+then falls back to the incremental mapper: first with lower triangulation
+angles (`--mapper small-baseline`: 4 degrees for the first pair instead of 16,
+points kept down to 0.5 instead of 1.5, for a camera that barely moves), then
+with COLMAP's own, three seeds each, keeping the best model. The incremental
+mapper picks its first pair at random, and on hard clips the seed decides it
+(one slow slide: all 14 frames with 4,196 points on two seeds of five, 11
+frames and no point on the rest). `--mapper incremental` forces the old
+behaviour. The log lists each model with how many frames it registered.
+`densify.py` adds a second check: it warns when keyframes disagree on metric
+scale by more than 30%.
 
 **Frames COLMAP could not place.** The global mapper places most of a walked
 video precisely and loses the frames around a sharp turn or along a plain wall,
@@ -138,8 +146,11 @@ between them, so a capture can be processed unattended:
 - it reads what each stage produced (frames registered, whether the solve
   fragmented, how well keyframes agree on metric scale, what was detected,
   how flat the walls are) and decides to accept, retry differently, or stop;
-- a weak solve is retried with learned features or the incremental mapper,
-  and whichever attempt registered more frames is kept;
+- a weak solve is retried with the small-baseline incremental mapper or, for
+  a video whose frames show fast turns, three times the frames, and whichever
+  attempt placed the larger share of frames is kept (learned ALIKED features
+  never placed more frames than SIFT on the 16 test clips, so no retry uses
+  them; `reconstruct.py --features aliked` still can);
 - keyframes disagreeing on scale by more than 30% trigger a rebuild of the
   cameras, because that means pieces were joined at different scales;
 - every decision, its evidence, the final measurements and advice for the

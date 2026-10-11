@@ -457,19 +457,21 @@ def triangulate_priors(workspace: Path, images_dir: Path, database: Path, sparse
 
 
 def incremental_mapping(workspace: Path, database: Path, images_dir: Path, sparse_dir: Path,
-                        options: list[str], log: Path) -> None:
-    """COLMAP's incremental mapper, run with a few seeds, keeping the best
-    model's run in sparse_dir. It picks its first pair at random: on the slow
-    studio slide (27975843) seeds 0 and 4 placed all 14 frames with 4,196
-    points and seeds 1-3 placed 11 with none, from the same database. A run
-    that places every frame with points ends the search."""
+                        variants: list[list[str]], log: Path) -> None:
+    """COLMAP's incremental mapper with each set of options in variants and a
+    few seeds, keeping the best model's run in sparse_dir. It picks its first
+    pair at random: on the slow studio slide (27975843) seeds 0 and 4 placed
+    all 14 frames with 4,196 points and seeds 1-3 placed 11 with none, from
+    the same database. A run that places every frame with points ends the
+    search."""
     total = sum(1 for p in images_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
     best, best_score = None, None
-    for seed in INCREMENTAL_MAPPER_SEEDS:
+    tries = [(options, seed) for options in variants for seed in INCREMENTAL_MAPPER_SEEDS]
+    for n, (options, seed) in enumerate(tries):
         print("COLMAP: incremental mapping"
               + (" for small camera moves" if options else "")
               + f" with seed {seed} — this is the slow part")
-        out = workspace / f"sparse-incremental-{seed}"
+        out = workspace / f"sparse-incremental-{n}"
         shutil.rmtree(out, ignore_errors=True)
         out.mkdir()
         run(["colmap", "mapper", "--database_path", str(database), "--image_path", str(images_dir),
@@ -589,10 +591,15 @@ def sparse_reconstruction(
             sparse_dir.mkdir()
         else:
             print("Falling back to the incremental mapper.")
-            mapper = "incremental"
-    if mapper in ("incremental", "small-baseline"):
+            mapper = "fallback"
+    if mapper in ("incremental", "small-baseline", "fallback"):
+        # After a failed global solve, the small-baseline angles first: with
+        # seeds 0-2 they placed every frame of three clips where the default
+        # angles placed none on any seed, and never fewer as the best of three;
+        # the default angles still won seed for seed on one slow slide.
         incremental_mapping(workspace, database, images_dir, sparse_dir,
-                            SMALL_BASELINE_MAPPER if mapper == "small-baseline" else [], log)
+                            {"incremental": [[]], "small-baseline": [SMALL_BASELINE_MAPPER],
+                             "fallback": [SMALL_BASELINE_MAPPER, []]}[mapper], log)
 
     models = solved_models(sparse_dir)
     if not models:
