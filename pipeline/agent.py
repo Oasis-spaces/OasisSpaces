@@ -2681,6 +2681,10 @@ class Agent:
                                     str(f["take"]) if f.get("take") else None)
             elif verdict and verdict.get("abstain"):
                 print(f"    capture advice: Claude abstained ({verdict.get('why', 'no reason given')})")
+            from shot_list import build as build_shots
+            shots = self.safe(build_shots, self.space, self.measured_walls()) or []
+        else:
+            shots = []
 
         report = {
             "space": self.name,
@@ -2695,6 +2699,7 @@ class Agent:
             "judgements": self.judgements,
             "evaluation": row,
             "capture_advice": self.advice,
+            "shots": shots,
         }
         self.space.mkdir(parents=True, exist_ok=True)  # a stage run before its prerequisites
         (self.space / "agent-report.json").write_text(json.dumps(report, indent=2) + "\n")
