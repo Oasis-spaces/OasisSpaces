@@ -133,10 +133,12 @@ def test_the_last_measured_wall_table_and_the_sampling_are_read_back():
         assert bare_agent(space).sampling_metrics() == {}          # nothing extracted yet
         grid = space / "workspace" / "video-grid"
         grid.mkdir(parents=True)
+        # 30 frames, the sharpest of each three candidates at 6 fps, over a 15 s clip.
         (grid / "frames.json").write_text(json.dumps(
-            {"fps": 6.0, "frames": {"frame_00001.jpg": 0, "frame_00002.jpg": 3}}))
+            {"fps": 6.0, "frames": {f"frame_{n + 1:05d}.jpg": 3 * n + 2 for n in range(30)}}))
         sampling = a.sampling_metrics()
-        assert sampling["frames_kept"] == 2 and sampling["candidates_fps"] == 6.0
+        assert sampling["frames_kept"] == 30 and sampling["video_seconds_spanned"] == 15.0
+        assert sampling["kept_per_second"] == 2.0 and "fps" not in json.dumps(sampling)
         assert "not the person" in sampling["note"]
         assert a.capture_map_metrics() == {}                       # no capture map on disk
 

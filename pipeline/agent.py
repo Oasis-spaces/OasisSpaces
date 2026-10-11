@@ -499,8 +499,8 @@ sampling: {sampling}
 how the run ended: {stopped}
 
 How to read them:
-- cameras: frames of total is how many frames the main model holds; models counts real pieces of the capture (leftover_models are fragments of a few frames that do not matter); path_jump is the largest camera move between consecutive frames as a share of the scene, and null means too few points to judge it, not that the camera did not move; rejected_global means the global solve was replaced by the incremental one, and the other numbers describe that replacement.
-- coverage: path_m is the length of the camera's walk and footprint_m2 the floor area of the room, not of the walk; floor shares count a floor cell as seen only from within 5 m. Sizes and floor shares are measured on the map's scale, so when that scale was only guessed they are left out (left_out says so): do not infer them from the rest, and read the capture from counts and directions alone.
+- cameras: frames of total is how many frames the main model holds; models counts real pieces of the capture (leftover_models are fragments of a few frames that do not matter); path_jump is the largest camera move between consecutive frames as a share of the scene, a check that the path has no teleports (a coherent capture stays under 0.1), not a measure of how far the camera travelled, and null means too few points to judge it, not that the camera did not move; rejected_global means the global solve was replaced by the incremental one, and the other numbers describe that replacement.
+- coverage: path_m is the length of the camera's walk and footprint_m2 the floor area of the room, not of the walk; floor shares count a floor cell as seen only from within 5 m. Sizes and floor shares are measured on the map's scale, so when that scale was only guessed they are left out (left_out says so): do not infer them from the rest, read the capture from counts and directions alone, and do not report the guess, which the depth stage replaces with a measurement.
 - sampling: from a video the pipeline chose how many frames to take, not the person; a set of photos is the person's own.
 
 Report findings on this capture:
@@ -2591,8 +2591,9 @@ class Agent:
             return {}
         if isinstance(record, dict) and "guessed" in str(record.get("scale_from", "")):
             record = {k: v for k, v in record.items() if k not in SCALED_MAP_FIELDS}
-            record["left_out"] = ("sizes in metres and floor shares: the scale was guessed, "
-                                  "not measured, so they could be off several times over")
+            record["left_out"] = ("sizes in metres and floor shares: the depth stage measures the "
+                                  "scale, and this map was drawn before it on a guess that could be "
+                                  "off several times over; a guessed scale says nothing about the capture")
         return record
 
     def measured_walls(self) -> dict:
@@ -2609,9 +2610,17 @@ class Agent:
             grid = json.loads((self.space / "workspace" / "video-grid" / "frames.json").read_text())
         except (OSError, ValueError):
             return {}
-        return {"frames_kept": len(grid.get("frames") or {}),
-                "candidates_fps": grid.get("fps"),
-                "note": "the pipeline extracted and chose the frames, not the person"}
+        frames, fps = grid.get("frames") or {}, grid.get("fps")
+        record = {"frames_kept": len(frames),
+                  "note": "the pipeline extracted and chose the frames, not the person"}
+        # Seconds, not the candidates' rate: given 30 frames and "fps 6.0",
+        # the advisor called a 15 s clip "about five seconds of footage".
+        indices = [i for i in frames.values() if isinstance(i, (int, float))]
+        if fps and indices:
+            seconds = (max(indices) + 1) / fps
+            record["video_seconds_spanned"] = round(seconds, 1)
+            record["kept_per_second"] = round(len(frames) / seconds, 1)
+        return record
 
     def advise(self, detection: str, evidence: str, take: str | None = None) -> None:
         """One finding about the capture provided: what is wrong (detection),
