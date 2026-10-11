@@ -390,6 +390,18 @@ def default_retry(first: dict, video: bool) -> tuple[str, str]:
                             "features grip low-texture walls better")
 
 
+def findings_of(verdict: dict | None) -> list[dict]:
+    """The advisor's findings, whatever shape came back: a list as asked, a
+    single finding sent bare, or junk (which is no finding). The report must
+    never be lost to a malformed reply at the end of a long run."""
+    found = (verdict or {}).get("findings")
+    if isinstance(found, dict):
+        found = [found]
+    if not isinstance(found, list):
+        return []
+    return [f for f in found if isinstance(f, dict) and f.get("detection") and f.get("evidence")]
+
+
 def root_cause(output: str) -> str:
     """The failing step's final error line. A step that says only
     "see log: <file>" (COLMAP writes to its own log) is followed there, so
@@ -1863,11 +1875,12 @@ class Agent:
             shutil.rmtree(kept, ignore_errors=True)
             kept_cloud.unlink(missing_ok=True)
         else:
+            placed = ("the retry crashed" if second.get("frames", -1) < 0 else
+                      f"the retry placed {second.get('frames')}/{second.get('total')} "
+                      f"({second.get('fraction', 0):.0%})")
             self.decide("reconstruct", "revert",
-                        f"the retry placed {second.get('frames')}/{second.get('total')} "
-                        f"({second.get('fraction', 0):.0%}) vs {first['frames']}/"
-                        f"{first['total']} ({first['fraction']:.0%}); keeping the first attempt",
-                        second)
+                        placed + f" vs {first['frames']}/{first['total']} "
+                        f"({first['fraction']:.0%}); keeping the first attempt", second)
             # Keep the failed retry's COLMAP log: it is the only record of why.
             if (workspace / "colmap.log").exists():
                 shutil.copy2(workspace / "colmap.log", self.space / "retry-failed-colmap.log")
@@ -2522,7 +2535,7 @@ class Agent:
                 "a closer pass around each piece, lights on")
         if (row.get("wall_rms_pct") or 0) > NOISY_WALL_RMS_PCT:
             self.advise(
-                f"This capture's walls came out rough.",
+                "This capture's walls came out rough.",
                 f"wall rms {row['wall_rms_pct']:.2f}% of the room's size",
                 "a pass along each blank wall with some texture in frame "
                 "(painter's tape or sticky notes)")
@@ -2705,10 +2718,9 @@ class Agent:
             else:
                 verdict = None
             if verdict and not verdict.get("abstain"):
-                for f in (verdict.get("findings") or [])[:4]:
-                    if isinstance(f, dict) and f.get("detection") and f.get("evidence"):
-                        self.advise(str(f["detection"]), str(f["evidence"]),
-                                    str(f["take"]) if f.get("take") else None)
+                for f in findings_of(verdict)[:4]:
+                    self.advise(str(f["detection"]), str(f["evidence"]),
+                                str(f["take"]) if f.get("take") else None)
             elif verdict and verdict.get("abstain"):
                 print(f"    capture advice: Claude abstained ({verdict.get('why', 'no reason given')})")
             from shot_list import build as build_shots
@@ -2764,7 +2776,7 @@ class Agent:
                     print(f"        take: {item['take']}")
         print(f"  report: {self.space / 'agent-report.json'}")
         if stopped_at:
-            return 1 if self.gates[stopped_at]["status"] == "stop" else 3
+            return 1 if (self.gates.get(stopped_at) or {}).get("status") == "stop" else 3
         return 0
 
 

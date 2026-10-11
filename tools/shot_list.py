@@ -60,7 +60,7 @@ def wall_passes(shapes: dict, walls_measured: dict, units: float | None) -> list
         inferred = p.get("source") == "inferred"
         weak = bool(measured) and not measured.get("occluded") \
             and measured.get("support", 1.0) < LOW_SUPPORT
-        if not inferred and not weak:
+        if (not inferred and not weak) or p.get("half_a") is None:
             continue
         length = metre(2 * float(p["half_a"]))
         passes.append({
@@ -80,6 +80,8 @@ def build(space: Path, walls_measured: dict | None = None, log=print) -> list[di
     try:
         capture = json.loads((space / "capture-map.json").read_text())
     except (OSError, ValueError):
+        return []
+    if not isinstance(capture, dict):
         return []
     try:
         shapes = json.loads((space / "shapes.json").read_text())

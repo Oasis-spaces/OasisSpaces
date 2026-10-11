@@ -64,6 +64,16 @@ def test_the_last_measured_wall_table_and_the_sampling_are_read_back():
         assert a.capture_map_metrics() == {}                       # no capture map on disk
 
 
+def test_a_malformed_advisor_reply_never_loses_the_report():
+    from agent import findings_of
+    good = {"detection": "d", "evidence": "e", "take": "t"}
+    assert findings_of({"findings": [good, {"detection": "x"}, "junk", 3]}) == [good]
+    assert findings_of({"findings": good}) == [good]       # a single finding sent bare
+    assert findings_of({"findings": {"nested": "junk"}}) == []
+    assert findings_of({"findings": "words"}) == []
+    assert findings_of(None) == [] and findings_of({}) == []
+
+
 def test_the_default_retry_is_denser_sampling_on_a_thin_video_solve():
     from agent import default_retry
     action, why = default_retry({"total": 12, "fraction": 0.17}, video=True)
