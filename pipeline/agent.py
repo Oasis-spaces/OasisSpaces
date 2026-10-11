@@ -374,6 +374,22 @@ def keep_filled(before: dict, after: dict | None) -> tuple[bool, str]:
                   f"{before.get('reprojection') or 0:.2f}")
 
 
+DENSER_FACTOR = 3         # a denser retry samples the video at this multiple of the fps
+DENSER_BELOW_FRAMES = 30  # a video solve this thin tries denser sampling before new features
+
+
+def default_retry(first: dict, video: bool) -> tuple[str, str]:
+    """The retry to try when the judge has no say. On a video that kept few
+    frames, consecutive views share too little whatever the features, so
+    denser sampling comes first (the white-bedroom clip failed on overlap,
+    and its ALIKED retry changed nothing); otherwise learned features."""
+    if video and (first.get("total") or 0) < DENSER_BELOW_FRAMES:
+        return "retry_denser", (f"only {first.get('total')} frames were sampled from the "
+                                "video; denser sampling gives consecutive views overlap")
+    return "retry_aliked", (f"only {first['fraction']:.0%} of frames placed; learned "
+                            "features grip low-texture walls better")
+
+
 def root_cause(output: str) -> str:
     """The failing step's final error line. A step that says only
     "see log: <file>" (COLMAP writes to its own log) is followed there, so
@@ -665,10 +681,15 @@ class Agent:
             "You are running a photogrammetry pipeline on a phone video of a room. "
             "COLMAP solved the camera positions using SIFT features and a global "
             f"mapper, and reported: {json.dumps(metrics)}. A 'model' is one connected "
-            "reconstruction, so more than one means the capture broke into pieces.\n"
+            "reconstruction, so more than one means the capture broke into pieces. "
+            "The pipeline sampled the frame count from the video; the person did "
+            "not choose it.\n"
             "The attached frames come from the start, middle and end of the capture.\n"
             "Choose exactly one action:\n"
             '  "accept": good enough to carry on;\n'
+            '  "retry_denser": redo with three times as many frames sampled from the '
+            "same video, so consecutive views overlap — the first thing to try when "
+            "few frames were kept and they share too little;\n"
             '  "retry_aliked": redo with learned features (ALIKED), which find far '
             "more on textureless surfaces but take about 2.5 times as long to "
             "extract;\n"
@@ -1796,23 +1817,26 @@ class Agent:
 
         # Weak solve. Claude looks at the capture itself and picks the retry;
         # the measurement still has the final say on an obviously broken model.
-        action = "retry_aliked"
-        why = ("only "
-               f"{first['fraction']:.0%} of frames placed; learned features grip "
-               "low-texture walls better")
+        action, why = default_retry(first, self.source.is_file())
         verdict = self.safe(self.capture_verdict, first)
-        if verdict and verdict.get("action") in {"accept", "retry_aliked", "retry_incremental"}:
+        if verdict and verdict.get("action") in {"accept", "retry_denser", "retry_aliked",
+                                                 "retry_incremental"}:
             action = verdict["action"]
             why = f"Claude: {str(verdict.get('why', '')).strip()}"
             if action == "accept" and first["fraction"] < 0.35:
-                action = "retry_aliked"
+                action, retry_why = default_retry(first, self.source.is_file())
                 why = (f"Claude wanted to accept, but only {first['fraction']:.0%} of "
-                       "frames were placed, so the measurement wins")
+                       f"frames were placed, so the measurement wins: {retry_why}")
+            if action == "retry_denser" and not self.source.is_file():
+                action = "retry_aliked"
+                why += " (photos cannot be resampled, so learned features instead)"
         if action == "accept":
             self.decide("reconstruct", "accept", why, first, first_seconds)
             return True
-        retry_args = (["--features", "aliked"] if action == "retry_aliked"
-                      else ["--mapper", "incremental"])
+        retry_fps = self.fps * DENSER_FACTOR if action == "retry_denser" else self.fps
+        retry_args = {"retry_denser": [],
+                      "retry_aliked": ["--features", "aliked"],
+                      "retry_incremental": ["--mapper", "incremental"]}[action]
         self.decide("reconstruct", action, why, first, first_seconds)
         workspace = self.space / "workspace"
         kept = self.space / "workspace-sift"
@@ -1824,20 +1848,26 @@ class Agent:
 
         ok, _ = self.run(
             [sys.executable, str(ROOT / "pipeline/reconstruct.py"), str(self.source),
-             "--name", self.name, "--fps", str(self.fps), *retry_args],
-            "reconstruct", " ".join(retry_args))
-        second = self.reconstruction_metrics() if ok else {"frames": -1, "models": 0}
+             "--name", self.name, "--fps", str(retry_fps), *retry_args],
+            "reconstruct", " ".join(retry_args) or f"{retry_fps:g} fps ({DENSER_FACTOR}x denser)")
+        second = self.reconstruction_metrics() if ok \
+            else {"frames": -1, "total": 0, "fraction": -1.0, "models": 0}
 
-        if ok and second["frames"] >= first["frames"]:
+        # Fractions, not frame counts: a denser retry has more frames in total,
+        # so registering more of them proves nothing by itself.
+        if ok and second["fraction"] >= first["fraction"]:
             self.decide("reconstruct", "accept",
-                        f"the retry registered {second['frames']} frames vs "
-                        f"{first['frames']} on the first attempt", second)
+                        f"the retry placed {second['frames']}/{second['total']} "
+                        f"({second['fraction']:.0%}) vs {first['frames']}/{first['total']} "
+                        f"({first['fraction']:.0%}) on the first attempt", second)
             shutil.rmtree(kept, ignore_errors=True)
             kept_cloud.unlink(missing_ok=True)
         else:
             self.decide("reconstruct", "revert",
-                        f"the retry registered {second.get('frames')} frames vs "
-                        f"{first['frames']}; keeping the first attempt", second)
+                        f"the retry placed {second.get('frames')}/{second.get('total')} "
+                        f"({second.get('fraction', 0):.0%}) vs {first['frames']}/"
+                        f"{first['total']} ({first['fraction']:.0%}); keeping the first attempt",
+                        second)
             # Keep the failed retry's COLMAP log: it is the only record of why.
             if (workspace / "colmap.log").exists():
                 shutil.copy2(workspace / "colmap.log", self.space / "retry-failed-colmap.log")

@@ -64,6 +64,16 @@ def test_the_last_measured_wall_table_and_the_sampling_are_read_back():
         assert a.capture_map_metrics() == {}                       # no capture map on disk
 
 
+def test_the_default_retry_is_denser_sampling_on_a_thin_video_solve():
+    from agent import default_retry
+    action, why = default_retry({"total": 12, "fraction": 0.17}, video=True)
+    assert action == "retry_denser" and "12 frames" in why
+    action, _ = default_retry({"total": 120, "fraction": 0.4}, video=True)
+    assert action == "retry_aliked"
+    action, _ = default_retry({"total": 12, "fraction": 0.17}, video=False)
+    assert action == "retry_aliked"                 # photos cannot be resampled
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):
