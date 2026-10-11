@@ -344,6 +344,31 @@ def test_a_front_flagged_by_shapes_is_not_measured_at_all():
     assert "W1" not in measured and "W0" in measured
 
 
+def test_an_unfilmed_wall_base_does_not_cost_a_real_wall_its_support():
+    # The first real clip's signature: the floor was never filmed at the
+    # walls (never seen 79%), so a seam-based support read zero on the main
+    # wall while a knee-high sofa-back plane - all base, no body - was the
+    # only "wall" with support. Support now comes from the body standing.
+    rng = np.random.default_rng(8)
+    def sheet(n, xr, yr, zr):
+        return np.column_stack([rng.uniform(*xr, n), rng.uniform(*yr, n), rng.uniform(*zr, n)])
+    floor_mid = sheet(2000, (4, 16), (3, 9), (0.0, 0.05))          # only the middle of the floor
+    wall = sheet(2500, (0, 20), (13.95, 14.05), (4.0, 20.0))       # filmed mid-wall and up only
+    sofa_back = sheet(700, (4, 14), (7.95, 8.05), (0.0, 0.65 * UNITS / 9 * 9 / 2.5))
+    sofa_back[:, 2] = rng.uniform(0.0, 0.65 * UNITS, len(sofa_back))   # knee height
+    P = np.vstack([floor_mid, wall, sofa_back])
+    cams = np.array([[6.0, 4.0], [10.0, 5.0], [14.0, 4.0]])
+    real = {"kind": "wall", "normal": [0.0, 1.0, 0.0], "center": [10.0, 14.0, 12.0],
+            "axis_a": [1.0, 0.0, 0.0], "half_a": 10.0, "points": 2500}
+    slab = {"kind": "wall", "normal": [0.0, 1.0, 0.0], "center": [9.0, 8.0, 2.9],
+            "axis_a": [1.0, 0.0, 0.0], "half_a": 5.0, "points": 700}
+    measured_real = rs.wall_support(P, real, 0.0, cams, UNITS, [slab])
+    measured_slab = rs.wall_support(P, slab, 0.0, cams, UNITS, [real])
+    assert measured_real["seam"] == 0.0                  # honest: the base was never filmed
+    assert measured_real["support"] > 0.6                # ...but the wall measurably stands
+    assert not measured_slab["tall"] and measured_slab["support"] == 0.0
+
+
 def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():
     shapes = room()
     shapes["boxes"] = [dict(CUPBOARD, detected="wardrobe"),                       # another storage name: same kind

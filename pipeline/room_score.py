@@ -23,7 +23,8 @@ and a pass that lowers the score is rolled back, whatever the judge said.
              (the phone's detector once named the pan's door a wardrobe).
   missing    The share of the measured wall support that the built room
              drops. A wall's support is read off the dense cloud in place:
-             it meets the floor along its run (seam), little of the room
+             its body stands along its run and reaches wall height (a
+             knee-high sofa-back plane fails this), little of the room
              lies beyond it (a bogus wall through the middle fails this),
              and no other measured wall stands between it and the cameras
              (a next room's wall glimpsed through a door fails this). So a
@@ -74,9 +75,10 @@ EPS = 0.02                # scores closer than this are the same room
 # Wall support, measured on the dense cloud in the shapes frame. Metres where
 # densify recorded the scale; shares of the cloud's extent where it did not
 # (the same fallback shapes.py uses).
-SEAM_BINS = 12            # the wall's run, split into bins: how much of it meets the floor
-SEAM_BIN_POINTS = 3       # a bin is met with at least this many points at the wall's base
+SEAM_BINS = 12            # the wall's run, split into bins: where it stands, where it meets the floor
+SEAM_BIN_POINTS = 3       # a bin counts with at least this many points in it
 SEAM_BAND_M = 0.30        # the floor band reaches this high up the wall
+MIN_WALL_BODY_M = 1.2     # a wall reaches at least this high somewhere; lower planes are furniture
 PLANE_BAND_M = 0.10       # a point this close to the plane lies on the wall
 CLEAR_M = 0.30            # a point this far beyond the wall is outside the room it bounds
 OCCLUDE_M = 0.40          # a parallel measured wall this much nearer the cameras hides this one
@@ -216,8 +218,19 @@ def wall_support(P: np.ndarray, plane: dict, floor_z: float, cameras: np.ndarray
                  unit: float, others: list[dict] = ()) -> dict:
     """One wall plane measured in place against the cloud `P` (shapes frame).
 
-    seam      the share of the wall's run with points at its base, in the
-              floor band: a real wall meets the floor along its length.
+    body      the share of the wall's run with points standing above the
+              floor band: a wall is a surface that stands, and support
+              comes from where it measurably stands. (The first stock clip
+              never filmed its wall-floor seams — floor never seen 79% —
+              so a seam-based support read zero on a 187,000-point wall
+              and a knee-high sofa-back plane, all base and no body, was
+              the only "wall" with support.)
+    tall      somewhere along its run the wall reaches MIN_WALL_BODY_M
+              above the floor; a plane that never does is furniture,
+              whatever its footprint, and holds no support.
+    seam      the share of the run with points at the base, in the floor
+              band: reported as evidence (the plan's walls-meet-the-floor
+              check where the base was filmed), not a support factor.
     interior  the share of the points in the wall's own corridor lying
               beyond it (outward of the cameras): a bogus wall through the
               room has the room itself beyond it. Measured within the run,
@@ -229,7 +242,7 @@ def wall_support(P: np.ndarray, plane: dict, floor_z: float, cameras: np.ndarray
               rectangle, so a short stub cannot hide a long wall, and a
               wall fitted across an alcove's opening (where it has no
               points) does not hide the alcove's real back wall.
-    support   seam * (1 - interior), 0 when occluded.
+    support   body * (1 - interior); 0 when occluded or not tall.
     """
     def frame(p):
         n = np.asarray(p["normal"], float)
@@ -243,7 +256,12 @@ def wall_support(P: np.ndarray, plane: dict, floor_z: float, cameras: np.ndarray
         return (np.abs(t) <= half) & (np.abs(d) < PLANE_BAND_M * unit) \
             & (P[:, 2] > floor_z + SEAM_BAND_M * unit)
 
-    def seam_interior(n, a, c, half):
+    def coverage(t, picked, half):
+        bins = np.floor((t[picked] + half) / (2 * half) * SEAM_BINS).astype(int) \
+            .clip(0, SEAM_BINS - 1)
+        return float((np.bincount(bins, minlength=SEAM_BINS) >= SEAM_BIN_POINTS).sum() / SEAM_BINS)
+
+    def measure(n, a, c, half):
         inner = float(np.sign(np.median(
             (np.column_stack([cameras, np.full(len(cameras), c[2])]) - c) @ n)))
         inner = inner or 1.0
@@ -251,16 +269,18 @@ def wall_support(P: np.ndarray, plane: dict, floor_z: float, cameras: np.ndarray
         d = (P - c) @ n
         in_run = np.abs(t) <= half
         on_wall = in_run & (np.abs(d) < PLANE_BAND_M * unit)
+        standing = on_wall & (P[:, 2] > floor_z + SEAM_BAND_M * unit)
         at_base = on_wall & (P[:, 2] > floor_z - PLANE_BAND_M * unit) \
             & (P[:, 2] < floor_z + SEAM_BAND_M * unit)
-        bins = np.floor((t[at_base] + half) / (2 * half) * SEAM_BINS).astype(int) \
-            .clip(0, SEAM_BINS - 1)
-        seam = float((np.bincount(bins, minlength=SEAM_BINS) >= SEAM_BIN_POINTS).sum() / SEAM_BINS)
+        body = coverage(t, standing, half)
+        seam = coverage(t, at_base, half)
+        tall = int((standing & (P[:, 2] > floor_z + MIN_WALL_BODY_M * unit)).sum()) \
+            >= SEAM_BIN_POINTS
         beyond = in_run & (-inner * d > CLEAR_M * unit)
-        return seam, float(beyond.sum() / max(int(in_run.sum()), 1)), inner
+        return body, tall, seam, float(beyond.sum() / max(int(in_run.sum()), 1)), inner
 
     n, a, c, half = frame(plane)
-    seam, interior, inner = seam_interior(n, a, c, half)
+    body_cover, tall, seam, interior, inner = measure(n, a, c, half)
 
     occluded = False
     for other in others:
@@ -269,20 +289,16 @@ def wall_support(P: np.ndarray, plane: dict, floor_z: float, cameras: np.ndarray
             continue
         if float((c2 - c) @ (inner * n)) <= OCCLUDE_M * unit:
             continue                       # not clearly on the cameras' side of this wall
-        if seam_interior(n2, a2, c2, half2)[1] > OCCLUDER_MAX_INTERIOR:
+        if measure(n2, a2, c2, half2)[3] > OCCLUDER_MAX_INTERIOR:
             continue                       # the room lies beyond it: no wall, no occluder
         t_mine = (P[body(n2, a2, c2, half2)] - c) @ a
-        t_mine = t_mine[np.abs(t_mine) <= half]
-        bins = np.floor((t_mine + half) / (2 * half) * SEAM_BINS).astype(int) \
-            .clip(0, SEAM_BINS - 1)
-        covered = float((np.bincount(bins, minlength=SEAM_BINS) >= SEAM_BIN_POINTS).sum()
-                        / SEAM_BINS)
-        if covered >= OCCLUDE_OVERLAP:
+        picked = np.abs(t_mine) <= half
+        if coverage(t_mine, picked, half) >= OCCLUDE_OVERLAP:
             occluded = True
             break
-    support = 0.0 if occluded else seam * (1.0 - interior)
-    return {"seam": round(seam, 3), "interior": round(interior, 3),
-            "occluded": occluded, "support": round(support, 3)}
+    support = 0.0 if occluded or not tall else body_cover * (1.0 - interior)
+    return {"body": round(body_cover, 3), "tall": tall, "seam": round(seam, 3),
+            "interior": round(interior, 3), "occluded": occluded, "support": round(support, 3)}
 
 
 class WallEvidence:
