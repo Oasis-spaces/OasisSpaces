@@ -534,6 +534,12 @@ phone (no model calls, no network while recording). Build and install with
 
 - **Before recording:** two tiers of tips, "for a good scan" and "for the best
   scan", from `capture-rules.json`.
+- **While recording, exposure and white balance are held** where they had
+  settled when recording started (ARKit's
+  `configurableCaptureDeviceForPrimaryCamera`), and released when it stops.
+  Left automatic, the same wall comes out brighter or warmer from frame to
+  frame and the splat learns that as blotches; locking both is what
+  splatting practitioners do for interiors.
 - **While recording:** one message at a time from the rules in
   `Packages/CaptureRules` (too fast, blur for the exposure, turning on the
   spot, too dark, window glare, too close, plain surfaces, someone in view,

@@ -1,4 +1,5 @@
 import ARKit
+import AVFoundation
 import SceneKit
 import SwiftUI
 import UIKit
@@ -113,8 +114,32 @@ final class CaptureController: NSObject, ARSessionDelegate {
     }
 
     func pause() {
+        holdExposure(false)
         session.pause()
         UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    /// Exposure and white balance held for the length of a recording, at what
+    /// they had settled to when it started. Left automatic, the same wall comes
+    /// out brighter or warmer from frame to frame, and the splat learns those
+    /// shifts as blotches and floaters; locking both is what splatting
+    /// practitioners do for interiors.
+    private func holdExposure(_ hold: Bool) {
+        guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return }
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            return
+        }
+        let exposure: AVCaptureDevice.ExposureMode = hold ? .locked : .continuousAutoExposure
+        if device.isExposureModeSupported(exposure) {
+            device.exposureMode = exposure
+        }
+        let balance: AVCaptureDevice.WhiteBalanceMode = hold ? .locked : .continuousAutoWhiteBalance
+        if device.isWhiteBalanceModeSupported(balance) {
+            device.whiteBalanceMode = balance
+        }
+        device.unlockForConfiguration()
     }
 
     func startRecording() {
@@ -125,6 +150,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
             } catch {
                 return
             }
+            self.holdExposure(true)
             self.engine.startRecording()
             self.mapBuilder.reset()
             self.labelMemory.reset()
@@ -150,6 +176,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
         queue.async {
             guard self.recording, let recorder = self.recorder else { return }
             self.recording = false
+            self.holdExposure(false)
             let (summary, advice) = self.engine.finish()
             DispatchQueue.main.async {
                 self.state.isRecording = false
