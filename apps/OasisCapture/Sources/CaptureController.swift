@@ -182,13 +182,16 @@ final class CaptureController: NSObject, ARSessionDelegate {
                 self.state.isRecording = false
                 self.state.isFinishing = true
             }
+            let keyframes = (self.session.currentFrame?.anchors ?? []).filter(Recorder.isKeyframe)
             recorder.finish(summary: summary, advice: advice, config: self.config, format: self.formatName,
-                            objectsSeen: self.secondsSeen, map: self.mapBuilder.build()) { folder in
+                            objectsSeen: self.secondsSeen, map: self.mapBuilder.build(),
+                            anchors: keyframes) { folder in
                 self.state.isFinishing = false
                 self.state.result = CaptureResult(folder: folder, summary: summary, advice: advice,
                                                   objectsSeen: self.state.detected, map: self.latestMap)
             }
             self.recorder = nil
+            keyframes.forEach { self.session.remove(anchor: $0) }
         }
     }
 
@@ -208,7 +211,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
         scene.submit(frame) { [weak self] understanding in self?.understood(understanding) }
 
         if recording {
-            recorder?.append(frame)
+            if let anchor = recorder?.append(frame) { session.add(anchor: anchor) }
             if frame.camera.trackingState == .normal {
                 path.append(SIMD2(sample.position.x, sample.position.z))
                 addScanPoints(frame)
@@ -247,6 +250,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         for case let plane as ARPlaneAnchor in anchors { planeChanged(plane) }
+        if recording { recorder?.anchorsUpdated(anchors) }
     }
 
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {

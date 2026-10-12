@@ -1,5 +1,6 @@
 import ARKit
 import AVFoundation
+import CoreMotion
 import UIKit
 import CaptureRules
 
@@ -7,6 +8,14 @@ import CaptureRules
 /// frames.jsonl with the phone's camera pose and intrinsics for every frame,
 /// then capture.json with the recording's report. The pipeline can use the
 /// poses and metric scale instead of estimating them.
+///
+/// For refining those poses on the phone (docs/on-device-plan-2026-10.md) it
+/// also keeps the motion sensors' samples between frames (`imu` on each frame),
+/// flags a frame whose pose leapt from the last (`jump`), and leaves an anchor
+/// at the camera every `anchorEvery` frames. ARKit moves its anchors when it
+/// corrects its map, so where they end up (capture.json's keyframeAnchors) are
+/// corrected keyframe poses; whether an iPhone without LiDAR moves them at all
+/// is what the first recordings will show.
 final class Recorder {
     let folder: URL
     private var writer: AVAssetWriter?
@@ -17,6 +26,24 @@ final class Recorder {
     private(set) var framesWritten = 0
     private(set) var framesDropped = 0
 
+    /// An anchor at the camera every this many written frames (twice a second at 30 fps).
+    static let anchorEvery = 15
+    /// A pose this far from the last frame's is a jump (relocalising), not a hand moving.
+    static let jumpMetres: Float = 0.15
+    private struct Keyframe {
+        let frame: Int
+        let placed: simd_float4x4
+        var last: simd_float4x4
+        var moves = 0
+    }
+    private var keyframes: [UUID: Keyframe] = [:]
+    private var lastPosition: SIMD3<Float>?
+
+    private let motion = CMMotionManager()
+    private let motionQueue = OperationQueue()
+    private let motionLock = NSLock()
+    private var motionSamples: [[Double]] = []
+
     init() throws {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
@@ -25,29 +52,73 @@ final class Recorder {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: folder.appendingPathComponent("frames.jsonl").path, contents: nil)
         poses = try FileHandle(forWritingTo: folder.appendingPathComponent("frames.jsonl"))
+        // 100 Hz; the samples carry the same clock as ARFrame.timestamp (seconds since boot).
+        motionQueue.maxConcurrentOperationCount = 1
+        if motion.isDeviceMotionAvailable {
+            motion.deviceMotionUpdateInterval = 1.0 / 100
+            motion.startDeviceMotionUpdates(to: motionQueue) { [weak self] data, _ in
+                guard let self, let data else { return }
+                let g = data.rotationRate, a = data.userAcceleration, down = data.gravity
+                let sample = [data.timestamp, g.x, g.y, g.z, a.x + down.x, a.y + down.y, a.z + down.z]
+                self.motionLock.lock()
+                self.motionSamples.append(sample)
+                self.motionLock.unlock()
+            }
+        }
     }
 
-    /// Appends a frame (called on the capture queue).
-    func append(_ frame: ARFrame) {
+    /// Appends a frame (called on the capture queue). Returns an anchor for the
+    /// caller to add to the session when this frame is a keyframe.
+    @discardableResult
+    func append(_ frame: ARFrame) -> ARAnchor? {
         let buffer = frame.capturedImage
         if writer == nil { setUpWriter(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer)) }
-        guard let writer, let input, let adaptor else { return }
+        guard let writer, let input, let adaptor else { return nil }
         let time = CMTime(seconds: frame.timestamp, preferredTimescale: 600)
         if !started {
-            guard writer.startWriting() else { return }
+            guard writer.startWriting() else { return nil }
             writer.startSession(atSourceTime: time)
             started = true
         }
         guard input.isReadyForMoreMediaData else {
             framesDropped += 1
-            return
+            return nil
         }
         guard adaptor.append(buffer, withPresentationTime: time) else {
             framesDropped += 1
-            return
+            return nil
         }
         framesWritten += 1
         writePose(frame)
+        guard (framesWritten - 1) % Self.anchorEvery == 0 else { return nil }
+        let anchor = ARAnchor(name: "keyframe-\(framesWritten - 1)", transform: frame.camera.transform)
+        keyframes[anchor.identifier] = Keyframe(frame: framesWritten - 1, placed: frame.camera.transform,
+                                                last: frame.camera.transform)
+        return anchor
+    }
+
+    /// Counts the times ARKit moved a keyframe anchor (called on the capture
+    /// queue). An update that leaves it within half a millimetre is not a move.
+    func anchorsUpdated(_ anchors: [ARAnchor]) {
+        for anchor in anchors {
+            guard var keyframe = keyframes[anchor.identifier] else { continue }
+            let t = anchor.transform, last = keyframe.last
+            let shift = max(simd_distance(t.columns.3, last.columns.3),
+                            simd_distance(t.columns.0, last.columns.0), simd_distance(t.columns.2, last.columns.2))
+            guard shift > 0.0005 else { continue }
+            keyframe.last = t
+            keyframe.moves += 1
+            keyframes[anchor.identifier] = keyframe
+        }
+    }
+
+    /// Whether an anchor belongs to a recording's keyframes.
+    static func isKeyframe(_ anchor: ARAnchor) -> Bool {
+        anchor.name?.hasPrefix("keyframe-") == true
+    }
+
+    private static func columnMajor(_ t: simd_float4x4) -> [Float] {
+        [t.columns.0, t.columns.1, t.columns.2, t.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
     }
 
     private func setUpWriter(width: Int, height: Int) {
@@ -75,7 +146,7 @@ final class Recorder {
         let camera = frame.camera
         let t = camera.transform
         let k = camera.intrinsics
-        let matrix = [t.columns.0, t.columns.1, t.columns.2, t.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
+        let matrix = Self.columnMajor(t)
         var line: [String: Any] = [
             "t": frame.timestamp,
             "frame": framesWritten - 1,
@@ -87,6 +158,16 @@ final class Recorder {
             "exposure": camera.exposureDuration,
         ]
         if let light = frame.lightEstimate { line["ambient"] = light.ambientIntensity }
+        let position = SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        if let last = lastPosition, simd_distance(last, position) > Self.jumpMetres { line["jump"] = true }
+        lastPosition = position
+        // The motion sensors since the last frame: [t, gyro x y z (rad/s, bias-corrected),
+        // acceleration x y z (g, gravity included)], device axes.
+        motionLock.lock()
+        let samples = motionSamples
+        motionSamples.removeAll(keepingCapacity: true)
+        motionLock.unlock()
+        if !samples.isEmpty { line["imu"] = samples }
         // The tracking's points, every tenth frame (about as often as frames are analysed), so that a
         // recording can be played back through the perception on a Mac exactly as the phone had it
         // (tools/phone_capture_export.py). Millimetres; at most 300 of them.
@@ -119,11 +200,25 @@ final class Recorder {
         }
     }
 
-    /// Finishes the video and writes capture.json. Calls back on the main queue.
+    /// Finishes the video and writes capture.json. `anchors` are the session's
+    /// anchors at the end. Calls back on the main queue.
     func finish(summary: CaptureSummary, advice: [Rule], config: RuleConfig, format: String,
-                objectsSeen: [String: Double], map: RoomMap, completion: @escaping (URL?) -> Void) {
+                objectsSeen: [String: Double], map: RoomMap, anchors: [ARAnchor],
+                completion: @escaping (URL?) -> Void) {
+        motion.stopDeviceMotionUpdates()
+        motionQueue.waitUntilAllOperationsAreFinished()
         try? poses?.close()
         poses = nil
+        // Each keyframe's camera where it was placed and where ARKit has it now
+        // (camera to world, column-major, as in frames.jsonl), and how often it moved.
+        let finalAnchors = Dictionary(anchors.map { ($0.identifier, $0.transform) }, uniquingKeysWith: { a, _ in a })
+        var keyframeAnchors: [[String: Any]] = []
+        for (id, keyframe) in keyframes.sorted(by: { $0.value.frame < $1.value.frame }) {
+            guard let now = finalAnchors[id] else { continue }
+            let entry: [String: Any] = ["frame": keyframe.frame, "placed": Self.columnMajor(keyframe.placed),
+                                        "final": Self.columnMajor(now), "updates": keyframe.moves]
+            keyframeAnchors.append(entry)
+        }
         let write = { [folder, framesWritten, framesDropped] in
             var device = utsname()
             uname(&device)
@@ -137,6 +232,7 @@ final class Recorder {
                 "videoFormat": format,
                 "framesWritten": framesWritten,
                 "framesDropped": framesDropped,
+                "keyframeAnchors": keyframeAnchors,
                 "summary": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(summary))) ?? [:],
                 "advice": advice.map { ["rule": $0.rawValue, "message": config.message($0)] },
                 // What the on-device segmentation saw, and for how many seconds.

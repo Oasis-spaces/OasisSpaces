@@ -760,6 +760,13 @@ phone (no model calls, no network while recording). Build and install with
 - **After recording:** a review (length, walls covered, floor shown, moments
   to watch, what was placed), then `video.mov` (HEVC, 4K where offered),
   `frames.jsonl` (ARKit pose and intrinsics per frame) and `capture.json`.
+  For refining poses on the phone, each frame also carries the motion sensors'
+  100 Hz samples since the last one (`imu`: time, gyro, acceleration), and a
+  `jump` flag when the pose leapt more than 15 cm from the last frame. Twice a
+  second an `ARAnchor` is left at the camera. ARKit moves anchors when it
+  corrects its map, so `capture.json`'s `keyframeAnchors` gives each one's pose
+  as placed and as ARKit has it at the end, with how often it moved. Not yet
+  built or run on a phone.
 - **With the Mac:** the Scans tab sends a recording to Splat Viewer on the same
   Wi-Fi (`apps/OasisLink`: Bonjour discovery, pairing by code or by a shared
   account), follows the analysis stage by stage, and shows the room renders
