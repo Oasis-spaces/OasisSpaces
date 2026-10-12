@@ -58,10 +58,11 @@ MIN_SOLVE_POINTS = 100
 # The incremental mapper's triangulation angles for footage whose camera moves
 # little against the room's depth (a slow slide, a pan from one spot). COLMAP's
 # defaults (16 degrees for the first pair, 1.5 to keep a point) can refuse to
-# start such a model: with seeds 0-2, these placed all 9 frames of the hotel
-# suite (29681899) where the defaults placed none on any seed, and all 9 of a
-# hotel bedroom (29814959) where the defaults placed 4, 9 and 4. Lowering only
-# the first pair's angle was not enough. COLMAP's FAQ gives the same advice for
+# start such a model. On the 16 test clips with seeds 0-2, these placed more
+# frames than the defaults in 22 runs and fewer in 2; as the best of three
+# seeds, more on 6 clips and fewer on none (every frame of 29681899, 7614541
+# and 7749088, where the defaults placed none on any seed). Lowering only the
+# first pair's angle was not enough. COLMAP's FAQ gives the same advice for
 # scenes filmed from far away.
 SMALL_BASELINE_MAPPER = ["--Mapper.init_min_tri_angle", "4",
                          "--Mapper.filter_min_tri_angle", "0.5",
