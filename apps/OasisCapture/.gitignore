@@ -7,3 +7,4 @@ Resources/RoomObjects.mlpackage
 Resources/MaskEncoder.mlpackage
 Resources/MaskDecoder.mlpackage
 Resources/RoomMetricDepth.mlpackage
+Resources/SurfaceFill.mlpackage

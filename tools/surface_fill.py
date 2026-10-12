@@ -42,6 +42,7 @@ sys.path.insert(0, str(ROOT / "pipeline"))
 sys.path.insert(0, str(ROOT / "tools"))
 
 LAMA_PATH = Path.home() / ".cache" / "oasisspaces" / "big-lama.pt"
+LAMA_WORK_PX = 512          # LaMa fills at most this many pixels across (see inpaint)
 PHOTO_CELL_M = 0.005        # the surface photo's resolution
 BLOB_SPACING_M = 0.012      # fill Gaussians this far apart
 FEATHER_M = 0.20            # fade into the filmed surface over this distance
@@ -247,22 +248,40 @@ def photograph(space: Path, room, surfaces: list, log=print, occluders=None,
 
 # ---------------------------------------------------------------- inpaint
 def inpaint(photo: np.ndarray, unknown: np.ndarray, log=print) -> np.ndarray:
-    """LaMa fills `unknown` pixels of an HxWx3 0-255 photo."""
+    """LaMa fills `unknown` pixels of an HxWx3 0-255 photo, working with the
+    longer side at most LAMA_WORK_PX. At the photo's full size (5 mm a pixel, so
+    a 5 m floor is 1000 px) a large hole, a sofa's footprint or the unseen floor
+    at the camera's feet, came back as a grey waffle; at 512 the same holes carry
+    on the planks and the shiplap (+3.6 dB in footprint-sized holes on frames
+    from 8 clips; 0.3 dB worse only in thin strips). The fill reaches the splat
+    as blobs 12 mm apart, so the finer pixels showed nothing there; a mixed
+    scene's textures are softer where filled, which beats the waffle. The
+    phone's Core ML LaMa is fixed at 512 too (apps/OasisCapture/scripts/convert_fill_lama.py)."""
     import torch
 
     if not LAMA_PATH.exists():
         sys.exit(f"LaMa weights not found at {LAMA_PATH}")
     model = torch.jit.load(str(LAMA_PATH), map_location="cpu").eval()
     H, W = unknown.shape
-    ph, pw = (-H) % 8, (-W) % 8
-    img = np.pad(np.clip(photo, 0, 255) / 255.0, ((0, ph), (0, pw), (0, 0)), mode="reflect")
-    mask = np.pad(unknown.astype(np.float32), ((0, ph), (0, pw)), mode="edge")
+    scale = min(1.0, LAMA_WORK_PX / max(H, W))
+    h, w = max(8, round(H * scale)), max(8, round(W * scale))
+    work, hole = np.clip(photo, 0, 255), unknown
+    if (h, w) != (H, W):
+        # Box filtering keeps the grey of the unknown out of known pixels, and a
+        # pixel is unknown at the small size when any part of it was.
+        work = np.asarray(Image.fromarray(work.astype(np.uint8)).resize((w, h), Image.BOX), np.float64)
+        hole = np.asarray(Image.fromarray(unknown.astype(np.uint8) * 255).resize((w, h), Image.BOX)) > 0
+    ph, pw = (-h) % 8, (-w) % 8
+    img = np.pad(work / 255.0, ((0, ph), (0, pw), (0, 0)), mode="reflect")
+    mask = np.pad(hole.astype(np.float32), ((0, ph), (0, pw)), mode="edge")
     img_t = torch.from_numpy(img.transpose(2, 0, 1)[None].astype(np.float32))
     img_t = img_t * (1 - torch.from_numpy(mask)[None, None])
     with torch.inference_mode():
         out = model(img_t, torch.from_numpy(mask)[None, None])
-    filled = out[0].permute(1, 2, 0).numpy()[:H, :W] * 255.0
-    log(f"  inpainted {unknown.mean():.0%} of the {H}x{W} photo")
+    filled = np.clip(out[0].permute(1, 2, 0).numpy()[:h, :w] * 255.0, 0, 255)
+    if (h, w) != (H, W):
+        filled = np.asarray(Image.fromarray(filled.astype(np.uint8)).resize((W, H), Image.BICUBIC), np.float64)
+    log(f"  inpainted {unknown.mean():.0%} of the {H}x{W} photo" + (f" (at {w}x{h})" if (h, w) != (H, W) else ""))
     return np.where(unknown[..., None], filled, photo)
 
 
