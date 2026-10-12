@@ -4,27 +4,31 @@
 Big-LaMa (Samsung AI, Apache-2.0 code and weights) is what tools/surface_fill.py
 runs today to continue a floor or wall into the parts no frame saw. This is the
 same model and the same weights (IOPaint's TorchScript big-lama.pt from GitHub),
-so the phone fills exactly as the Mac does:
+with int8 convolution weights, so the phone fills almost as the Mac does:
   SurfaceFill: image (1, 3, 512, 512), RGB in 0-1, and mask (1, 1, 512, 512), 1 where
                unknown -> filled (1, 3, 512, 512), RGB in 0-1, the known pixels kept.
-The caller shrinks a surface photo so its longer side is 512 (box filter; a pixel
-is unknown when any of it was), pads it to the square, and puts the fill back only
-where the photo was unknown, as surface_fill.inpaint does.
+The caller shrinks a surface photo so its longer side is at most 512 (box filter;
+a pixel is unknown when any of it was), pads it to the 512 square, and puts the fill
+back only where the photo was unknown. surface_fill.inpaint does the same, except
+that it pads only to a multiple of 8.
 
-Why these choices, all measured on frames from our clips (docs/on-device-plan-2026-10.md):
+Why these choices, measured on frames from our clips unless noted
+(docs/on-device-plan-2026-10.md):
   * 512 and fixed. LaMa's Fourier units become fixed-size DFT matrix products in
     Core ML, so the shape cannot vary (enumerated shapes fail to convert). 512 is also
     better than the photo's own size: at 1024 a footprint-sized hole came back as a
-    grey waffle, at 512 it carried on the planks (+3.6 dB in the hole).
+    grey waffle; at 512 it mostly carried on the floor or wall around it (+3.6 dB in
+    the hole on average, better in 7 of 8).
   * Big-LaMa, not MI-GAN-512 (the mobile GAN): LaMa scored higher in the hole in 23
     of 24 cases (+4.5 dB on footprints) and MI-GAN streaked wood and invented objects.
   * fp32 compute on the GPU (CPU_AND_GPU). The Neural Engine runs fp16 only, and LaMa
-    breaks there: mlx-lama-swift found fp16 collapses the Fourier convolutions, and
-    CoreMLaMa's author has had no working fp16 Neural Engine reports.
+    breaks there (reported, not measured here): mlx-lama-swift found fp16 collapses the
+    Fourier convolutions, and CoreMLaMa's author has had no working fp16 Neural Engine
+    reports.
   * int8 weights for the plain convolutions but the first and last: 58 MB instead
-    of 196 MB. The package's own weights, read back and run in PyTorch, moved the fill
+    of 205 MB. The package's own weights, read back and run in PyTorch, moved the fill
     by -0.05 dB on average (worst -0.61) over the 24 fills. Quantizing the first and
-    last as well cost 11 dB; quantizing the three transposed convolutions doubled the
+    last as well cost 11 dB in a PyTorch simulation; quantizing the three transposed convolutions doubled the
     loss (probably because their batch norm folds in along the other axis).
     --fp32-weights keeps every weight in fp32.
 Its time and memory on an iPhone 13 are not measured yet: --check on a Mac compares
@@ -165,7 +169,7 @@ def check(images: list) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--fp32-weights", action="store_true", help="keep every weight in fp32 (196 MB)")
+    parser.add_argument("--fp32-weights", action="store_true", help="keep every weight in fp32 (205 MB)")
     parser.add_argument("--check", nargs="+", metavar="IMAGE", help="compare the built package with PyTorch (macOS)")
     args = parser.parse_args()
     if args.check:

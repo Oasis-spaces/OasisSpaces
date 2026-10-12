@@ -251,12 +251,14 @@ def inpaint(photo: np.ndarray, unknown: np.ndarray, log=print) -> np.ndarray:
     """LaMa fills `unknown` pixels of an HxWx3 0-255 photo, working with the
     longer side at most LAMA_WORK_PX. At the photo's full size (5 mm a pixel, so
     a 5 m floor is 1000 px) a large hole, a sofa's footprint or the unseen floor
-    at the camera's feet, came back as a grey waffle; at 512 the same holes carry
-    on the planks and the shiplap (+3.6 dB in footprint-sized holes on frames
-    from 8 clips; 0.3 dB worse only in thin strips). The fill reaches the splat
-    as blobs 12 mm apart, so the finer pixels showed nothing there; a mixed
-    scene's textures are softer where filled, which beats the waffle. The
-    phone's Core ML LaMa is fixed at 512 too (apps/OasisCapture/scripts/convert_fill_lama.py)."""
+    at the camera's feet, came back as a grey waffle; at 512 such holes mostly
+    carry on the planks or the shiplap around them (+3.6 dB in footprint-sized
+    holes on frames from 8 clips, better in 7 of 8; 0.2-0.3 dB worse in thin
+    strips). The fill reaches the splat as blobs 12 mm apart, so for surfaces up
+    to about 6 m across the finer pixels could show nothing more there (reasoned,
+    not tested on rectified photos); a mixed scene's textures are softer where
+    filled, which beats the waffle. The phone's Core ML LaMa is fixed at 512 too
+    (apps/OasisCapture/scripts/convert_fill_lama.py)."""
     import torch
 
     if not LAMA_PATH.exists():

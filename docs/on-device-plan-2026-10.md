@@ -4,44 +4,62 @@ The owner's constraint: reconstruction must not need a GPU server, Colab or CUDA
 turns a capture into a room has to run on the phone, built from open-source parts that a commercial
 app can ship. The owner offered to obtain whatever licences that takes; the asks are at the end.
 
-The floor device is the **iPhone 13**: A15, 4 GB of memory, no LiDAR. Claude stays in the loop over
-the network (naming things, judging captures). That is judgement, not compute, and no GPU anywhere
-is involved. One-time work also stays off the phone: converting models (a Mac, `build.sh`) and
-any retraining a licence fix needs.
+The floor device is the **iPhone 13**: A15, 4 GB of memory, no LiDAR.
 
-Where the phone's own GPU is used: the live analysis while recording should move to the Neural
-Engine and CPU, so recording stays cool and smooth (step 1 below). The stages after capture may use
-the GPU, because the splat trainer and LaMa have no other place to run. Every open on-phone splat
-trainer found is GPU-only.
+What stays off the phone:
 
-This plan rests on a per-layer search of the field (seven layers, each checked by a second pass
-that tried to refute it), on hands-on tests of the parts that could be run here, and on the earlier
-audit (`docs/audit-prompts-and-stack-2026-10.md`). Nothing below has run on an iPhone yet: no
-Swift toolchain or phone was available. The measurements the first device run has to take are
-listed in their own section.
+- **Claude.** It stays in the loop over the network, for naming things and for the reviews it does
+  today. That is judgement served by Anthropic's API; no GPU server, Colab or CUDA machine of ours is
+  involved. How the phone reaches it is in section 10.
+- **One-time work:** converting models (a Mac, `build.sh`) and any retraining a licence fix needs.
+
+Where the phone's own GPU is used:
+
+- **While recording:** the live analysis should move to the Neural Engine and CPU, so recording stays
+  cool and smooth (section 1).
+- **After capture:** the stages may use the GPU. Every open on-phone splat trainer found is GPU-only.
+  LaMa needs fp32, which the Neural Engine cannot run; the CPU can, more slowly.
+
+This plan rests on three things:
+
+- a search of the field in seven layers, each checked by a second pass that tried to refute it;
+- hands-on tests of the parts that could be run here;
+- the earlier audit (`docs/audit-prompts-and-stack-2026-10.md`).
+
+The draft was then checked claim by claim against the sources and the code, and corrected. The
+app's existing recording, live models and review screen run on the iPhone 13 today. None of the new
+parts below has run on a phone: there was no Swift toolchain, Mac or phone here. The measurements
+the first device run has to take have their own section.
 
 ## In short
 
+The stages follow the README's full chain: cameras, dense cloud and names, room shape, room model and
+render check, splat, fill, mixed scene.
+
 | Stage | Today | On the phone | State |
 |---|---|---|---|
-| Camera poses (stage 1) | COLMAP global, then incremental fallbacks; MapAnything on CUDA | ARKit's poses, already in `frames.jsonl`, refined by the vendored camera-only bundle adjustment, kept only when held-out tracks improve | Code vendored (`third_party/arkit-3dgs-scanner`); adapter to write |
-| Live analysis while recording | SegFormer-B0, MoGe-2-S, YOLOE-11m-seg and MobileSAM, on the phone, with Core ML free to use the GPU | The same models, moved to `.cpuAndNeuralEngine` once MLComputePlan shows where each op runs. EdgeTAM in place of MobileSAM | EdgeTAM converter built and checked (`REFINER=edgetam`) |
-| Dense cloud (stage 2) | MoGe-2-L on keyframes (Mac or Colab), scaled to COLMAP | MoGe-2-S on keyframes after recording, scaled per frame to ARKit's points (`DepthScale`), fused over ARKit poses | `DepthFusion` runs live already; the post-capture pass is to write |
-| Objects and outlines (stage 2) | GroundingDINO and SAM 2.1 per keyframe, SAM 2 video tracking on CUDA | YOLOE boxes, EdgeTAM outlines, identity from `ObjectTracker`'s ARKit/depth voxels; Claude names objects from crops | Pieces exist; post-capture pass to write |
-| Room shape (stage 3) | `shapes.py`, `placement.py` on the Mac | Planes from MoGe depth plus ARKit's wall/floor/door/window classes, a floor-plan fit, and `placement.py`'s silhouette search ported to Swift | To port |
-| Splat (stage 5) | OpenSplat (AGPL) on a Colab T4 | The vendored Swift + Metal trainer (Apache-2.0), seeded from the fused cloud | Vendored; adapter to write; untimed on an A15 |
-| Surface fill | Big-LaMa on the Mac's CPU | The same Big-LaMa as Core ML (`SurfaceFill.mlpackage`, 512, fp32 on the GPU, int8 weights) | Converter built and checked; `surface_fill.py` now fills at 512 too |
-| Viewing | MetalSplatter (Mac app, and the phone's review screen) | MetalSplatter, from the trainer's PLY export | In the app |
+| Camera poses | COLMAP global, then incremental fallbacks; MapAnything on CUDA | ARKit's poses (already in `frames.jsonl`), read back through keyframe anchors, then the vendored camera-only bundle adjustment behind a held-out gate | Recording side written (not built); refinement vendored; adapter to write |
+| Live analysis while recording | SegFormer-B0, MoGe-2-S, YOLOE-11m-seg and MobileSAM, on the phone, with Core ML free to use the GPU | The same models on `.cpuAndNeuralEngine` once MLComputePlan shows where each op runs; EdgeTAM in place of MobileSAM | EdgeTAM converter built; its wrapper checked in PyTorch |
+| Dense cloud | MoGe-2-L on keyframes (Mac or Colab), scaled to COLMAP; mirror, window and screen planes | MoGe-2-S on keyframes after recording, scaled per frame to ARKit's points (`DepthScale`), mirror planes ported, TSDF-fused over the same poses as everything else | `DepthScale` runs live per frame; the pass and the fusion are to write |
+| Objects, outlines, names | Claude's room list steers GroundingDINO; SAM 2.1 per keyframe; SAM 2 video tracking on CUDA | YOLOE boxes, EdgeTAM outlines, identity from `ObjectTracker`'s ARKit/depth voxels; Claude renames and drops tracks from crops | Pieces exist; the post-capture pass is to write |
+| Room shape | `shapes.py`, `placement.py`, `room_score.py` on the Mac | Planes from MoGe depth plus ARKit's plane classes, a floor-plan fit, and the silhouette search and room score ported to Swift | To port |
+| Room model and render check | `blender_room.py`, rendered from the video's cameras by `room_views.py` in Blender | The room built in SceneKit (already in the app) and rendered offscreen from keyframe poses for Claude's render check | To write |
+| Splat | OpenSplat (AGPL) on a Colab T4 or the Mac's Metal build | The vendored Swift + Metal trainer (Apache-2.0), seeded from the fused cloud | Vendored; adapter to write; untimed on an A15 |
+| Surface fill | Big-LaMa on the Mac's CPU or the Colab VM (fill step, object removal, mixed scene) | The same Big-LaMa as Core ML (`SurfaceFill.mlpackage`: 512, fp32 on the GPU, int8 weights) | Converter built; its weights checked in PyTorch; Core ML `--check` needs a Mac. `surface_fill.py` now fills at 512 too |
+| Mixed scene | `mixed_scene.py` (Mac or Colab); the scene viewer served to the phone by the paired Mac | Shell textures, pieces and cuboid models built on the phone; the scene viewer bundled in the app | To port, after the splat |
+| Viewing and editing | MetalSplatter on the Mac and on the phone (renders sent by the Mac); editing in the Mac app | MetalSplatter for the trainer's PLY; editing by reusing the Mac app's Swift editing code | Splat viewing in the app; editing to decide |
 
 Measured here this round:
 
 - **Fill:** Big-LaMa beat MI-GAN-512, the mobile inpainting GAN, in 23 of 24 fills on our floors and
-  walls. Run at 512, LaMa fills large holes better than at full size: footprints +3.6 dB, unseen
-  blobs +1.0 dB, thin strips −0.2 dB. At full size, big holes came back as a grey waffle. Big-LaMa
-  converts to Core ML, and int8 weights cut it from 196 MB to 58 MB for −0.05 dB.
-- **Outlines and tracking:** EdgeTAM (Apache-2.0, 13.9 M parameters) carried seven kinds of furniture
-  through 20 and 48 frames on our clips. Our Core ML wrapper matches its own predictor (box logits to
-  3e-5). Encoder 10.0 MB, decoder 12.4 MB.
+  walls. Run at 512, LaMa fills large holes better than at full size. Footprints gained 3.6 dB and
+  unseen blobs 1.0 dB; thin strips lost 0.2-0.3 dB. At full size, big holes came back as a grey
+  waffle. Big-LaMa converts to Core ML. With int8 weights the package is 58 MB instead of 205 MB, and
+  its own weights, run in PyTorch, moved the fill by −0.05 dB.
+- **Outlines and tracking:** our EdgeTAM export wrapper, run in PyTorch before conversion, matches
+  EdgeTAM's own predictor (box logits to 3e-5). The fp16 Core ML packages (encoder 10.0 MB, decoder
+  12.4 MB) have not been run yet; that needs a Mac. Run with its own video memory on a CPU, EdgeTAM
+  carried eight kinds of object through 20 and 48 frames of our clips (details in section 4).
 - **Why ARKit's poses:** the two clips COLMAP struggles with solve with the new fallbacks on 4 of 4
   and 3 of 4 fresh runs, but on a knife edge (see the audit). ARKit tracks every frame at capture
   time, with metric scale.
@@ -50,212 +68,481 @@ Measured here this round:
 
 ### 1. Recording (`Recorder.swift`, `SceneRunner.swift`)
 
-Small changes that make everything after them better:
+**Already written** (commit 90598e8; not yet built or run):
 
-- **An `ARAnchor` at the camera every keyframe**, with the anchors' final transforms saved when
-  recording stops. ARKit moves its anchors when it corrects drift (relocalisation, loop closure), so
-  the final anchor poses are corrected keyframe poses for free. No one has measured whether an A15
-  without LiDAR updates them, so also log every anchor-update event. The first recordings will show
-  whether this happens.
-- **Raw motion** from CoreMotion at 100-200 Hz into its own file, for bundle adjustment priors and
-  jump detection.
-- **Tracking flags kept per frame** (already written as `tracking`), plus a jump flag when ARKit's
-  pose leaps between frames (relocalisation).
-- **Compute units.** The live models (detector, refiner encoder and decoder, segmenter, depth) load
-  with `.all`, which lets Core ML put any op on the GPU, falling back to `.cpuAndGPU`
-  (`SceneRunner.swift:154`). Run MLComputePlan on the iPhone 13 first, to see which ops leave the
-  Neural Engine, then load them with `.cpuAndNeuralEngine`; ops the Neural Engine rejects then go to
-  the CPU instead of the GPU. That keeps the GPU for ARKit and the camera preview while recording.
-- **A live "the view is not shifting" rule** (audit decision 7): distance moved over the last few
-  seconds against the depth in view, both from ARKit. Needs tuning on real app recordings.
+- An `ARAnchor` at the camera every 15 written frames, twice a second. ARKit moves anchors when it
+  corrects its map (relocalising, closing a loop), so where they end up are corrected keyframe poses.
+  `capture.json`'s `keyframeAnchors` gives each anchor's pose as placed and at the end, and how many
+  times it moved (moves under half a millimetre are not counted). The vendored code reads back
+  keyframe anchors the same way. Whether an A15 without LiDAR moves them is what the first
+  recordings will show.
+- The motion sensors at 100 Hz: the samples since the last frame ride on each `frames.jsonl` line as
+  `imu` (time, bias-corrected gyro, acceleration with gravity). The jump check below does not need
+  them. They are there for an inertial bundle adjustment later; the vendored one uses ARKit's
+  frame-to-frame motion, not raw IMU.
+- `jump: true` on a frame whose pose is more than 15 cm from the last (relocalising). Tracking state
+  was already written per frame.
+
+**Still to do:**
+
+- **Compute units.** The live models load with `.all`, falling back to `.cpuAndGPU`
+  (`SceneRunner.swift:154`). `.all` lets Core ML put any op on the GPU.
+  - Run MLComputePlan on the iPhone 13 first, to see which ops leave the Neural Engine.
+  - Then load the models with `.cpuAndNeuralEngine`. Ops the Neural Engine rejects then go to the CPU
+    instead of the GPU, which keeps the GPU for ARKit and the camera preview while recording.
+- **Plane classes.** Log each ARKit plane's classification in `capture.json` (section 5 needs its hit
+  rate).
+- **A live "the view is not shifting" rule** (audit decision 7): the distance moved over the last few
+  seconds against the depth in view, both from ARKit. It needs tuning on real app recordings.
 
 ### 2. Camera poses (replaces COLMAP and MapAnything)
 
-ARKit's visual-inertial tracking is the pose source; nothing open-source beats it on a phone
-(RTAB-Map's author builds his iOS app on it). It is not exact on a phone without LiDAR. The only
-published numbers are for an iPhone 11: 0.37 m mean trajectory error on a 6-13 m lab path, and
-25-43 cm of drift after walking away and back. Rotation stays near 1°. So refinement is needed, and
-it must be gated: in a 2026 study (arXiv 2608.21008), COLMAP-style triangulate-then-adjust made
-ARKit's room poses worse in 15 of 15 rooms.
+ARKit's visual-inertial tracking is the pose source. Nothing open-source beats it on a phone:
+RTAB-Map's author builds his iOS app on it.
 
-- **First choice: the vendored refinement** (`Capture/CameraOnlyTracker.swift`,
-  `BundleAdjuster.swift`, `OfflinePoseRefinement.swift`, `LoopClosureRefiner.swift`). It tracks
-  Shi-Tomasi corners keyframe to keyframe with Lucas-Kanade, starting where ARKit's motion predicts.
-  A track is kept only if it tracks back to its start, its patches correlate and it lies on the
-  epipolar line. It then bundle-adjusts with ARKit's frame-to-frame motion as a prior, and applies
-  the result only if held-out tracks improve. Loop closure is rigid and never changes scale. Only
-  Apple frameworks; no Ceres, no COLMAP.
-- **If that gate keeps rejecting, or the result is worse than COLMAP:** rebuild the
-  triangulation-free formulation of arXiv 2608.21008 (per-observation ray depth, symmetric two-view
-  residuals, an orientation prior, falling back to ARKit) with Ceres (BSD-3). Its code is not
-  public; see the licence asks.
-- **Intrinsics:** self-calibrate fx, fy, cx, cy, k1 and k2 once per phone model.
-- **Measure before trusting it:** 10-20 rooms recorded with the app, each also run through today's
-  COLMAP chain on the Mac as the reference. Compare trajectory error (Sim(3)-aligned), tape-measured
-  distances, and the splat's PSNR on held-out views. Ship ARKit-only poses if the PSNR gap to COLMAP
-  is under about 0.5 dB.
+It is not exact on a phone without LiDAR, though. The published figures are for an iPhone 11:
 
-What this removes: COLMAP and MapAnything from the capture path. COLMAP's bundled SiftGPU is
-licensed for non-profit use only, so this also settles that question for the product.
+- 0.37 m mean trajectory error on a 6-13 m lab path;
+- about 25 cm of drift in a placed hologram after walking about 7 m away and back (43 cm expected
+  across many environments).
+
+Rotation probably stays near 1° over about a minute. That is inferred from LaMAR's LiDAR-device
+captures, where it averages 3.5° after five minutes, and is unmeasured on an A15. So refinement is
+likely needed.
+
+Refinement can also do harm. In a 2026 preprint (arXiv 2608.21008), COLMAP-style
+triangulate-then-adjust made ARKit poses slightly worse in 15 of 15 ScanNet++ rooms: 0.55° / 19 mm
+became 0.74° / 21 mm, against a COLMAP-derived reference. Those were laser-registered poses from LiDAR
+iPhones. Whether the same holds for raw iPhone 13 poses is untested.
+
+**First choice: the vendored camera-only refinement.** This is `CameraOnlyPoseRefinement` and
+`CameraOnlyTracker` in `Capture/CameraOnlyTracker.swift`, solved by `BundleAdjuster.swift`. It uses
+only Apple frameworks: no Ceres, no COLMAP.
+
+- **Tracking:** Shi-Tomasi corners are tracked keyframe to keyframe with Lucas-Kanade, starting where
+  ARKit's motion predicts. A step is kept only if:
+  - tracking back returns within 0.7 px;
+  - the patches correlate at 0.8 or better;
+  - the match lies within 4 px of the epipolar line.
+
+  A failed step ends the track.
+- **The solve:** the tracks are triangulated from ARKit's poses, then the poses are bundle-adjusted.
+  That is the triangulate-then-adjust family that failed in the study above. What differs is a tight
+  ARKit motion prior (0.3 mm and 0.01° per step) and a gate.
+- **The gate:** the result is applied only if the held-out tracks' median reprojection improves by at
+  least 3%. That gate shares the solver's matcher, and its author found it can pass a solve that
+  makes photos line up worse. The camera-only path has no photo check, so the held-out splat PSNR
+  (measurement 3) is the real test.
+- **What it fixes:** by its author's account, it tightens frame-to-frame and multi-view consistency
+  but does not correct slow drift. Its measured gains are millimetres to a centimetre, on two
+  iPhone 17 Pro LiDAR scans replayed without depth, timed on a Mac.
+- **What it does not include:** the vendored `OfflinePoseRefinement.swift` and
+  `LoopClosureRefiner.swift` are its LiDAR path and do not run without depth. Without LiDAR there is
+  no loop closure in the vendored code. Drift of tens of centimetres has to come out through ARKit's
+  own corrections, read back through the keyframe anchors, or through the fallback below.
+
+**The fallback** is for when the gate keeps rejecting, the result is worse than COLMAP's, or drift
+remains. Rebuild the triangulation-free formulation of arXiv 2608.21008 with Ceres (BSD-3):
+
+- per-observation ray depth;
+- symmetric two-view residuals;
+- an orientation prior;
+- a fallback to ARKit's pose.
+
+Its code is not public; see the licence asks.
+
+**Intrinsics:** the vendored solve keeps ARKit's pinhole intrinsics fixed and models no lens
+distortion. Calibrate fx, fy, cx, cy, k1 and k2 once per phone model, offline (COLMAP on the Mac, or
+`AVCameraCalibrationData`), if the fallback needs them.
+
+**Measure before trusting any of it:**
+
+- Record 10-20 rooms with the app, and run each through today's COLMAP chain on the Mac as the
+  reference.
+- Compare the trajectory error (Sim(3)-aligned), tape-measured distances, and the splat's PSNR on
+  held-out views.
+- Ship ARKit-only poses if the PSNR gap to COLMAP is under about 0.5 dB.
+
+What this removes: COLMAP and MapAnything from the capture path. COLMAP's bundled SiftGPU is licensed
+for non-profit use only, so this also settles that question for the product.
 
 ### 3. Dense cloud (replaces `densify.py`'s MoGe-2-L pass)
 
-- After recording, once the live models are released, run **MoGe-2-S** (already in the app as
-  `RoomMetricDepth`, MIT) on the keyframes. Take the field of view from ARKit's intrinsics. Fit each
-  keyframe's scale and shift to ARKit's feature points with the existing `DepthScale`. MoGe's own
-  metric scale is used only for frames with no points.
-- **Fuse with a TSDF** (2-3 cm voxels, hashed) over the refined poses, in a Metal compute kernel, with
-  swift-tsdf (MIT) as the tested CPU reference. The vendored code's `PointCloudFusion` and
-  `RefusionEngine` are Apache-2.0 alternatives to compare against.
-- **Bare walls** are where per-frame depth scale fails: carry scale from neighbouring frames that
-  have points, through the fusion, and use the wall/floor masks with ARKit's planes.
-- A larger post-capture MoGe input (about 2,500 tokens, 812x602 at 4:3) needs its own fixed-shape
-  `.mlpackage` and the increased-memory-limit entitlement. Measure peak memory in Instruments first.
-- **Fix the yardstick first.** The project's depth error figures were measured against a
-  reconstruction scaled by MoGe-2-L's own metric scale, so they show MoGe-S agreeing with MoGe-L,
-  not true metres. Re-measure two rooms against tape-measured furniture and ARKit's metric poses.
+**Depth per keyframe.** After recording, once the live models are released, run MoGe-2-S on the
+keyframes. It is already in the app as `RoomMetricDepth` (MIT).
 
-### 4. Objects and outlines (replaces GroundingDINO, SAM 2.1 and `tracking.py`)
+- Take the field of view from ARKit's intrinsics.
+- Fit each keyframe's scale and shift to ARKit's feature points with the existing `DepthScale`.
+- A frame without a sound fit falls back to MoGe's own metric scale. That covers frames with fewer
+  than 12 usable points, and fits that `DepthScale.correction` rejects. On bare walls that scale
+  measured anywhere from a fifth of the truth to twice it. So give those frames little or no weight
+  in the fusion, unless their scale can be recovered (next point).
+- **Bare walls** are where per-frame scale fails. In the live app, borrowing a neighbouring frame's
+  correction directly measured worse than none. Recovering scale through the fused geometry, from
+  frames that have points, is a different method and untested. Measure it on the reference rooms
+  before relying on it, and use the wall/floor masks with ARKit's planes.
 
-- **Boxes:** the YOLOE model the app already runs (`RoomObjects`, 71 room classes). See the licence
-  asks: YOLOE needs an Ultralytics licence, and its class embeddings come from Apple's MobileCLIP.
-  YOLOE-26 is the upgrade once that is settled (audit decision 4).
-- **Outlines: EdgeTAM** (`scripts/convert_refiner_edgetam.py`, `REFINER=edgetam`). It replaces
-  MobileSAM; its encoder family ran about eight times faster than MobileSAM's on an A15 (EdgeSAM
-  38.7 FPS against 4.9 on an iPhone 14). Our export fixes what Meta's Core ML export leaves out:
-  normalisation in the graph, the two high-resolution maps, the box as corner points labelled 2 and
-  3, and the single-mask output. The app gives it a point on the thing from the detector's own mask:
-  on a framed TV the box alone outlined the wall panel, box plus point the screen.
-- **Identity through the video:** not SAM 2's memory. `ObjectTracker` already gives each object one
-  identity from ARKit poses and depth voxels. After recording, every 3rd to 6th frame gets one
-  EdgeTAM encoder pass, each tracked object is projected to a box (with a depth test for whether it is
-  in view), and one decoder pass per visible object outlines it. This drops SAM 2's
-  forward-and-back propagation and its duplicate merging. A published walkthrough study found
-  appearance memory loses objects on room walkthroughs; our geometry does not.
-- **Names:** keyframe crops of tracked objects go to Claude for naming and roles, as the room's object
-  list does today. No text encoder runs on the phone for this.
-- Measured here on a CPU: EdgeTAM's video tracking carried the TV, sofa, rug, table, plant, dresser
-  and bed through 20 and 48 frames, about 2.6 s a frame for four objects and 4.2 s for six. That
-  was this cloud machine's 4-core CPU, not the phone's Neural Engine; it shows the model holds our
-  objects, not its phone speed.
+**Mirrors, windows and screens.** Port `mirrors.py` into this pass. Each such outline takes the depth
+of the plane through the strip of frame or wall around it, as it does today. Fused as they are,
+these surfaces would put the reflection or the view outside into the room.
 
-### 5. Room shape (ports `shapes.py` and `placement.py`)
+**Fusion.** Fuse with a TSDF at 2-3 cm voxels over the same poses as everything else: ARKit's,
+refined where the gate accepted the refinement.
 
-- **Planes per keyframe** from MoGe-2-S depth with a grid-cell plane fitter (the CAPE method, MIT),
-  tagged wall, floor or ceiling by the segmenter and by ARKit's plane classes (`.wall`, `.floor`,
-  `.door`, `.window` work on A12 and later without LiDAR).
-- Fuse them in world space over ARKit's poses. Rasterise to a 3-5 cm floor-plan grid, fit lines, snap
-  them to the room's dominant direction (`RoomMap` has it), and close the outline using the camera
-  path as seeds.
-- **Boxes:** keep `ObjectTracker`'s mask-plus-depth boxes and port `placement.py`'s silhouette-IoU
-  search to Swift, fed by EdgeTAM keyframe masks. Merge duplicates, and never let a box cross a wall.
-- Not adopted: RoomFormer did worse than a non-learned baseline on data it was not trained on, and its
-  good numbers need ScanNet-derived training data, which is non-commercial. SpatialLM uses a
-  non-commercial encoder and needs CUDA. BoxerNet is non-commercial (Meta) and untested without
-  sensor depth.
-- On LiDAR iPhones, RoomPlan inside our own ARSession is an optional upgrade.
+- The CPU references are the vendored `SurfaceTSDF` and swift-tsdf. `SurfaceTSDF` is Apache-2.0,
+  uses sparse 8³ blocks, defaults to 2 cm and has its own tests. swift-tsdf is MIT but small and
+  unvetted, and has only run on LiDAR depth (30-90 s a scan on an iPhone 12 Pro).
+- A Metal kernel is the goal.
+- The vendored `RefusionEngine` re-fuses stored keyframe depth over anchor-corrected poses and wraps
+  `SurfaceTSDF`. It is the alternative to compare against, once MoGe depth is written in its format
+  and its LiDAR noise weighting is replaced.
 
-### 6. Splat (replaces OpenSplat on Colab)
+**Labels carry through the fusion.** Each voxel keeps a vote of the object ids from EdgeTAM's
+keyframe masks. The splat's cut into pieces (section 8) needs per-point object names, as the dense
+cloud has them today.
 
-- **The trainer:** `third_party/arkit-3dgs-scanner`, the last Apache-2.0 commit (d5d8e31) of Kuo
-  Feng-Yuan's Swift + Metal trainer. It uses MRNF densification, a Mip filter and a PPISP colour
-  model, and has memory plans that include 4 GB phones, checkpoint and resume, and SOG/PLY export.
-  It uses only Apple frameworks. `OASIS-PROVENANCE.md` there records why this commit and what we
-  owe.
-- **The adapter** (to write): keyframes as JPEG, our column-major transform transposed to its
-  row-major one, and the Gaussians **seeded from the fused cloud** as flat discs on the surfaces. The
-  iPhone 13 has no LiDAR, and under phone budgets the dense prior is what matters: PocketGS measured
-  21.15 dB without it and 23.67 dB with it.
-- **Settings on 4 GB phones:** Quick (4,000 iterations, 960 px, SH degree 2), capped at 200-300k
-  Gaussians, with the increased-memory-limit entitlement. Run it in the foreground with checkpoints;
-  background GPU access on an A15 is unverified.
-- **Time, untested:** no A15 measurement exists for any open trainer. Scaling the author's later
-  build on an iPhone 17 Pro (70-76 ms a step at a 600k cap) by the A15's 2.9 times lower Metal score
-  gives roughly 7-15 minutes for Quick, with thermal slowdowns. Today's Colab T4 takes 4-13 minutes.
-  A short preview run (500-1,000 iterations on the dense prior) can show something within minutes.
-- **Viewing:** the trainer writes SOG by default; MetalSplatter reads PLY, SPZ and `.splat`, so export
-  PLY (`GaussianExport.writePLY`) or SPZ.
-- Not adopted: msplat (Apache-2.0, but its host code shares OpenSplat's AGPL names and signatures
-  without credit; speed reference only), and feed-forward splats (PocketSplat needs 2.6-2.9 GB;
-  Apple's SHARP is research-only). Brush (Apache-2.0, Rust/wgpu) is the second track: the only route
-  to one trainer on iOS and Android, but it peaked at 3.1 GB on an iPhone 17 Pro.
+**Memory.** A larger post-capture MoGe input needs its own fixed-shape `.mlpackage`. At about 2,500
+tokens, that is 812x602 at 4:3. At the default memory limit, a 4 GB phone risks killing the pass, so
+probably request the increased-memory-limit entitlement too. Measure peak memory in Instruments
+first.
 
-This also retires OpenSplat (AGPL-3.0) from the product, and with it audit decision 1.
+**Fix the yardstick first** (measurement 4). The project's depth error figures were measured against
+a reconstruction scaled by MoGe-2-L's own metric scale. So they show MoGe-S agreeing with MoGe-L, not
+true metres. Re-measure two rooms against tape-measured furniture and ARKit's metric poses, with and
+without `DepthScale`.
 
-### 7. Surface fill (`surface_fill.py` on the phone)
+### 4. Objects, outlines and names (replaces GroundingDINO, SAM 2.1 and `tracking.py`)
+
+**Boxes:** the YOLOE model the app already runs. `RoomObjects` has 71 classes baked from
+`object-classes.json`: 70 room things plus person. See the licence asks: YOLOE needs an Ultralytics
+licence, and its class embeddings come from Apple's MobileCLIP. YOLOE-26 is the upgrade once that is
+settled (audit decision 4).
+
+**Outlines: EdgeTAM** (`scripts/convert_refiner_edgetam.py`, `REFINER=edgetam`), in place of
+MobileSAM. Its encoder family (RepViT) ran about eight times faster than MobileSAM on an A15: EdgeSAM
+38.7 FPS against 4.9 on an iPhone 14.
+
+Our export fixes three things that Meta's Core ML export leaves out:
+
+- ImageNet normalisation in the graph;
+- the box as corner points labelled 2 and 3 (Meta's prompt-encoder export ignores its boxes input);
+- the single-mask output (Meta's traced decoder always returns the three-mask output).
+
+(Commit ec6bef8's message also listed the high-resolution maps; Meta's export already outputs them.)
+The app also gives EdgeTAM a point on the thing, from the detector's own mask. On a framed TV, the
+box alone outlined the wall panel; box plus point outlined the screen.
+
+**Identity through the video comes from geometry, not SAM 2's memory.** `ObjectTracker` already gives
+each object one identity from ARKit poses and depth voxels. After recording:
+
+- every 3rd to 6th frame gets one EdgeTAM encoder pass;
+- each tracked object is projected to a box, with a depth test for whether it is in view;
+- one decoder pass per visible object outlines it.
+
+This drops SAM 2's forward-and-back propagation and its duplicate merging. A walkthrough study (3AM,
+arXiv 2601.08831) found SAM 2's appearance memory loses objects on ScanNet++ room scans: tracking
+recall 0.02, against 0.56 for its own geometry-aware method. How well our geometry holds identity on
+our recordings is still to be measured. `ObjectTracker`'s own notes record one failure: turning on
+the spot made one monitor into three along the line of sight.
+
+**Names.** Today Claude writes the room's object list from ten frames, and that list is what
+GroundingDINO searches for. It includes room-specific names and "elsewhere" exclusions. On the phone
+YOLOE's 71 classes are fixed:
+
+- keyframe crops of tracked objects go to Claude, which renames them and assigns roles;
+- Claude can also drop tracks, and the "elsewhere" exclusions are applied to tracks afterwards;
+- Claude cannot add things YOLOE missed. That is the cost of a fixed vocabulary on the phone.
+
+**Measured here, on this cloud machine's 4-core CPU.** EdgeTAM's video predictor took one box per
+object and propagated it forwards and back with its appearance memory, which the plan does not use.
+
+- In the 20-frame clip it held the TV, sofa, rug and TV stand.
+- In the 48-frame clip it held the dining table (which dropped out for a frame), sofa, plant, dresser
+  and bed. Its TV track, prompted by a box alone, outlined the frame and wall panel around the TV
+  instead of the screen.
+- It took about 2.6 s a frame for four objects and 4.2 s for six, including memory attention and the
+  backward pass.
+
+This shows the weights segment our furniture. It does not show that the planned per-frame,
+box-prompted pass works, or how fast it runs on a phone.
+
+### 5. Room shape (ports `shapes.py`, `placement.py` and `room_score.py`)
+
+**Planes.** Fit planes in each keyframe's MoGe-2-S depth with a grid-cell plane fitter (the CAPE
+method, MIT). Tag them wall, floor or ceiling from the segmenter and from ARKit's plane classes.
+`.wall`, `.floor`, `.door` and `.window` are available on A12 and later without LiDAR, but how often
+and how accurately they fire on an iPhone 13 is unpublished (measurement 2).
+
+**Floor plan.** Fuse the planes in world space over the same poses as the dense cloud, rasterise them
+to a 3-5 cm floor-plan grid, and fit lines. Snap the lines to the room's dominant direction (`RoomMap`
+has it), and close the outline using the camera path as seeds.
+
+**Boxes.** Keep `ObjectTracker`'s mask-plus-depth boxes, and port `placement.py`'s silhouette-IoU
+search to Swift, fed by EdgeTAM keyframe masks. Merge duplicates, and never let a box cross a wall.
+
+**The room score.** Port `room_score.py`, so a measured check still rolls back any edit that makes the
+room worse.
+
+**Not adopted:**
+
+- RoomFormer did worse than a non-learned baseline on data it was not trained on, and its good numbers
+  need ScanNet-derived training data, which is non-commercial.
+- SpatialLM uses a non-commercial encoder and needs CUDA.
+- BoxerNet is non-commercial (Meta). It falls from 0.412 to 0.126 mAP on CA-1M without depth, and is
+  untested with monocular depth such as MoGe-2.
+
+On LiDAR iPhones, RoomPlan inside our own ARSession is an optional upgrade.
+
+### 6. Room model and render check (replaces `blender_room.py` and `room_views.py`)
+
+Blender does not run on iOS. Today Blender builds the room from walls and boxes and renders it from
+the video's own cameras. Claude grades those renders against the real frames, and a structural
+problem sends the room back to its structure review.
+
+The app already draws planes and boxes in SceneKit. On the phone:
+
+- build the room's walls, floor and cuboid furniture as SceneKit geometry;
+- render it offscreen (`SCNRenderer`) from the keyframe poses;
+- send those renders with the frames to Claude, as today.
+
+### 7. Splat (replaces OpenSplat)
+
+**The trainer:** `third_party/arkit-3dgs-scanner`, the last Apache-2.0 commit (d5d8e31) of Kuo
+Feng-Yuan's Swift + Metal trainer. `OASIS-PROVENANCE.md` there records why this commit and what we
+owe. The trainer has:
+
+- MRNF densification, a Mip filter and a PPISP colour model;
+- memory plans that include 4 GB phones (a 900 MB ceiling under 5 GB);
+- checkpoint and resume;
+- SOG export, plus a PLY writer (`GaussianExport.writePLY`) that the app itself never calls.
+
+It uses only Apple frameworks.
+
+**The adapter** (to write):
+
+- keyframes as JPEG;
+- our column-major transform transposed to its row-major one;
+- the fused cloud written as the scan's seed cloud (`points.ply`).
+
+The trainer seeds one round Gaussian per point and, by default, jitters seeds by up to 3 cm. Seeding
+flat discs on the surfaces would change the trainer itself (`GaussianModel.initialize` takes no
+orientation). Files we change must be marked as changed (Apache-2.0).
+
+**Why the seed matters.** Under short phone budgets a dense prior matters more than optimiser tricks.
+PocketGS measured 21.15 dB without its multi-view-stereo prior and 23.67 dB with it (500 iterations,
+iPhone 15). How much our MoGe-fused cloud gains at 4,000 iterations is still to be measured.
+
+**Settings on 4 GB phones:** Quick (4,000 iterations, 960 px, SH degree 2), capped at 200-300k
+Gaussians. Request the increased-memory-limit entitlement, but plan the budget as if it does nothing
+on the iPhone 13: the trainer's author notes it takes effect only on Pro and larger-memory iPhones.
+Run in the foreground with checkpoints; background GPU access on an A15 is unverified.
+
+**Time, untested.** No A15 measurement exists for any open trainer.
+
+- The author's iPhone 17 Pro, on the build before his speed-up (the one closest to our snapshot),
+  took 87-95 ms a step at a 600k cap, throttled.
+- Scaled by the A15's 2.9 times lower Metal score, Quick's 4,000 steps take about 17-18 minutes at
+  that cap. At 200-300k Gaussians a step costs less, by an unmeasured amount.
+- Today's Colab T4 takes 4-13 minutes.
+- A short preview run (500-1,000 iterations on the dense prior) can show something within minutes.
+
+**Viewing.** MetalSplatter reads PLY, SPZ and `.splat`, not the trainer's SOG.
+
+- `writePLY` writes in a Y-down COLMAP frame that the viewer must rotate 180° about X.
+- Its colours are before the PPISP correction, which lives in a separate `ppisp.json`.
+- SPZ means converting that PLY with MetalSplatter's SplatIO.
+
+**Not adopted:**
+
+- msplat (Apache-2.0): its host code shares OpenSplat's AGPL names and signatures without credit; it
+  stays a speed reference only.
+- Feed-forward splats: PocketSplat needs 2.6-2.9 GB, and Apple's SHARP is research-only.
+
+**Brush** (Apache-2.0, Rust/wgpu) is the second track and the only route to one trainer on iOS and
+Android. On iOS it runs only through john-rocky's ios-main patches. Those peaked at 3.1 GB on an
+iPhone 17 Pro with no splat cap (1.2 GB on a masked capture), so a 4 GB phone needs `max_splats` at
+about 150-250k.
+
+**Off the phone:** the long splat and Spirula Studio (GPL-3.0) stay Mac research tools. This also
+retires OpenSplat (AGPL-3.0) from the product, and with it audit decision 1.
+
+### 8. Surface fill and the mixed scene
 
 The fill keeps `surface_fill`'s design: a rectified photo of each floor and wall, LaMa for what no
-frame saw, and flat blobs in the splat. What runs it on the phone is
-`apps/OasisCapture/scripts/convert_fill_lama.py`, which builds `SurfaceFill.mlpackage`.
+frame saw, and flat blobs in the splat. On the phone it runs `SurfaceFill.mlpackage`, built by
+`apps/OasisCapture/scripts/convert_fill_lama.py`.
 
-Measured here, on patches of floor and wall from 8 of our clips (wood, a patterned rug, rug and tile,
-plain and shiplap walls, a kitchen wall), each with three holes of known content: a furniture
-footprint, a region no frame saw, and thin strips. Scores are PSNR inside the hole.
+**LaMa against MI-GAN.** Measured here on patches of floor and wall from 8 of our clips: two wood
+floors, a patterned rug, rug and tile, plain and shiplap walls, and a kitchen wall. Each patch got
+three holes of known content: a furniture footprint, a region no frame saw, and thin strips. Scores
+are PSNR inside the hole; times are on this machine's CPU.
 
 | | Footprint | Unseen blob | Strips | CPU time |
 |---|---|---|---|---|
-| Big-LaMa (Apache-2.0, 51 M parameters) | 28.71 dB | 32.46 dB | 33.86 dB | 1.5-1.9 s |
-| MI-GAN-512 (MIT, 6 M parameters) | 24.24 dB | 27.49 dB | 31.37 dB | 1.0 s |
+| Big-LaMa (Apache-2.0, 51 M parameters) | 28.71 dB | 32.46 dB | 33.86 dB | about 1.5 s |
+| MI-GAN-512 (MIT, 6 M parameters) | 24.24 dB | 27.49 dB | 31.37 dB | about 1.0 s |
 
-LaMa was higher in 23 of 24 fills. Looked at, MI-GAN drew a streak across a wood floor, scribbles on
-a rug and an object on a kitchen wall that was never there; LaMa's fills were clean. So there is no
-MI-GAN tier. OpenCV's FSR (Apache-2.0, no weights) remains an option for tiny holes.
+LaMa was higher in 23 of 24 fills. The eight unseen-blob fills were also looked at. MI-GAN drew a
+streak across a wood floor, scribbles on a rug, and an object on a kitchen wall that was never there.
+LaMa's blob fills were clean. So there is no MI-GAN tier. OpenCV's FSR (Apache-2.0, no weights)
+remains an option for tiny holes.
 
 **Fill at 512, not at the photo's size.** Big-LaMa's Fourier units become fixed-size DFT matrix
 products in Core ML, so the model's shape cannot vary (enumerated shapes fail to convert). Testing
-whether that costs anything showed the opposite. On 1024-pixel crops of the same clips:
+whether that costs anything showed the opposite. The test used 1024-pixel crops of the same clips;
+one came from a 720p clip and was upscaled to 1024.
 
 | | Footprint | Unseen blob | Strips | CPU time |
 |---|---|---|---|---|
 | LaMa at 1024 (what `surface_fill` did) | 19.69 dB | 23.51 dB | 27.48 dB | 6.8 s |
 | LaMa at 512, the fill scaled back up | 23.25 dB | 24.52 dB | 27.17 dB | 1.5 s |
 
-At 1024 a footprint-sized hole came back as a grey, waffle-textured patch; at 512 the planks and the
-shiplap lines carried on through it. `surface_fill.inpaint` now works at 512 on the Mac too (box
-filter down, a pixel unknown if any of it was, the fill put back only where the photo was unknown).
-Rerun through that code: footprints 19.69 to 23.26 dB, blobs 23.51 to 24.49 dB, strips 27.47 to
-27.27 dB. A surface photo is 5 mm a pixel, and the fill reaches the splat as blobs 12 mm apart, so
-the finer pixels showed nothing there. A mixed scene's textures are softer where filled, which beats
-the waffle.
+At 1024 a footprint-sized hole came back as a grey, waffle-textured patch. At 512:
 
-**The Core ML model.** 512 by 512, fp32 compute on the GPU (`CPU_AND_GPU`): the Neural Engine runs
-fp16 only, and LaMa breaks in fp16 (mlx-lama-swift found it collapses the Fourier convolutions).
-Weights are int8 for the plain convolutions, except the first and the last:
+- one wood floor's planks and the shiplap lines carried on through it;
+- on the other wood floor the fill stretched the nearby rug across the hole;
+- 512 was better in 7 of 8 footprint holes;
+- per patch it was worse on the kitchen-wall footprint and one plain-wall blob.
 
-- The package is 58 MB instead of 196 MB.
+`surface_fill.inpaint` now works at 512 on the Mac too. It box-filters the photo down, counts a pixel
+as unknown if any of it was, and puts the fill back only where the photo was unknown. Rerun through
+that code:
+
+- footprints: 19.69 to 23.26 dB;
+- blobs: 23.51 to 24.49 dB;
+- strips: 27.47 to 27.27 dB.
+
+A surface photo is 5 mm a pixel, and the fill reaches the splat as blobs 12 mm apart. So for surfaces
+up to about 6 m across, filling at 512 (under 12 mm a pixel) should lose nothing the blobs could
+show. That is reasoning, not tested on rectified photos. Larger floors are filled coarser than the
+blob grid, and a mixed scene's textures are softer where filled, which beats the waffle.
+
+**The Core ML model** is 512 by 512, with fp32 compute on the GPU (`CPU_AND_GPU`). The Neural Engine
+runs fp16 only, and LaMa breaks in fp16: mlx-lama-swift found fp16 collapses the Fourier
+convolutions, and CoreMLaMa's author has had no working fp16 Neural Engine reports.
+
+The weights are int8 for the plain convolutions, except the first and the last:
+
+- The package is 58 MB instead of 205 MB.
 - Its own weights, read back from the package and run in PyTorch, moved the fill by −0.05 dB on
   average and −0.61 dB at worst over the 24 fills.
-- Quantising the first and last convolutions as well cost 11 dB in simulation.
+- Quantising the first and last convolutions as well cost 11 dB in a PyTorch simulation.
 - Quantising the three transposed convolutions doubled the loss.
 - The DFT matrices must stay fp32: their sine matrix has an all-zero row, which per-channel int8
   scaling turns into NaN.
 
-`--check` on a Mac compares the package with PyTorch (the Core ML runtime needs macOS). It is not in
-`build.sh` or `project.yml` yet: the app gets a fill stage when it gets the trainer. A one-off report
-puts Core ML LaMa at about 2 s for 800x800 on an iPhone 13 Pro; for a floor and four walls that
-would be well under a minute.
+The phone pads a shrunk photo to the 512 square; `surface_fill.inpaint` pads only to a multiple of 8.
 
-### 8. Android (later)
+`--check` on a Mac runs the package against PyTorch; the Core ML runtime needs macOS. The model is not
+in `build.sh` or `project.yml` yet: the app gets a fill stage when it gets the trainer. One report
+puts a different Core ML LaMa at about 2 s for 800x800 on an iPhone 13 Pro, with compute unit and
+precision not stated. If the iPhone 13 is close, a dozen fills (floor, walls, flat furniture faces)
+take under half a minute. That is an estimate until measurement 6.
 
-Same stages: ARCore for poses (ARCore's Depth API where the phone has it), ExecuTorch 1.5 with
-XNNPACK everywhere and the QNN backend on Snapdragon, LiteRT as the per-model fallback, and Brush for
-the splat. Every Android figure found was for flagships, so the mid-range target has to be
-measured. Not started.
+**The mixed scene** (`mixed_scene.py`, the last step today) moves after the splat. It has five parts:
+
+- **Shell textures:** `surface_fill`'s frame projection, with SurfaceFill for what no frame saw.
+- **Pieces:** the splat cut by the measured boxes and by the fused cloud's object labels (section 3).
+- **Cuboid models:** their sides photographed at 2.5 mm a texel from full-size frames. On a 4 GB phone
+  that means decoding one 4K frame at a time from the video.
+- **Review renders for Claude:** from the trainer's own Metal renderer, or MetalSplatter offscreen.
+- **The scene viewer** (three.js and Spark): served today to the phone by the paired Mac. Bundle it in
+  the app's web view instead.
+
+**Off the phone:** clean object meshes from images (TRELLIS, SAM 3D Objects) need a datacentre GPU.
+On the phone, pieces get the cuboid models only.
+
+### 9. Viewing and editing
+
+The splat shows in MetalSplatter, already in the app. Today the room renders and the scene viewer
+reach the phone from the paired Mac, and editing (remove, add, recolour, resize) is in the Mac app.
+The Mac app's editing code is Swift (`apps/SplatViewer/Sources/Editing`, `Viewer/SceneEditing.swift`),
+so it can be shared with the phone. `splat_edit.py remove` uses LaMa through SurfaceFill like the fill
+step. Whether editing moves to the phone, or stays a Mac feature for now, is the owner's call.
+
+### 10. Claude and the agent
+
+**Claude is called from the Mac today**, by `pipeline/advisor.py` through the `claude` CLI login or
+an API key. Colab jobs relay their questions back to the Mac. Its calls:
+
+- choosing frames;
+- naming the room's objects;
+- checking detection boxes;
+- the structure review;
+- the render check;
+- each splat's opening view;
+- keeping or rejecting each fill;
+- picking the best splat;
+- the scene review;
+- the capture advice.
+
+**The phone cannot ship an API key.** The phone-only path needs a small proxy that holds the key and
+forwards the phone's questions, for example an endpoint on the existing Render relay. That relay is a
+CPU web service, not a GPU server, but it is a server. Whether that is acceptable, or the Mac stays
+the Claude gateway, is the owner's call.
+
+**What the phone must produce for those reviews:**
+
+- contact sheets of frames;
+- the capture map and shot list;
+- room renders (section 6);
+- splat renders at trained and held-out views;
+- before-and-after renders of each fill.
+
+**The checks that overrule Claude** port with them: the room score, the splat guard (SSIM 0.01 and
+PSNR 0.3 dB) and the fill's pixel-change check. The agent's own logic in `pipeline/agent.py` (which
+reviews run, retries, rollbacks and the report) ports to Swift.
+
+### 11. Android (later)
+
+The same stages apply:
+
+- ARCore for poses, and ARCore's Depth API where the phone has it;
+- ExecuTorch 1.5, with XNNPACK everywhere and the QNN backend on Snapdragon;
+- LiteRT as the per-model fallback;
+- Brush for the splat.
+
+Every Android figure found was for flagships, so the mid-range target has to be measured. Not
+started.
+
+### Left off the phone
+
+- COLMAP's dense multi-view stereo (CUDA), replaced by MoGe-2-S with TSDF fusion.
+- MapAnything.
+- The long splat and Spirula Studio.
+- Image-to-3D object meshes (TRELLIS, SAM 3D Objects).
+
+These stay Mac or Colab research tools.
 
 ## Measurements the first iPhone 13 run has to take
 
-1. **Live chain:** each model's latency and memory with the other three running, and where each op
-   runs (MLComputePlan) before and after `.cpuAndNeuralEngine`. Then EdgeTAM against MobileSAM.
-2. **ARKit poses:** does the A15 update keyframe anchors? Trajectory error and tape distances against
-   COLMAP on 10-20 rooms.
-3. **Camera-only refinement:** time, heat and battery, how often its gate accepts, and held-out splat
+1. **Recording and the live chain:**
+   - The recording changes build, and `imu`, `jump` and `keyframeAnchors` come out as described.
+   - Each live model's latency and memory, with the others running.
+   - Where each op runs (MLComputePlan), before and after `.cpuAndNeuralEngine`.
+   - EdgeTAM against MobileSAM.
+   - Whether `BGTaskScheduler.supportedResources` includes the GPU on an A15.
+2. **ARKit:**
+   - Does the A15 move keyframe anchors?
+   - Trajectory error and tape distances against COLMAP on 10-20 rooms.
+   - The hit rate of ARKit's plane classes (wall, floor, door, window) on those rooms.
+3. **Camera-only refinement:** time, heat and battery; how often its gate accepts; and held-out splat
    PSNR against COLMAP poses.
-4. **Post-capture MoGe-2-S pass:** time per keyframe and peak memory.
-5. **Trainer:** minutes and peak memory for Quick at a 200-300k cap, with and without the
-   increased-memory-limit entitlement, and whether it finishes without thermal pauses. The vendored
-   snapshot has no benchmark mode; that came later, under the non-commercial licence. So we write our
-   own timing harness.
-6. **SurfaceFill:** `--check` on a Mac, then time and peak memory per 512 fill on the A15's GPU.
+4. **Depth:**
+   - The yardstick: MoGe-2-S with and without `DepthScale`, against tape-measured furniture and
+     ARKit's metric poses in two rooms.
+   - The post-capture pass: time per keyframe and peak memory.
+   - TSDF fusion: time and memory at 2-3 cm.
+5. **Outlines and room shape:**
+   - The post-capture EdgeTAM pass: time per frame and per object, and peak memory.
+   - Identity held across the recording.
+   - The room-shape port against `shapes.py` and the room score on the reference rooms.
+6. **Trainer and fill:**
+   - Quick at a 200-300k cap: minutes and peak memory, with and without the entitlement, and whether
+     it finishes without thermal pauses. The vendored snapshot has no training benchmark;
+     `--benchmark-training` came later, under the non-commercial licence. So we write our own timing
+     harness.
+   - SurfaceFill: `--check` on a Mac, then time and peak memory per 512 fill on the A15's GPU.
 7. **The exposure lock** from the audit: `exposure` in `frames.jsonl` should be constant within a
    recording.
 
@@ -263,52 +550,75 @@ measured. Not started.
 
 ### Blocking a commercial release now (models the app already ships)
 
-1. **SegFormer-B0** (`RoomSegmentation`, wall/floor/ceiling labels). NVIDIA's licence allows research
-   or evaluation only, and its ADE20K training data is non-commercial too. Swapping in another
-   ADE20K-trained model does not fix it.
+1. **SegFormer-B0** (`RoomSegmentation`, the wall/floor/ceiling labels) is blocked twice over.
+   NVIDIA's licence allows research or evaluation only, and its ADE20K training data is
+   non-commercial too. Swapping in another ADE20K-trained model does not fix it.
    - *Ask:* NVIDIA Research licensing (nvidia.com/en-us/research/inquiries) for commercial terms, and
-     MIT CSAIL (contact on ade20k.csail.mit.edu/terms) for ADE20K-trained models.
-   - *Or:* retrain a small segmenter on COCO-Stuff (CC BY 4.0 annotations) and Hypersim
-     (CC BY-SA 3.0), with our own labelled captures. That is a one-off GPU training job, not part of
-     reconstruction.
-2. **YOLOE-11m-seg** (`RoomObjects`). Code and weights are AGPL-3.0.
-   - *Ask:* Ultralytics Enterprise (ultralytics.com/license). Get in writing that YOLOE-11 (trained
-     by THU-MIG) and YOLOE-26 are covered models, and that iOS and Android redistribution of the
-     exported models is covered.
+     MIT CSAIL (contact on ade20k.csail.mit.edu/terms) about ADE20K-trained models.
+   - *Or:* retrain a small segmenter on COCO-Stuff and Hypersim, with our own labelled captures. That
+     is a one-off GPU training job, not part of reconstruction.
+     - COCO-Stuff's annotations are CC BY 4.0; counsel should check the Flickr image terms.
+     - Hypersim is CC BY-SA 3.0; counsel should advise whether share-alike reaches the weights.
+2. **YOLOE-11m-seg** (`RoomObjects`): the code and weights are AGPL-3.0.
+   - *Ask:* Ultralytics Enterprise (ultralytics.com/license). Get it in writing that the licence
+     covers:
+     - YOLOE-11 (trained by THU-MIG) and YOLOE-26;
+     - our own fine-tunes and retrained models (a SigLIP 2 text stage, a YOLO26-sem surface
+       segmenter);
+     - iOS and Android redistribution of the exported models.
 3. **MobileCLIP**, the source of YOLOE's baked class embeddings. Apple's ML Research Model terms allow
    research only and exclude product development, so computing the embeddings once at build time is
    not a way round it.
-   - *Ask:* Apple, through the apple/ml-mobileclip repository; the terms give no commercial path, so
-     expect a no. Also ask Ultralytics whether their licence covers this.
-   - *If refused:* retrain YOLOE's text stage with a SigLIP 2 text tower (Apache-2.0). Or drop the
-     open vocabulary: fine-tune a closed-set detector on our 71 room classes (D-FINE, Apache-2.0, needs
-     no paid licence), with Claude doing the naming.
-4. **Places2 dataset terms** cover the Big-LaMa weights (and MI-GAN's, and AOT-GAN's).
-   - *Ask:* counsel to review places2.csail.mit.edu's terms; if unclear, the MIT CSAIL Places team for
-     a written statement on commercial use of models trained on it.
-5. **MoGe-2's training data.** The weights are MIT, but the training sets include non-commercial ones
+   - *Ask:* Apple Legal, or the ml-mobileclip maintainers (the repository lists no contact), for a
+     commercial licence or a written statement covering embeddings computed with the model. Expect a
+     no.
+   - Also ask Ultralytics whether it warrants or indemnifies the MobileCLIP-derived embeddings. It
+     cannot sublicense Apple's weights.
+   - *If refused*, one of two routes:
+     - retrain YOLOE's text stage with a SigLIP 2 text tower (Apache-2.0);
+     - or drop the open vocabulary: fine-tune a closed-set detector on our room classes, with Claude
+       doing the naming. D-FINE has Apache-2.0 code and needs no paid licence, but its Objects365
+       checkpoints wait on item 5.
+4. **MoGe-2's training data.** The weights are MIT, but the training sets include non-commercial ones
    (ScanNet++, Waymo Open, Argoverse 2).
-   - *Ask:* counsel review; optionally ask the microsoft/MoGe maintainers to confirm commercial use of
-     the released weights.
+   - *Ask:* counsel to review. Optionally ask the microsoft/MoGe maintainers to confirm commercial use
+     of the released weights.
+5. **Detector training data.** YOLOE-26, a SigLIP 2-retrained YOLOE and D-FINE's Objects365
+   checkpoints are all trained on Objects365, GQA (Visual Genome images) and Flickr30k Entities.
+   - *Ask:* counsel to review those terms before any of these ships.
+   - Add the CC BY attributions for Objects365 to the app's notices.
 
 ### For the new on-phone stages
 
-6. **The splat trainer: nothing to buy.** The vendored snapshot is Apache-2.0. Keep `LICENSE` and
-   `NOTICE`, and credit Kuo Feng-Yuan in the app's acknowledgements.
+6. **The splat trainer: nothing to buy.** The vendored snapshot is Apache-2.0.
+   - Keep `LICENSE` and `NOTICE`, mark any file we change as changed, and credit Kuo Feng-Yuan in the
+     app's acknowledgements.
    - *Optional ask:* a commercial licence for his later, PolyForm Noncommercial work (1.39x faster
-     training steps, a benchmark mode), through github.com/KuoFengYuan.
-7. **EdgeTAM and LaMa: nothing to buy.** Apache-2.0; their licence texts go in the acknowledgements.
-8. **Apple entitlements**, in the paid developer team (Signing & Capabilities):
-   - Increased Memory Limit (`com.apple.developer.kernel.increased-memory-limit`), needed for training
-     and the larger depth pass on 4 GB phones.
-   - Background GPU Access, if training should continue in the background; whether the A15 grants it
-     must be checked on the device.
-9. **arXiv 2608.21008's refinement** (only if the vendored refinement fails its measurements): ask the
-   author, Nikolaos Kyriazis (address in the paper), for the code under BSD or Apache, or written
-   permission to reimplement it.
-10. **A weight mirror** (access, not a licence). The build machine cannot reach Hugging Face or Apple's
-    model CDN. Someone with access should put the MoGe-2 weights (and anything else Hugging Face-only
-    that we adopt) in a GitHub release of our own, with their licence files and SHA-256 hashes.
+     training steps, a training benchmark), through github.com/KuoFengYuan.
+7. **EdgeTAM and LaMa: nothing to buy.** Both are Apache-2.0.
+   - Their licence texts and any NOTICE files go in the acknowledgements, and files we change (our
+     EdgeTAM export wrapper) say so.
+   - Credit Microsoft MoGe-2 (MIT) and DINOv2 (Apache-2.0) there too.
+8. **Places2 training data.** Big-LaMa (like MI-GAN and AOT-GAN) is licensed Apache-2.0, but it was
+   trained on Places2, whose terms could not be read here. Whether those terms restrict models trained
+   on it is open.
+   - *Ask:* counsel to review places2.csail.mit.edu's terms. If they are unclear, ask the MIT CSAIL
+     Places team for a written statement on commercial use of models trained on it.
+9. **Apple entitlements**, in the paid developer team (Signing & Capabilities):
+   - Increased Memory Limit (`com.apple.developer.kernel.increased-memory-limit`), possibly ineffective
+     on non-Pro iPhones (section 7).
+   - Background GPU Access, if training should continue in the background. Whether the A15 grants it
+     is measurement 1.
+10. **arXiv 2608.21008's refinement**, only if the vendored refinement fails its measurements. Ask the
+    author, Nikolaos Kyriazis (address in the paper), for the code under BSD or Apache, or for
+    written permission to reimplement it.
+11. **A weight mirror** (access, not a licence). This cloud environment cannot reach Hugging Face or
+    Apple's model CDN. Someone with access should put these in a GitHub release of our own, with
+    their licence files and SHA-256 hashes:
+    - the MoGe-2 and SegFormer weights, and anything else Hugging Face-only that we adopt;
+    - a copy of `big-lama.pt`, which today sits on a third party's GitHub release.
+12. **A Claude proxy** (section 10), if the owner wants the phone-only path. This needs no licence,
+    but it is a server-side component holding the API key.
 
 ### Settled by moving to the phone
 
@@ -318,8 +628,8 @@ measured. Not started.
 
 ### For Android, later
 
-- A Qualcomm AI Hub account (free) for Snapdragon NPU exports, and a read of the QAIRT and AI Hub
-  model licences before shipping their runtime libraries.
+- A Qualcomm AI Hub account (free) for Snapdragon NPU exports.
+- A read of the QAIRT and AI Hub model licences before shipping their runtime libraries.
 - ARCore's terms and its privacy disclosure.
 
 ### Avoid
@@ -330,20 +640,36 @@ These have no commercial path or are non-commercial:
 - EdgeSAM
 - UniDepth
 - Depth Anything 3 Large and Giant
-- MVSAnywhere and SimpleRecon (Niantic; ask only if wanted)
-- BoxerNet (Meta; ask only if it ever passes a test with our depth)
+- MVSAnywhere and SimpleRecon (Niantic)
+- BoxerNet (Meta)
 - the GPL VIO and SLAM systems (ORB-SLAM3, VINS, OpenVINS)
 
-Datasets with non-commercial terms (ScanNet, Structured3D, CA-1M, ADE20K) need counsel's view
-before any model trained on them ships.
+Datasets with non-commercial terms (ScanNet, Structured3D, CA-1M, ADE20K) need counsel's view before
+any model trained on them ships.
 
 ## Order of work
 
-1. On a Mac with the iPhone 13: build the app with `REFINER=edgetam`, take measurement 1, switch the
-   compute units, and add the recording changes (anchors, motion, jump flag).
-2. Record 10-20 rooms with the app; run the Mac pipeline on them as the reference.
-3. Write the trainer adapter and timing harness; measurements 3 and 5 on those rooms.
-4. The post-capture pass: MoGe-2-S on keyframes, TSDF fusion, EdgeTAM outlines on tracked objects.
-5. Port the room shape and the fill; wire `SurfaceFill.mlpackage` in.
-6. In parallel: the licence asks, starting with Ultralytics, Apple (MobileCLIP) and NVIDIA
-   (SegFormer). Those three decide whether the live models can ship at all.
+1. **On a Mac with the iPhone 13:**
+   - build the app with `REFINER=edgetam`;
+   - check that the recording changes already written build and record correctly;
+   - take measurement 1 and switch the compute units;
+   - run `--check` for the EdgeTAM and SurfaceFill packages.
+2. **Reference rooms:** record 10-20 rooms with the app, and run the Mac pipeline on them as the
+   reference. Take measurements 2 and 4's yardstick.
+3. **Trainer:** write the adapter and a timing harness, then take measurements 3 and 6 on those rooms.
+4. **The post-capture pass:** MoGe-2-S on keyframes, mirror planes, TSDF fusion with labels, and
+   EdgeTAM outlines on tracked objects.
+5. **Port the rest:**
+   - room shape and score;
+   - the SceneKit room model and render check;
+   - the fill with `SurfaceFill.mlpackage`;
+   - the review images and the agent's logic;
+   - then the mixed scene.
+6. **In parallel, the licence asks.** Start with these, which decide whether the live models can ship
+   at all:
+   - Ultralytics;
+   - Apple (MobileCLIP);
+   - NVIDIA and MIT CSAIL (SegFormer and its ADE20K data);
+   - counsel on MoGe-2's training data.
+
+   The owner also decides the Claude gateway (section 10) and whether editing moves to the phone.

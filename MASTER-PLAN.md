@@ -23,14 +23,23 @@ angle, stitched, a cloud of the whole thing, such that we can edit any cloud".
 that it must not need a GPU server, Colab or CUDA. `docs/on-device-plan-2026-10.md`
 gives the open-source stack for each stage:
 
-- ARKit poses with the vendored camera-only refinement;
+- ARKit poses, read back through keyframe anchors, with the vendored camera-only
+  refinement behind a gate;
 - MoGe-2-S and TSDF fusion;
 - EdgeTAM outlines with identity from the tracker;
+- the room and its render check in SceneKit instead of Blender;
 - the vendored Metal splat trainer;
-- Big-LaMa as Core ML.
+- Big-LaMa as Core ML;
+- the mixed scene ported after the splat.
 
-It also lists the measurements still to take on the iPhone 13 and the licences to
-ask for. Until that lands, the Mac and Colab chain below is how a room gets built.
+It also says what stays off the phone (Claude, image-to-3D meshes, the Mac's research
+tools), lists the measurements still to take on the iPhone 13 and the licences to ask
+for, and names two owner decisions:
+
+- whether a small Claude proxy may hold the API key, or the Mac stays the gateway;
+- whether editing moves to the phone.
+
+Until that lands, the Mac and Colab chain below is how a room gets built.
 
 ## 2. Where we stand (10 Oct 2026)
 
@@ -152,7 +161,7 @@ Against "editable: deletable, colours, textures, dimensions, any object added":
 | Clean furniture models | Cuboid models in the scan's colours; TRELLIS meshes on a GPU | Run the model job in the Colab flow by default; amodal completion (FIRE3D or Lucida-style) once released |
 | Correct rooms every time | Measured score, rollback, repairs; passes on the pan | A wall score (do the cameras' walls meet the floor where the frames say?); ground truth from a tape measure of both rooms; SAM 3 when access is granted; scale anchors from known sizes (doors ~2.0 m) |
 | Tracking in every run | Colab only | Fit the walkthrough inside a session (fewer tracked names or a paid runtime), or a Mac path that batches objects |
-| Reconstruction on the phone | Live perception only; stages 1-5 on the Mac and Colab | `docs/on-device-plan-2026-10.md`: the trainer adapter, the post-capture depth and outline pass, the room-shape port, the fill on Core ML, measured on the iPhone 13; and the licences for the shipped models (SegFormer, YOLOE, MobileCLIP) |
+| Reconstruction on the phone | Live perception only; stages 1-5 on the Mac and Colab | `docs/on-device-plan-2026-10.md`: the trainer adapter, the post-capture depth and outline pass, the room-shape and render-check port, the fill on Core ML, then the mixed scene, measured on the iPhone 13; and the licences for the shipped models (SegFormer and ADE20K, YOLOE, MobileCLIP, MoGe-2's data) |
 | Phone on both platforms | iPhone (iOS 18) | Android with ARCore feeding the same `capture-rules.json` and the same models exported for TFLite/NNAPI |
 | Accounts and sharing | Supabase project, relay jobs table, a test user | Sign-in in the apps everywhere, scenes stored per account, links to share a room |
 

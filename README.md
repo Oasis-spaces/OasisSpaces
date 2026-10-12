@@ -449,7 +449,8 @@ room and the splat shows it as a flat surface (within 6 cm, over 30% of it),
 like a wardrobe's doors; a blanket over a bed's side is left alone. LaMa
 works with the photo's longer side at most 512 pixels. At the photo's own size
 (5 mm a pixel) a big hole, like a sofa's footprint, came back as a grey waffle;
-at 512 the planks carry on through it. The phone's Core ML LaMa
+at 512 the floor or wall around it mostly carries on through it (better in 7 of
+8 test holes). The phone's Core ML LaMa
 (`apps/OasisCapture/scripts/convert_fill_lama.py`) works at the same size. It
 needs `~/.cache/oasisspaces/big-lama.pt` (IOPaint's big-lama checkpoint, 206 MB). Edits chain in `splat-edited.ply` / `.splat`
 (`--fresh` starts again). Added furniture is evenly shaded, a placement
