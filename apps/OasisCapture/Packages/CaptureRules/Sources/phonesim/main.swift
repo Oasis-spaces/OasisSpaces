@@ -220,32 +220,59 @@ var onBareSurface = 0
 let refinerSide: CGFloat = 1024
 let refinerInput = pixelBuffer(width: 1024, height: 1024)
 func refine(_ instances: [Instance], image: CIImage) -> [Instance] {
-    let scale = refinerSide / max(image.extent.width, image.extent.height)
-    let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    // MobileSAM takes the image letterboxed and a box; EdgeTAM (told apart by its decoder's
+    // feat_s0 input) takes it stretched to the square, plus its encoder's two high-resolution
+    // maps and a point on the thing. As the phone does (SceneRunner.refine).
+    let edgeTAM = decoder.modelDescription.inputDescriptionsByName["feat_s0"] != nil
+    let longest = max(image.extent.width, image.extent.height)
+    let scaleX = refinerSide / (edgeTAM ? image.extent.width : longest)
+    let scaleY = refinerSide / (edgeTAM ? image.extent.height : longest)
+    let scaled = image.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
     let square = CGRect(x: 0, y: 0, width: refinerSide, height: refinerSide)
     // Core Image puts y = 0 at the bottom: shift the image to the top of the square, like the phone.
     let lifted = scaled.transformed(by: CGAffineTransform(translationX: 0, y: refinerSide - scaled.extent.height))
     context.render(lifted.composited(over: CIImage(color: .black).cropped(to: square)), to: refinerInput, bounds: square, colorSpace: CGColorSpaceCreateDeviceRGB())
-    guard let out = try? encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(pixelBuffer: refinerInput)])),
-          let embedding = out.featureValue(for: "embedding") else { return instances }
+    guard let out = try? encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(pixelBuffer: refinerInput)])) else { return instances }
+    var features: [String: MLFeatureValue] = [:]
+    for name in edgeTAM ? ["embedding", "feat_s0", "feat_s1"] : ["embedding"] {
+        guard let value = out.featureValue(for: name) else { return instances }
+        features[name] = value
+    }
     let imageWidth = Float(scaled.extent.width.rounded()), imageHeight = Float(scaled.extent.height.rounded())
-    let maskWidth = Int((imageWidth / 4).rounded()), maskHeight = Int((imageHeight / 4).rounded())
-    guard let box = try? MLMultiArray(shape: [1, 4], dataType: .float32) else { return instances }
+    let letterboxWidth = Float((image.extent.width * refinerSide / longest).rounded())
+    let letterboxHeight = Float((image.extent.height * refinerSide / longest).rounded())
+    let maskWidth = Int((letterboxWidth / 4).rounded()), maskHeight = Int((letterboxHeight / 4).rounded())
+    guard let box = try? MLMultiArray(shape: [1, 4], dataType: .float32),
+          let point = try? MLMultiArray(shape: [1, 3], dataType: .float32) else { return instances }
     var refined = instances
     for i in refined.indices.prefix(6) where refined[i].share >= 0.004 {
         let inst = refined[i]
         box[0] = NSNumber(value: inst.minX * imageWidth); box[1] = NSNumber(value: inst.minY * imageHeight)
         box[2] = NSNumber(value: inst.maxX * imageWidth); box[3] = NSNumber(value: inst.maxY * imageHeight)
-        guard let o = try? decoder.prediction(from: MLDictionaryFeatureProvider(dictionary: ["embedding": embedding, "box": MLFeatureValue(multiArray: box)])),
+        var inputs = features
+        inputs["box"] = MLFeatureValue(multiArray: box)
+        if edgeTAM {
+            if let p = MaskOutline.interiorPoint(of: inst.mask, width: inst.maskWidth, height: inst.maskHeight) {
+                point[0] = NSNumber(value: Float(p.x) * imageWidth); point[1] = NSNumber(value: Float(p.y) * imageHeight); point[2] = 1
+            } else {
+                point[0] = 0; point[1] = 0; point[2] = -1
+            }
+            inputs["point"] = MLFeatureValue(multiArray: point)
+        }
+        guard let o = try? decoder.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs)),
               let logits = o.featureValue(for: "mask")?.multiArrayValue else { continue }
         let full = contiguousFloats(logits)
-        let cols = logits.shape[logits.shape.count - 1].intValue
+        let rows = logits.shape[logits.shape.count - 2].intValue, cols = logits.shape[logits.shape.count - 1].intValue
+        let stepX = edgeTAM ? Float(cols) / Float(maskWidth) : 1, stepY = edgeTAM ? Float(rows) / Float(maskHeight) : 1
         let gx = (inst.maxX - inst.minX) * 0.1, gy = (inst.maxY - inst.minY) * 0.1
         let x0 = max(0, Int((inst.minX - gx) * Float(maskWidth))), x1 = min(maskWidth - 1, Int((inst.maxX + gx) * Float(maskWidth)))
         let y0 = max(0, Int((inst.minY - gy) * Float(maskHeight))), y1 = min(maskHeight - 1, Int((inst.maxY + gy) * Float(maskHeight)))
         guard x1 > x0, y1 > y0 else { continue }
         var mask = [UInt8](repeating: 0, count: maskWidth * maskHeight)
-        for y in y0...y1 { for x in x0...x1 where full[y * cols + x] > 0 { mask[y * maskWidth + x] = 1 } }
+        for y in y0...y1 {
+            let row = min(rows - 1, Int((Float(y) + 0.5) * stepY)) * cols
+            for x in x0...x1 where full[row + min(cols - 1, Int((Float(x) + 0.5) * stepX))] > 0 { mask[y * maskWidth + x] = 1 }
+        }
         let area = MaskOutline.keepLargestComponent(&mask, width: maskWidth, height: maskHeight)
         guard Float(area) / Float(maskWidth * maskHeight) >= objects.minShare * 0.5 else { continue }
         refined[i].mask = mask; refined[i].maskWidth = maskWidth; refined[i].maskHeight = maskHeight; refined[i].area = area

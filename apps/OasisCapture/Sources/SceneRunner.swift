@@ -69,7 +69,7 @@ struct FrameUnderstanding {
 ///   mask per thing: this sofa, that wardrobe, each pillow;
 /// - the surface segmentation (SegFormer on ADE20K) gives the walls, floor,
 ///   ceiling, doors and windows, which a detector does not do well;
-/// - the mask refiner (MobileSAM) turns each detected thing's box into one
+/// - the mask refiner (MobileSAM, or EdgeTAM when built with REFINER=edgetam) turns each detected thing's box into one
 ///   clean whole-object mask, so the outline follows the real edges of a bed
 ///   or a wardrobe instead of the detector's blocky, fragmented guess;
 /// - the depth model (MoGe-2 small) gives every pixel a place in metres on its
@@ -495,26 +495,41 @@ final class SceneRunner {
     private func refine(_ instances: [Instance], in buffer: CVPixelBuffer) -> [Instance] {
         let (encoder, decoder, input) = lock.withLock { (maskEncoder, maskDecoder, refinerInput) }
         guard let encoder, let decoder, let input else { return instances }
+        // Two refiners fit here. MobileSAM (scripts/convert_refiner.py) takes the image
+        // letterboxed and a box. EdgeTAM (scripts/convert_refiner_edgetam.py) was trained on
+        // images stretched to the square (letterboxed, its masks agreed with its own predictor
+        // at IoU 0.65-0.92 instead of 0.87-0.97), and its decoder also takes the encoder's two
+        // high-resolution maps and a point on the thing; it is told apart by those inputs.
+        let edgeTAM = decoder.modelDescription.inputDescriptionsByName["feat_s0"] != nil
         let side = CGFloat(Self.refinerSide)
         let upright = CIImage(cvPixelBuffer: buffer).oriented(.right)
-        let scale = side / max(upright.extent.width, upright.extent.height)
-        let scaled = upright.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let longest = max(upright.extent.width, upright.extent.height)
+        let scaleX = side / (edgeTAM ? upright.extent.width : longest)
+        let scaleY = side / (edgeTAM ? upright.extent.height : longest)
+        let scaled = upright.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
         let square = CGRect(x: 0, y: 0, width: side, height: side)
-        // The image in the square's corner; the rest black.
+        // Letterboxed, the image sits in the square's corner and the rest is black.
         let composed = scaled.composited(over: CIImage(color: .black).cropped(to: square))
         ciContext.render(composed, to: input, bounds: square, colorSpace: CGColorSpaceCreateDeviceRGB())
-        let embedding: MLFeatureValue
+        var features: [String: MLFeatureValue] = [:]
         do {
             let out = try encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(pixelBuffer: input)]))
-            guard let value = out.featureValue(for: "embedding") else { return instances }
-            embedding = value
+            for name in edgeTAM ? ["embedding", "feat_s0", "feat_s1"] : ["embedding"] {
+                guard let value = out.featureValue(for: name) else { return instances }
+                features[name] = value
+            }
         } catch {
             if runs < 3 { AppLog.write("the mask encoder failed on a frame: \(error)") }
             return instances
         }
+        // Where the image lies in the square, in the square's pixels.
         let imageWidth = Float(scaled.extent.width.rounded()), imageHeight = Float(scaled.extent.height.rounded())
-        let maskWidth = Int((imageWidth / 4).rounded()), maskHeight = Int((imageHeight / 4).rounded())
-        guard let box = try? MLMultiArray(shape: [1, 4], dataType: .float32) else { return instances }
+        // Masks keep the image's proportions at a quarter of the letterboxed scale, whichever refiner.
+        let letterboxWidth = Float((upright.extent.width * side / longest).rounded())
+        let letterboxHeight = Float((upright.extent.height * side / longest).rounded())
+        let maskWidth = Int((letterboxWidth / 4).rounded()), maskHeight = Int((letterboxHeight / 4).rounded())
+        guard let box = try? MLMultiArray(shape: [1, 4], dataType: .float32),
+              let point = try? MLMultiArray(shape: [1, 3], dataType: .float32) else { return instances }
         var refined = instances
         for i in refined.indices.prefix(refineLimit) where refined[i].share >= refineMinShare {
             let inst = refined[i]
@@ -522,12 +537,27 @@ final class SceneRunner {
             box[1] = NSNumber(value: inst.minY * imageHeight)
             box[2] = NSNumber(value: inst.maxX * imageWidth)
             box[3] = NSNumber(value: inst.maxY * imageHeight)
-            guard let out = try? decoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [
-                "embedding": embedding, "box": MLFeatureValue(multiArray: box)])),
+            var inputs = features
+            inputs["box"] = MLFeatureValue(multiArray: box)
+            if edgeTAM {
+                // A point on the thing from the detector's own mask; label -1 is "no point".
+                if let p = MaskOutline.interiorPoint(of: inst.mask, width: inst.maskWidth, height: inst.maskHeight) {
+                    point[0] = NSNumber(value: Float(p.x) * imageWidth)
+                    point[1] = NSNumber(value: Float(p.y) * imageHeight)
+                    point[2] = 1
+                } else {
+                    point[0] = 0; point[1] = 0; point[2] = -1
+                }
+                inputs["point"] = MLFeatureValue(multiArray: point)
+            }
+            guard let out = try? decoder.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs)),
                   let logits = out.featureValue(for: "mask")?.multiArrayValue else { continue }
             let full = Self.contiguousFloats(logits)                       // 256 x 256 of the square
             let rows = logits.shape[logits.shape.count - 2].intValue, cols = logits.shape[logits.shape.count - 1].intValue
             guard rows >= maskHeight, cols >= maskWidth else { continue }
+            // Letterboxed, mask pixel (x, y) is logit (x, y); stretched, the logits cover the whole image.
+            let stepX = edgeTAM ? Float(cols) / Float(maskWidth) : 1
+            let stepY = edgeTAM ? Float(rows) / Float(maskHeight) : 1
             // Cut to the box grown by a tenth of its size.
             let gx = (inst.maxX - inst.minX) * 0.1, gy = (inst.maxY - inst.minY) * 0.1
             let x0 = max(0, Int((inst.minX - gx) * Float(maskWidth))), x1 = min(maskWidth - 1, Int((inst.maxX + gx) * Float(maskWidth)))
@@ -536,7 +566,8 @@ final class SceneRunner {
             var mask = [UInt8](repeating: 0, count: maskWidth * maskHeight)
             var area = 0
             for y in y0...y1 {
-                for x in x0...x1 where full[y * cols + x] > 0 {
+                let row = min(rows - 1, Int((Float(y) + 0.5) * stepY)) * cols
+                for x in x0...x1 where full[row + min(cols - 1, Int((Float(x) + 0.5) * stepX))] > 0 {
                     mask[y * maskWidth + x] = 1
                     area += 1
                 }

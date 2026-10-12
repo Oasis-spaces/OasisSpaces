@@ -19,9 +19,17 @@ fi
 if [ ! -d Resources/RoomObjects.mlpackage ]; then
     ~/.venvs/oasis-coreml/bin/python scripts/convert_objects.py
 fi
-# The mask refiner (MobileSAM, see scripts/convert_refiner.py) is generated too.
+# The mask refiner is generated too: MobileSAM (scripts/convert_refiner.py), or with
+# REFINER=edgetam EdgeTAM (scripts/convert_refiner_edgetam.py), which the app tells apart
+# by its inputs. Delete Resources/Mask*.mlpackage to switch. EdgeTAM is the candidate
+# replacement (Apache-2.0, the same weights track through video); its A15 latency is
+# what the first device run measures.
 if [ ! -d Resources/MaskEncoder.mlpackage ] || [ ! -d Resources/MaskDecoder.mlpackage ]; then
-    ~/.venvs/oasis-coreml/bin/python scripts/convert_refiner.py
+    if [ "${REFINER:-mobilesam}" = "edgetam" ]; then
+        ~/.venvs/oasis-coreml/bin/python scripts/convert_refiner_edgetam.py
+    else
+        ~/.venvs/oasis-coreml/bin/python scripts/convert_refiner.py
+    fi
 fi
 xcodegen generate --quiet
 

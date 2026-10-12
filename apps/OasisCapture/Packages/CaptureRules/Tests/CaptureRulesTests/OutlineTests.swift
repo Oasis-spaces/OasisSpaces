@@ -88,4 +88,18 @@ final class OutlineTests: XCTestCase {
         let result = OutlineExtractor.extract(classes: m, width: 16, height: 16, spec: spec2)
         XCTAssertFalse(result.regions.isEmpty)
     }
+
+    func testInteriorPointLiesOnABentMaskWhereItsCentroidDoesNot() {
+        // An L: a bar down the left side and one along the bottom. Its centroid
+        // falls in the empty corner between them; the point given to the refiner must not.
+        let w = 10, h = 10
+        var mask = [UInt8](repeating: 0, count: w * h)
+        for y in 0..<h { for x in 0..<2 { mask[y * w + x] = 1 } }
+        for y in 8..<h { for x in 0..<w { mask[y * w + x] = 1 } }
+        let c = MaskOutline.centroid(of: mask, width: w, height: h)
+        XCTAssertEqual(mask[Int(c.y * Double(h)) * w + Int(c.x * Double(w))], 0, "the centroid is off the mask")
+        let p = MaskOutline.interiorPoint(of: mask, width: w, height: h)!
+        XCTAssertEqual(mask[Int(p.y * Double(h)) * w + Int(p.x * Double(w))], 1, "the point is on the mask")
+        XCTAssertNil(MaskOutline.interiorPoint(of: [UInt8](repeating: 0, count: 4), width: 2, height: 2))
+    }
 }

@@ -603,4 +603,23 @@ public enum MaskOutline {
         guard n > 0 else { return SIMD2(0.5, 0.5) }
         return SIMD2((Double(sx) / Double(n) + 0.5) / Double(width), (Double(sy) / Double(n) + 0.5) / Double(height))
     }
+
+    /// A point on the thing, in normalised coordinates (pixel centres): the mask pixel
+    /// nearest its centroid, which for a bent or hollow shape (an L-shaped sofa, a framed
+    /// screen) lies on the mask where the centroid itself may not. Nil for an empty mask.
+    /// EdgeTAM is given it with the box: on a framed TV the box alone outlined the wall
+    /// panel around it, and box plus a point on the screen outlined the screen.
+    public static func interiorPoint(of mask: [UInt8], width: Int, height: Int) -> SIMD2<Double>? {
+        var sx = 0, sy = 0, n = 0
+        for i in 0..<(width * height) where mask[i] != 0 { sx += i % width; sy += i / width; n += 1 }
+        guard n > 0 else { return nil }
+        let cx = Double(sx) / Double(n), cy = Double(sy) / Double(n)
+        var best = -1, bestDistance = Double.infinity
+        for i in 0..<(width * height) where mask[i] != 0 {
+            let dx = Double(i % width) - cx, dy = Double(i / width) - cy
+            let d = dx * dx + dy * dy
+            if d < bestDistance { bestDistance = d; best = i }
+        }
+        return SIMD2((Double(best % width) + 0.5) / Double(width), (Double(best / width) + 0.5) / Double(height))
+    }
 }
