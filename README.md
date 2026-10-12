@@ -446,8 +446,12 @@ all near the plane, so a recessed door or window is never painted over.
 Anything reconstructed behind a wall marks an opening (a doorway, a window)
 that is never filled. A furniture face is only filled when it faces into the
 room and the splat shows it as a flat surface (within 6 cm, over 30% of it),
-like a wardrobe's doors; a blanket over a bed's side is left alone. It needs `~/.cache/oasisspaces/big-lama.pt` (IOPaint's
-big-lama checkpoint, 206 MB). Edits chain in `splat-edited.ply` / `.splat`
+like a wardrobe's doors; a blanket over a bed's side is left alone. LaMa
+works with the photo's longer side at most 512 pixels. At the photo's own size
+(5 mm a pixel) a big hole, like a sofa's footprint, came back as a grey waffle;
+at 512 the planks carry on through it. The phone's Core ML LaMa
+(`apps/OasisCapture/scripts/convert_fill_lama.py`) works at the same size. It
+needs `~/.cache/oasisspaces/big-lama.pt` (IOPaint's big-lama checkpoint, 206 MB). Edits chain in `splat-edited.ply` / `.splat`
 (`--fresh` starts again). Added furniture is evenly shaded, a placement
 preview rather than a filmed object; a patch is a plausible guess, not what
 was really behind the object.
@@ -569,7 +573,11 @@ phone (no model calls, no network while recording). Build and install with
   cluttered bed or desk, so a mask refiner (MobileSAM, Apache-2.0, built by
   `scripts/convert_refiner.py`, 27 MB) takes each detected box and returns
   one clean whole-object mask at 256×256, with a quality score: outlines
-  follow the real edges of a curtain, a monitor or a mattress. A small
+  follow the real edges of a curtain, a monitor or a mattress. `REFINER=edgetam
+  ./build.sh` builds EdgeTAM in its place (`scripts/convert_refiner_edgetam.py`,
+  Apache-2.0, 22 MB). EdgeTAM is SAM 2 for phones, and its weights also track
+  through video. The app tells the two apart by their inputs, and gives EdgeTAM
+  a point on the thing from the detector's mask as well as the box. A small
   segmentation model (SegFormer-B0 on ADE20K, 7.7 MB, built by
   `scripts/convert_segmentation.py`) keeps the walls, floor, ceiling, doors
   and windows. Each thing gets a neon outline and a label, nothing filled
@@ -905,6 +913,11 @@ to 2.5.2. If you recreate the environment, make sure `numpy >= 2.3`.
 
 ## Where this can go next
 
+- **Reconstruction on the phone** (the owner's constraint since October 2026: no
+  GPU server, no Colab): `docs/on-device-plan-2026-10.md` gives the open-source
+  stack per stage, what was measured for it here, what the iPhone 13 still has to
+  measure, and the licences to ask for. Its splat trainer is vendored in
+  `third_party/arkit-3dgs-scanner` (Apache-2.0 snapshot).
 - **Harder captures**: log ARKit poses at capture time and feed them to
   `--mapper priors`; LichtFeld Studio's SLAM front end, once released, the same way.
 - **Better walls in splats**: train on Colab with depth and normal priors

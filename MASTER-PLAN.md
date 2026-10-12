@@ -19,6 +19,19 @@ geometry itself, because that is what it is worst at (see
 The original note that started it is `OasisSpaces.md`: "images from every
 angle, stitched, a cloud of the whole thing, such that we can edit any cloud".
 
+**October 2026: reconstruction moves onto the phone.** The owner's constraint is
+that it must not need a GPU server, Colab or CUDA. `docs/on-device-plan-2026-10.md`
+gives the open-source stack for each stage:
+
+- ARKit poses with the vendored camera-only refinement;
+- MoGe-2-S and TSDF fusion;
+- EdgeTAM outlines with identity from the tracker;
+- the vendored Metal splat trainer;
+- Big-LaMa as Core ML.
+
+It also lists the measurements still to take on the iPhone 13 and the licences to
+ask for. Until that lands, the Mac and Colab chain below is how a room gets built.
+
 ## 2. Where we stand (10 Oct 2026)
 
 | Part | State | Where |
@@ -139,6 +152,7 @@ Against "editable: deletable, colours, textures, dimensions, any object added":
 | Clean furniture models | Cuboid models in the scan's colours; TRELLIS meshes on a GPU | Run the model job in the Colab flow by default; amodal completion (FIRE3D or Lucida-style) once released |
 | Correct rooms every time | Measured score, rollback, repairs; passes on the pan | A wall score (do the cameras' walls meet the floor where the frames say?); ground truth from a tape measure of both rooms; SAM 3 when access is granted; scale anchors from known sizes (doors ~2.0 m) |
 | Tracking in every run | Colab only | Fit the walkthrough inside a session (fewer tracked names or a paid runtime), or a Mac path that batches objects |
+| Reconstruction on the phone | Live perception only; stages 1-5 on the Mac and Colab | `docs/on-device-plan-2026-10.md`: the trainer adapter, the post-capture depth and outline pass, the room-shape port, the fill on Core ML, measured on the iPhone 13; and the licences for the shipped models (SegFormer, YOLOE, MobileCLIP) |
 | Phone on both platforms | iPhone (iOS 18) | Android with ARCore feeding the same `capture-rules.json` and the same models exported for TFLite/NNAPI |
 | Accounts and sharing | Supabase project, relay jobs table, a test user | Sign-in in the apps everywhere, scenes stored per account, links to share a room |
 
@@ -192,8 +206,8 @@ are gitignored: large, generated, or personal footage.)
 ### `apps/OasisCapture/` — the iPhone capture app
 - `Sources/` — `OasisCaptureApp.swift` (tabs), `CaptureScreen.swift` + `CaptureController.swift` (camera, ARKit, rules, haptics), `FrameAnalyzer.swift` (the four Core ML models), `OutlineOverlay.swift`, `RoomMapView.swift`, `SceneRunner.swift`, `ScanCloud.swift`, `Recorder.swift` (video.mov, frames.jsonl poses, capture.json), `ReviewView.swift`, `TipsView.swift`, `AppLog.swift`, `Link/` (scans list, Mac view, the room scene and splat screens).
 - `Packages/CaptureRules/` — the portable rules and perception, no ARKit: `RuleEngine.swift`, `RuleConfig.swift`, `FrameSample.swift`, `Objects.swift`, `Sightings.swift`, `ObjectTracker.swift`, `Outlines.swift`, `DepthFusion.swift`, `MetricDepth.swift`, `RoomMap.swift`; specs in `Resources/capture-rules.json`, `object-classes.json`, `detection-classes.json`; `phonesim` (the phone's perception over a processed space, on the Mac); `Tests/` (`swift test`).
-- `Resources/` — `Info.plist` and the Core ML models (gitignored, ~150 MB): `RoomObjects` (YOLOE-11m), `MaskEncoder`/`MaskDecoder` (MobileSAM), `RoomSegmentation` (SegFormer-B0), `RoomDepth`, `RoomMetricDepth` (MoGe-2 small).
-- `scripts/` — `convert_objects.py`, `convert_refiner.py`, `convert_segmentation.py`, `convert_depth_moge.py` (PyTorch → Core ML).
+- `Resources/` — `Info.plist` and the Core ML models (gitignored, ~150 MB): `RoomObjects` (YOLOE-11m), `MaskEncoder`/`MaskDecoder` (MobileSAM, or EdgeTAM with `REFINER=edgetam`), `RoomSegmentation` (SegFormer-B0), `RoomDepth`, `RoomMetricDepth` (MoGe-2 small); `SurfaceFill` (Big-LaMa, built on request, not in the app yet).
+- `scripts/` — `convert_objects.py`, `convert_refiner.py`, `convert_refiner_edgetam.py`, `convert_segmentation.py`, `convert_depth_moge.py`, `convert_fill_lama.py` (PyTorch → Core ML).
 - `project.yml`, `build.sh` — XcodeGen project; build, install and launch on the paired iPhone.
 
 ### `apps/OasisLink/` — the phone↔Mac link (Swift package)
@@ -214,7 +228,8 @@ are gitignored: large, generated, or personal footage.)
 ### Colab, scripts, docs
 - `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything), clone, Claude relay, upload, the four stages, download.
 - `scripts/process_video.sh` — the whole chain without the agent; `scripts/make_sample.py` — a synthetic demo room.
-- `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed; `docs/audit-prompts-and-stack-2026-10.md` — every Claude question and every stage-1 option measured on 16 clips, with the field's state of the art per layer and the decisions it leaves open.
+- `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed; `docs/audit-prompts-and-stack-2026-10.md` — every Claude question and every stage-1 option measured on 16 clips, with the field's state of the art per layer and the decisions it leaves open; `docs/on-device-plan-2026-10.md` — the open-source stack that moves reconstruction onto the phone, what was measured for it, and the licence asks.
+- `third_party/arkit-3dgs-scanner/` — the Apache-2.0 snapshot (commit d5d8e31) of Kuo Feng-Yuan's Swift + Metal splat trainer and camera-only pose refinement, kept verbatim; `OASIS-PROVENANCE.md` says why and what we owe.
 - `splats/<video>/best.splat` — the published best splat of each test video.
 
 ## 8. Prerequisites to run everything
