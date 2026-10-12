@@ -1,0 +1,500 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). On-device 3DGS training; see LICENSE and NOTICE.
+import Foundation
+import ImageIO
+import CoreGraphics
+import simd
+
+/// One training view: a selected capture frame with its calibration and pose.
+nonisolated struct TrainingFrame: Codable, Equatable, Sendable {
+    var id: Int
+    var imageFile: String
+    /// Full-resolution calibration of the stored (sensor-oriented) JPEG.
+    var intrinsics: CameraIntrinsics
+    /// ARKit camera-to-world, row-major, as saved by the capture (never modified).
+    var transform: [Double]
+    /// log2(exposure duration × ISO) when recorded; seeds the PPISP exposure.
+    var captureEV: Double?
+    var isValidation: Bool
+    /// Exposure time (s) and camera-frame angular (rad/s) + linear (m/s) velocity from the
+    /// neighbouring poses in time (OpenCV camera axes), for the capture-motion model.
+    var exposure: Double? = nil
+    var motion: [Double]? = nil
+    /// The photo's LiDAR depth (metres along the optical axis) and confidence, when captured.
+    var depthFile: String? = nil
+    var confidenceFile: String? = nil
+    var depthWidth: Int? = nil
+    var depthHeight: Int? = nil
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.id == b.id && a.imageFile == b.imageFile && a.transform == b.transform && a.isValidation == b.isValidation
+            && a.intrinsics.fx == b.intrinsics.fx && a.intrinsics.width == b.intrinsics.width
+    }
+}
+
+/// Views, seed points and training resolution prepared from a saved scan. Reads the scan only;
+/// original images, depth and pose files are never written.
+nonisolated struct TrainingDataset: Sendable {
+    enum PreparationError: LocalizedError {
+        case noFrames, missingImages, incompatibleResolution
+        var errorDescription: String? {
+            switch self {
+            case .noFrames: return L10n.text("沒有可用於訓練的影像與相機姿態")
+            case .missingImages: return L10n.text("找不到訓練影像，掃描資料可能不完整")
+            case .incompatibleResolution: return L10n.text("影像解析度與相機參數不一致，無法訓練")
+            }
+        }
+    }
+
+    let directory: URL
+    let frames: [TrainingFrame]
+    /// Seed points in ARKit world coordinates (metres) with colour.
+    let points: [CloudPoint]
+    let width: Int, height: Int
+    /// Median confident LiDAR depth of the scan (m), when it has depth.
+    var workingDistance: Float? = nil
+    var trainFrames: [Int] { frames.indices.filter { !frames[$0].isValidation } }
+    var validationFrames: [Int] { frames.indices.filter { frames[$0].isValidation } }
+
+    /// A photo with a finite pose, valid intrinsics and a plain image file name.
+    static func isValid(_ r: FrameRecord) -> Bool {
+        r.transform.count == 16 && r.transform.allSatisfy(\.isFinite)
+            && r.intrinsics.width > 0 && r.intrinsics.height > 0 && r.intrinsics.fx > 0 && r.intrinsics.fy > 0
+            && r.imageFile == (r.imageFile as NSString).lastPathComponent
+    }
+
+    /// The records with the blur verdicts a run uses, the usable ones (valid, kept), and the
+    /// selected IDs (see `FrameSelection`). Evaluating again reads a thumbnail of every usable
+    /// photo; with `.stored` the result is cached in `selectionCache`.
+    static func selection(scan directory: URL, saved: [FrameRecord], workingDistance: Float?, frameSelection: FrameSelection,
+                          selectionCache: URL?, isCancelled: () -> Bool = { false })
+        -> (records: [FrameRecord], usable: [FrameRecord], selected: Set<Int>) {
+        let stored = storedSelection(directory.appendingPathComponent("training-selection.json"))
+        var readout: Double?
+        switch frameSelection {
+        case .current(let r): readout = r
+        case .stored where (stored?.version ?? 0) < TrainingFrameSelector.policyVersion: readout = CaptureConfig().rollingShutterReadoutS
+        case .stored, .captured: readout = nil
+        }
+        let scale = TrainingFrameSelector.metricScale(workingDistance: workingDistance)
+        let records = readout.map { BlurFilter.annotate(saved, readout: $0, neighborScale: scale) } ?? saved
+        let usable = records.filter { isValid($0) && $0.blurVerdict == .keep }
+        let usableIDs = Set(usable.map(\.id))
+        if readout == nil, let stored, !Set(stored.selectedIDs).isDisjoint(with: usableIDs) {
+            return (records, usable, Set(stored.selectedIDs))
+        }
+        if case .stored = frameSelection, let selectionCache, let cached = storedSelection(selectionCache),
+           cached.version >= TrainingFrameSelector.policyVersion, cached.inputFrames == records.count,
+           !Set(cached.selectedIDs).isDisjoint(with: usableIDs) {
+            return (records, usable, Set(cached.selectedIDs))
+        }
+        let evidence = TrainingFrameSelector.evidence(records: usable, directory: directory, isCancelled: isCancelled)
+        let report = TrainingFrameSelector.select(records, evidence: evidence, workingDistance: workingDistance)
+        if case .stored = frameSelection, let selectionCache, !isCancelled() {
+            try? FileManager.default.createDirectory(at: selectionCache.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? JSONEncoder().encode(report).write(to: selectionCache, options: .atomic)
+        }
+        return (records, usable, Set(report.selectedIDs))
+    }
+
+    /// How many photos a run of `scan` would use (before any are held out), as `prepare` selects
+    /// them; nil when the scan has none.
+    static func selectedPhotoCount(scan: URL, selectionCache: URL?) -> Int? {
+        let (saved, _) = ScanLibrary.savedRecords(in: scan)
+        let distance = TrainingFrameSelector.workingDistance(records: saved, directory: scan)
+        let (_, usable, selected) = selection(scan: scan, saved: saved, workingDistance: distance, frameSelection: .stored,
+                                              selectionCache: selectionCache)
+        let count = usable.filter { selected.contains($0.id) }.count
+        return count > 0 ? count : nil
+    }
+
+    static func storedSelection(_ url: URL) -> TrainingFrameSelector.Report? {
+        (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(TrainingFrameSelector.Report.self, from: $0) }
+    }
+
+    /// Training resolution for a stored image scaled to `longEdge` (never upscaled).
+    static func trainingSize(width: Int, height: Int, longEdge: Int) -> (Int, Int) {
+        let scale = min(1, Double(longEdge) / Double(max(width, height)))
+        return (max(16, Int((Double(width) * scale).rounded())), max(16, Int((Double(height) * scale).rounded())))
+    }
+
+    /// Which photos train. `stored`: the scan's blur verdicts and selection when they were made
+    /// with the current rules (`TrainingFrameSelector.policyVersion`); older ones are evaluated
+    /// again, cached in `selectionCache` (the scan's own report keeps matching its COLMAP
+    /// export). `current`: always evaluated again. `captured`: the scan's own verdicts and
+    /// report whatever their version (the tools' baseline). The current rules put the blur
+    /// threshold on exposure blur only (with `readout`), and scale the blur neighbours and
+    /// redundancy step with the working distance.
+    enum FrameSelection { case stored, current(readout: Double), captured }
+
+    /// Uses the same inputs as the COLMAP export: the latest review poses (anchor-corrected and
+    /// bundle-adjusted when validated), the RGB frame selection, per-frame intrinsics and the
+    /// saved point cloud. `holdOutEvery` > 0 keeps every n-th selected frame for validation.
+    /// `maxPoints` caps the saved cloud read as seeds; `depthSeedLimit` (given the number of
+    /// cloud points read) adds up to that many seeds from the photos' LiDAR depth where the
+    /// saved cloud has none (see `depthSeeds`).
+    /// `holdOutSegment` > 0 instead holds out one contiguous stretch of that fraction of the
+    /// selected frames, from the middle of the capture (novel views away from the training path).
+    /// `holdOutIDs` fixes the held-out photos (comparing selections on the same views): those
+    /// photos are held out whatever the selection, and no others. `scaledSeedCells` shrinks the
+    /// depth-seed cells below room scale (`TrainingFrameSelector.metricScale`).
+    static func prepare(scan directory: URL, longEdge: Int, holdOutEvery: Int, maxPoints: Int,
+                        depthSeedLimit: (_ cloudPoints: Int) -> Int = { _ in 0 }, holdOutSegment: Double = 0,
+                        frameSelection: FrameSelection = .stored, holdOutIDs: Set<Int>? = nil, scaledSeedCells: Bool = true,
+                        selectionCache: URL? = nil, isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
+        let (saved, _) = ScanLibrary.savedRecords(in: directory)
+        let workingDistance = TrainingFrameSelector.workingDistance(records: saved, directory: directory)
+        let (records, usable, selected) = selection(scan: directory, saved: saved, workingDistance: workingDistance,
+                                                    frameSelection: frameSelection, selectionCache: selectionCache, isCancelled: isCancelled)
+        let valid = records.filter(isValid)
+        guard !usable.isEmpty else { throw PreparationError.noFrames }
+        let scale = TrainingFrameSelector.metricScale(workingDistance: workingDistance)
+        let trained = usable.filter { selected.contains($0.id) }
+        let chosen = (holdOutIDs.map { held in valid.filter { held.contains($0.id) } + trained.filter { !held.contains($0.id) } }
+                      ?? trained).sorted { $0.id < $1.id }
+        guard !chosen.isEmpty else { throw PreparationError.noFrames }
+        // ARKit's raw tracking is smooth frame to frame; corrected pose sets can jump between
+        // segments (anchor updates, relocalisation), which would read as motion.
+        let raw = ScanLibrary.readRecords(directory.appendingPathComponent("poses.jsonl"))
+        let velocities = motion(records: raw.isEmpty ? records : raw)
+        let first = chosen[0].intrinsics
+        let images = directory.appendingPathComponent("images")
+        var frames: [TrainingFrame] = []
+        for (index, record) in chosen.enumerated() {
+            guard record.intrinsics.width == first.width, record.intrinsics.height == first.height else {
+                throw PreparationError.incompatibleResolution
+            }
+            guard FileManager.default.fileExists(atPath: images.appendingPathComponent(record.imageFile).path) else {
+                throw PreparationError.missingImages
+            }
+            let ev: Double? = record.exposureDuration > 0 && record.iso > 0 ? log2(record.exposureDuration * record.iso) : nil
+            frames.append(TrainingFrame(id: record.id, imageFile: record.imageFile, intrinsics: record.intrinsics,
+                                        transform: record.transform, captureEV: ev,
+                                        isValidation: holdOutIDs.map { $0.contains(record.id) } ?? (holdOutSegment > 0
+                                            ? abs(Double(index) + 0.5 - Double(chosen.count) / 2) < holdOutSegment * Double(chosen.count) / 2
+                                            : holdOutEvery > 1 && index % holdOutEvery == holdOutEvery / 2),
+                                        exposure: record.exposureDuration > 0 ? record.exposureDuration : nil,
+                                        motion: velocities[record.id], depthFile: record.depthFile,
+                                        confidenceFile: record.confidenceFile, depthWidth: record.depthWidth,
+                                        depthHeight: record.depthHeight))
+        }
+        if frames.allSatisfy(\.isValidation) || frames.filter({ !$0.isValidation }).isEmpty {
+            for i in frames.indices { frames[i].isValidation = false }
+        }
+        var points: [CloudPoint] = []
+        for name in ["review.ply", "points.ply"] {
+            if let saved = try? ScanLibrary.readPLY(directory.appendingPathComponent(name), limit: maxPoints), !saved.isEmpty {
+                points = saved; break
+            }
+        }
+        let seedLimit = depthSeedLimit(points.count)
+        if seedLimit > 0 {
+            let training = Set(frames.filter { !$0.isValidation }.map(\.id))
+            let cells = scaledSeedCells ? scale : 1
+            points += depthSeeds(records: chosen.filter { training.contains($0.id) }, directory: directory, existing: points,
+                                 limit: seedLimit, voxel: 0.04 * cells, lowConfidenceRange: 4 * cells, isCancelled: isCancelled)
+        }
+        let size = trainingSize(width: first.width, height: first.height, longEdge: longEdge)
+        return TrainingDataset(directory: directory, frames: frames, points: points, width: size.0, height: size.1,
+                               workingDistance: workingDistance)
+    }
+
+    /// Densification only splits existing Gaussians, so surfaces without seeds never get any.
+    /// The fused cloud keeps only depth that passed its consistency checks: on FBDA13 about
+    /// 40% of the 5 cm cells the LiDAR saw had no point. This back-projects a grid of each
+    /// training photo's LiDAR depth and adds one seed (coloured from the photo) per empty
+    /// `voxel` cell: medium/high-confidence depth first, then low-confidence depth closer than
+    /// `lowConfidenceRange` for cells still empty. Reads the scan only.
+    ///
+    /// The 4 cm cell and 4 m range were set on room scans; `prepare` shrinks both below room
+    /// scale. On 94D4DD (a tabletop at 0.35 m) 4 cm cells left 5,583 confident seeds, most of
+    /// them in the background over 1 m away, because the object's surfaces filled their few
+    /// cells at once.
+    ///
+    /// Large scenes have more empty cells than `limit`. Every photo gets an equal share of a
+    /// candidate budget (8 × `limit`; a photo samples its depth more sparsely only when its
+    /// share is smaller than its grid), photos are visited interleaved across the capture, and
+    /// more candidates than `limit` are thinned on a coarser grid. Seeds thus spread over the
+    /// whole scene instead of filling the first photos' surfaces and leaving the rest without.
+    static func depthSeeds(records: [FrameRecord], directory: URL, existing: [CloudPoint], limit: Int,
+                           voxel: Float = 0.04, lowConfidenceRange: Float = 4, stride: Int = 4,
+                           isCancelled: () -> Bool = { false }) -> [CloudPoint] {
+        struct Key: Hashable { var x, y, z: Int32 }
+        func key(_ p: SIMD3<Float>, _ size: Float = voxel) -> Key {
+            Key(x: Int32((p.x / size).rounded(.down)), y: Int32((p.y / size).rounded(.down)), z: Int32((p.z / size).rounded(.down)))
+        }
+        guard limit > 0 else { return [] }
+        var occupied = Set<Key>(minimumCapacity: existing.count)
+        for p in existing { occupied.insert(key(SIMD3(p.x, p.y, p.z))) }
+        // Candidates are kept up to a few times the limit (memory), then thinned.
+        let candidateCap = limit * 8
+        let perPhoto = max(64, candidateCap / max(1, records.count))
+        let spacing = max(1, Int(Double(records.count).squareRoot()))
+        let interleaved = (0..<spacing).flatMap { offset in Swift.stride(from: offset, to: records.count, by: spacing).map { records[$0] } }
+        var seeds: [CloudPoint] = []
+        let depthDirectory = directory.appendingPathComponent("depth"), images = directory.appendingPathComponent("images")
+        for pass in 0..<2 {
+            for record in interleaved where seeds.count < candidateCap {
+                if isCancelled() { return seeds }
+                guard let depthFile = record.depthFile, let confidenceFile = record.confidenceFile,
+                      let w = record.depthWidth, let h = record.depthHeight, w > 0, h > 0, record.transform.count == 16,
+                      let depthData = try? Data(contentsOf: depthDirectory.appendingPathComponent(depthFile)), depthData.count == w * h * 4,
+                      let confidence = try? Data(contentsOf: depthDirectory.appendingPathComponent(confidenceFile)), confidence.count == w * h,
+                      let rgb = TrainingImageLoader.decode(images.appendingPathComponent(record.imageFile), width: w, height: h) else { continue }
+                let k = record.intrinsics
+                let sx = Double(w) / Double(k.width), sy = Double(h) / Double(k.height)
+                let fx = Float(k.fx * sx), fy = Float(k.fy * sy), cx = Float(k.cx * sx), cy = Float(k.cy * sy)
+                let t = record.transform.map(Float.init)
+                // This photo's share of the candidate budget sets its sampling step.
+                let sampleStep = max(stride, Int((Double(w * h) / Double(perPhoto)).squareRoot().rounded(.up)))
+                depthData.withUnsafeBytes { raw in
+                    let depth = raw.bindMemory(to: Float.self)
+                    for y in Swift.stride(from: sampleStep / 2, to: h, by: sampleStep) {
+                        for x in Swift.stride(from: sampleStep / 2, to: w, by: sampleStep) where seeds.count < candidateCap {
+                            let i = y * w + x
+                            let z = depth[i], c = confidence[i]
+                            guard z.isFinite, z > 0.1, pass == 0 ? c >= 1 : (c == 0 && z < lowConfidenceRange) else { continue }
+                            // ARKit camera: x right, y up, looking down -z; image rows go down.
+                            let cam = SIMD3((Float(x) + 0.5 - cx) / fx * z, -(Float(y) + 0.5 - cy) / fy * z, -z)
+                            let world = SIMD3(t[0] * cam.x + t[1] * cam.y + t[2] * cam.z + t[3],
+                                              t[4] * cam.x + t[5] * cam.y + t[6] * cam.z + t[7],
+                                              t[8] * cam.x + t[9] * cam.y + t[10] * cam.z + t[11])
+                            guard world.x.isFinite, world.y.isFinite, world.z.isFinite, occupied.insert(key(world)).inserted else { continue }
+                            seeds.append(CloudPoint(x: world.x, y: world.y, z: world.z, r: rgb[4 * i], g: rgb[4 * i + 1], b: rgb[4 * i + 2]))
+                        }
+                    }
+                }
+            }
+        }
+        return thinned(seeds, limit: limit, voxel: voxel)
+    }
+
+    /// At most `limit` of `seeds`, one per cell of a grid coarse enough for the count: surface
+    /// seeds scale with the area, so the cell grows with √(count / limit). Earlier candidates
+    /// (confident depth, interleaved photos) win their cell.
+    static func thinned(_ seeds: [CloudPoint], limit: Int, voxel: Float) -> [CloudPoint] {
+        guard seeds.count > limit else { return seeds }
+        var size = voxel * Float(Double(seeds.count) / Double(limit)).squareRoot()
+        var kept: [CloudPoint] = []
+        for _ in 0..<8 {
+            struct Key: Hashable { var x, y, z: Int32 }
+            var cells = Set<Key>(minimumCapacity: limit)
+            kept = seeds.filter { p in
+                cells.insert(Key(x: Int32((p.x / size).rounded(.down)), y: Int32((p.y / size).rounded(.down)),
+                                 z: Int32((p.z / size).rounded(.down)))).inserted
+            }
+            if kept.count <= limit { break }
+            size *= 1.2
+        }
+        return Array(kept.prefix(limit))
+    }
+
+    /// Camera-frame angular (rad/s) and linear (m/s) velocity of every record from its
+    /// neighbours in time, [ωx, ωy, ωz, vx, vy, vz] in OpenCV camera axes: with
+    /// W(t + Δ) ≈ exp([ω]× Δ) W(t), a static point moves as p' = ω × p + v.
+    ///
+    /// Records at the ends, next to a gap, whose backward and forward differences disagree (a
+    /// pose jump rather than motion), or faster than handheld limits get none: a wrong velocity
+    /// would blur and shift every splat of that photo.
+    static func motion(records: [FrameRecord]) -> [Int: [Double]] {
+        let sorted = records.filter { $0.transform.count == 16 && $0.transform.allSatisfy(\.isFinite) && $0.timestamp.isFinite }
+            .sorted { $0.timestamp < $1.timestamp }
+        guard sorted.count >= 3 else { return [:] }
+        func split(_ m: simd_double4x4) -> (simd_double3x3, SIMD3<Double>) {
+            (simd_double3x3(SIMD3(m[0][0], m[0][1], m[0][2]), SIMD3(m[1][0], m[1][1], m[1][2]), SIMD3(m[2][0], m[2][1], m[2][2])),
+             SIMD3(m[3][0], m[3][1], m[3][2]))
+        }
+        let poses = sorted.map { split(GaussianCamera.worldToCamera(arkitRowMajorC2W: $0.transform)) }
+        func rates(_ i: Int, _ j: Int) -> (omega: SIMD3<Double>, v: SIMD3<Double>)? {
+            let dt = sorted[j].timestamp - sorted[i].timestamp
+            guard dt > 1e-3, dt < 0.3 else { return nil }
+            let relative = poses[j].0 * poses[i].0.transpose
+            let q = simd_quatd(relative)
+            let angle = q.angle
+            let omega = angle > 1e-9 ? q.axis * (angle > .pi ? angle - 2 * .pi : angle) / dt : SIMD3<Double>()
+            let v = (poses[j].1 - relative * poses[i].1) / dt
+            guard omega.x.isFinite, omega.y.isFinite, omega.z.isFinite, v.x.isFinite, v.y.isFinite, v.z.isFinite else { return nil }
+            return (omega, v)
+        }
+        var out: [Int: [Double]] = [:]
+        for k in 1..<(sorted.count - 1) {
+            guard let back = rates(k - 1, k), let forward = rates(k, k + 1), let central = rates(k - 1, k + 1),
+                  simd_length(back.omega - forward.omega) <= maxAngularChange,
+                  simd_length(back.v - forward.v) <= maxLinearChange,
+                  simd_length(central.omega) <= maxAngularSpeed, simd_length(central.v) <= maxLinearSpeed else { continue }
+            out[sorted[k].id] = [central.omega.x, central.omega.y, central.omega.z, central.v.x, central.v.y, central.v.z]
+        }
+        return out
+    }
+
+    /// Handheld limits for `motion(records:)` (rad/s, m/s) and the largest change between the
+    /// backward and forward differences that still reads as smooth motion.
+    static let maxAngularSpeed = 3.0, maxLinearSpeed = 1.5
+    static let maxAngularChange = 1.5, maxLinearChange = 0.8
+
+    /// Range of the recorded exposure (log2 of exposure duration × ISO) over the scan's frames;
+    /// nil when the capture did not record it. A locked exposure gives ~0.
+    static func exposureRange(scan directory: URL) -> Double? {
+        let evs = ScanLibrary.savedRecords(in: directory).0
+            .compactMap { $0.exposureDuration > 0 && $0.iso > 0 ? log2($0.exposureDuration * $0.iso) : nil }
+        guard let lo = evs.min(), let hi = evs.max() else { return nil }
+        return hi - lo
+    }
+
+    /// PPISP defaults on when the capture's exposure varied (auto exposure); with a locked
+    /// exposure there is little per-image difference to compensate.
+    static let ppispExposureThreshold = 0.15
+
+    init(directory: URL, frames: [TrainingFrame], points: [CloudPoint], width: Int, height: Int, workingDistance: Float? = nil) {
+        self.directory = directory; self.frames = frames; self.points = points; self.width = width; self.height = height
+        self.workingDistance = workingDistance
+    }
+
+    /// Stable identity of the training inputs; a checkpoint only resumes on the same inputs.
+    var signature: String {
+        var hasher = FNV64()
+        hasher.add("\(width)x\(height)")
+        for f in frames {
+            hasher.add("\(f.id)|\(f.imageFile)|\(f.isValidation)|\(f.intrinsics.fx)|\(f.intrinsics.cx)|\(f.intrinsics.cy)")
+            for v in f.transform { hasher.add(v.bitPattern) }
+        }
+        return String(format: "%016llx", hasher.value)
+    }
+
+    /// Rasterizer camera for frame `index` at the training resolution. `delta` is an optional
+    /// pose correction applied in the camera frame: w2c' = [R_d | t_d] · w2c.
+    /// `motion` renders the photo's capture motion (exposure blur and rolling-shutter readout
+    /// in seconds); novel views and previews leave it nil.
+    func camera(_ index: Int, delta: simd_double4x4? = nil, mipFilter: Bool,
+                motion: (blur: Bool, readout: Double)? = nil) -> GaussianCamera {
+        let f = frames[index]
+        let sx = Double(width) / Double(f.intrinsics.width), sy = Double(height) / Double(f.intrinsics.height)
+        var w2c = GaussianCamera.worldToCamera(arkitRowMajorC2W: f.transform)
+        if let delta { w2c = delta * w2c }
+        var camera = GaussianCamera(worldToCamera: w2c, fx: f.intrinsics.fx * sx, fy: f.intrinsics.fy * sy,
+                                    cx: f.intrinsics.cx * sx, cy: f.intrinsics.cy * sy, width: width, height: height,
+                                    mipFilter: mipFilter)
+        if let motion, let m = f.motion, m.count == 6 {
+            camera.angularMotion = SIMD4(Float(m[0]), Float(m[1]), Float(m[2]), Float(motion.readout))
+            camera.linearMotion = SIMD4(Float(m[3]), Float(m[4]), Float(m[5]), motion.blur ? Float(f.exposure ?? 0) : 0)
+        }
+        return camera
+    }
+
+    /// Frame `index`'s LiDAR depth map and confidence, if it has one.
+    func lidarDepth(_ index: Int) -> (width: Int, height: Int, depth: [Float], confidence: [UInt8])? {
+        let f = frames[index]
+        guard let file = f.depthFile, let w = f.depthWidth, let h = f.depthHeight, w > 0, h > 0,
+              let data = try? Data(contentsOf: directory.appendingPathComponent("depth").appendingPathComponent(file)),
+              data.count == w * h * 4 else { return nil }
+        let depth = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        let confidence = f.confidenceFile.flatMap { try? Data(contentsOf: directory.appendingPathComponent("depth").appendingPathComponent($0)) }
+            .flatMap { $0.count == w * h ? [UInt8]($0) : nil } ?? [UInt8](repeating: 1, count: w * h)
+        return (w, h, depth, confidence)
+    }
+
+    func imageURL(_ index: Int) -> URL {
+        directory.appendingPathComponent("images").appendingPathComponent(frames[index].imageFile)
+    }
+}
+
+/// 64-bit FNV-1a, used for dataset signatures and checkpoint integrity.
+nonisolated struct FNV64 {
+    private(set) var value: UInt64 = 0xcbf29ce484222325
+    mutating func add(_ bytes: UnsafeRawBufferPointer) {
+        for b in bytes { value = (value ^ UInt64(b)) &* 0x100000001b3 }
+    }
+    mutating func add(_ string: String) { var s = string; s.withUTF8 { add(UnsafeRawBufferPointer($0)) } }
+    mutating func add<T>(_ value: T) { withUnsafeBytes(of: value) { add($0) } }
+}
+
+/// Decodes training images at the training resolution on demand, with a small bounded cache.
+/// Photos are streamed from the scan's JPEGs; nothing is written to disk.
+nonisolated final class TrainingImageLoader: @unchecked Sendable {
+    enum LoadError: LocalizedError {
+        case decodeFailed(String)
+        var errorDescription: String? {
+            switch self { case .decodeFailed(let name): return L10n.text("無法讀取訓練影像：\(name)") }
+        }
+    }
+
+    let width: Int, height: Int
+    private let capacity: Int
+    private let lock = NSLock()
+    private var cache: [Int: [UInt8]] = [:]
+    private var order: [Int] = []
+    private var pending: Set<Int> = []
+    private let queue = DispatchQueue(label: "gaussian-training.images", qos: .userInitiated)
+    private let url: (Int) -> URL
+
+    static func bytes(width: Int, height: Int, slots: Int) -> Int { width * height * 4 * slots }
+
+    init(width: Int, height: Int, slots: Int, url: @escaping (Int) -> URL) {
+        self.width = width; self.height = height; capacity = max(1, slots); self.url = url
+    }
+
+    /// RGBA8 pixels at the training resolution (sensor orientation, no EXIF transform).
+    static func decode(_ url: URL, width: Int, height: Int) -> [UInt8]? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                        kCGImageSourceThumbnailMaxPixelSize: max(width, height),
+                                        kCGImageSourceShouldCacheImmediately: true]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let ok = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return ok ? pixels : nil
+    }
+
+    /// Starts decoding `index` in the background unless cached or pending.
+    func prefetch(_ index: Int) {
+        lock.lock()
+        guard cache[index] == nil, !pending.contains(index) else { lock.unlock(); return }
+        pending.insert(index)
+        lock.unlock()
+        queue.async { [self] in
+            let pixels = autoreleasepool { Self.decode(url(index), width: width, height: height) }
+            lock.lock()
+            pending.remove(index)
+            if let pixels { insert(index, pixels) }
+            lock.unlock()
+        }
+    }
+
+    private func insert(_ index: Int, _ pixels: [UInt8]) {
+        cache[index] = pixels
+        order.removeAll { $0 == index }
+        order.append(index)
+        while order.count > capacity { cache[order.removeFirst()] = nil }
+    }
+
+    /// Copies frame `index` into `destination` (width × height × 4 bytes), decoding if needed.
+    func load(_ index: Int, into destination: UnsafeMutableRawPointer) throws {
+        lock.lock()
+        let hit = cache[index]
+        let isPending = pending.contains(index)
+        lock.unlock()
+        var pixels = hit
+        if pixels == nil && isPending {
+            queue.sync {}          // wait for the in-flight decode
+            lock.lock(); pixels = cache[index]; lock.unlock()
+        }
+        if pixels == nil {
+            pixels = autoreleasepool { Self.decode(url(index), width: width, height: height) }
+            if let pixels { lock.lock(); insert(index, pixels); lock.unlock() }
+        }
+        guard let pixels else { throw LoadError.decodeFailed(url(index).lastPathComponent) }
+        pixels.withUnsafeBytes { destination.copyMemory(from: $0.baseAddress!, byteCount: width * height * 4) }
+    }
+
+    /// Releases every cached image (memory pressure).
+    func purge() {
+        lock.lock(); cache.removeAll(); order.removeAll(); lock.unlock()
+    }
+}

@@ -1,0 +1,614 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
+//
+//  CoverageVisualizer.swift
+//  fable — AR 實景中的「拍過哪裡」視覺化
+//
+//  疊在 ARSCNView 上的三層線索：
+//  1. 即時點雲（空間磚 + ARAnchor 錨定，防漂移殘影）—— 掃到哪就長到哪
+//  2. 軌跡折線 + 每個關鍵幀的視向箭錐：看得出走過的路徑與拍攝方向
+//  3. RoomPlan 的即時結構線框與 dollhouse 縮圖（RoomPlan 開啟時）
+//
+//  註：物件模式的「視角圓頂」已移除。它假設場景中有一個明確的中心物件，
+//  而實際用途已經轉向室內空間掃描 —— 那裡沒有中心可放，
+//  涵蓋率該回答的是「哪一片表面觀測不足」，那是融合熱圖在做的事。
+//
+
+import Foundation
+import ARKit
+import SceneKit
+import UIKit
+import simd
+
+/// 點雲 SceneKit 渲染共用工具（AR 即時疊加與 Review 檢視器共用）
+nonisolated enum PointCloudRendering {
+
+    /// 由 actor 端打包好的原始 Data 直接組 geometry —— 主執行緒 O(1)，無逐點迴圈
+    static func geometry(positions: Data, colors: Data, indices: Data, count: Int,
+                         minScreenRadius: CGFloat, maxScreenRadius: CGFloat,
+                         pointSize: CGFloat) -> SCNGeometry {
+        let vertexSource = SCNGeometrySource(data: positions, semantic: .vertex,
+                                             vectorCount: count, usesFloatComponents: true,
+                                             componentsPerVector: 3, bytesPerComponent: 4,
+                                             dataOffset: 0, dataStride: 12)
+        let colorSource = SCNGeometrySource(data: colors, semantic: .color,
+                                            vectorCount: count, usesFloatComponents: true,
+                                            componentsPerVector: 3, bytesPerComponent: 4,
+                                            dataOffset: 0, dataStride: 12)
+        let element = SCNGeometryElement(data: indices, primitiveType: .point,
+                                         primitiveCount: count, bytesPerIndex: 4)
+        element.pointSize = pointSize
+        element.minimumPointScreenSpaceRadius = minScreenRadius
+        element.maximumPointScreenSpaceRadius = maxScreenRadius
+        let geometry = SCNGeometry(sources: [vertexSource, colorSource], elements: [element])
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        geometry.materials = [mat]
+        return geometry
+    }
+
+    /// 頂點色 point primitive geometry（一次性建構用，如 Review 檢視器）
+    static func geometry(for points: [CloudPoint],
+                         minScreenRadius: CGFloat = 2,
+                         maxScreenRadius: CGFloat = 7,
+                         pointSize: CGFloat = 0.008) -> SCNGeometry {
+        let vertices = points.map { SCNVector3($0.x, $0.y, $0.z) }
+        let vertexSource = SCNGeometrySource(vertices: vertices)
+
+        var colors = [Float]()
+        colors.reserveCapacity(points.count * 3)
+        for p in points {
+            colors.append(Float(p.r) / 255)
+            colors.append(Float(p.g) / 255)
+            colors.append(Float(p.b) / 255)
+        }
+        let colorData = colors.withUnsafeBufferPointer { Data(buffer: $0) }
+        let colorSource = SCNGeometrySource(data: colorData,
+                                            semantic: .color,
+                                            vectorCount: points.count,
+                                            usesFloatComponents: true,
+                                            componentsPerVector: 3,
+                                            bytesPerComponent: 4,
+                                            dataOffset: 0,
+                                            dataStride: 12)
+
+        let element = SCNGeometryElement(indices: Array(0..<Int32(points.count)),
+                                         primitiveType: .point)
+        element.pointSize = pointSize
+        element.minimumPointScreenSpaceRadius = minScreenRadius
+        element.maximumPointScreenSpaceRadius = maxScreenRadius
+
+        let geometry = SCNGeometry(sources: [vertexSource, colorSource], elements: [element])
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        geometry.materials = [mat]
+        return geometry
+    }
+
+    /// 折線（軌跡用）
+    static func polyline(_ points: [SCNVector3], color: UIColor) -> SCNGeometry {
+        let source = SCNGeometrySource(vertices: points)
+        var indices: [Int32] = []
+        indices.reserveCapacity((points.count - 1) * 2)
+        for i in 0..<(points.count - 1) {
+            indices.append(Int32(i))
+            indices.append(Int32(i + 1))
+        }
+        let element = SCNGeometryElement(indices: indices, primitiveType: .line)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        let mat = SCNMaterial()
+        mat.diffuse.contents = color
+        mat.lightingModel = .constant
+        geometry.materials = [mat]
+        return geometry
+    }
+}
+
+final class CoverageVisualizer {
+
+    private let config: CaptureConfig
+    private let root = SCNNode()
+    private let pathNode = SCNNode()
+    private let pointsRoot = SCNNode()             // 即時點雲（空間磚節點掛載處）
+    private let roomRoot = SCNNode()               // RoomPlan 即時面（發光邊框）
+    private var roomNodes: [SCNNode] = []          // 每個面一個節點，底下四條邊
+    private let dollRoot = SCNNode()               // Dollhouse：擺位（相機前下方）
+    private let dollContent = SCNNode()            // Dollhouse：內容（房間縮放到原點）
+    private var dollNodes: [SCNNode] = []          // [0] 地板板，其後每個元素一個方塊
+    private var dollPlaced = false
+    private var tileNodes: [Int64: SCNNode] = [:]  // tileKey → 節點（幾何為錨點局部座標）
+    private var pathPoints: [SCNVector3] = []
+    /// All captured-view markers in one geometry (5 vertices per photo; see CameraMarkerLines).
+    private let markerNode = SCNNode()
+    private var markerVertices: [SIMD3<Float>] = []
+    private lazy var markerMaterial: SCNMaterial = {
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor.systemCyan.withAlphaComponent(0.6)
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        return material
+    }()
+
+    init(config: CaptureConfig) {
+        self.config = config
+        root.addChildNode(pathNode)
+        root.addChildNode(markerNode)
+        root.addChildNode(pointsRoot)
+        root.addChildNode(roomRoot)
+        dollRoot.addChildNode(dollContent)
+        root.addChildNode(dollRoot)
+    }
+
+    func attach(to scene: SCNScene) {
+        scene.rootNode.addChildNode(root)
+    }
+
+    func reset() {
+        pathPoints.removeAll()
+        pathNode.geometry = nil
+        markerVertices.removeAll()
+        markerNode.geometry = nil
+        for child in root.childNodes
+        where child !== pathNode && child !== markerNode && child !== pointsRoot && child !== roomRoot
+              && child !== dollRoot {
+            child.removeFromParentNode()
+        }
+        for n in roomNodes { n.removeFromParentNode() }
+        roomNodes.removeAll()
+        for n in dollNodes { n.removeFromParentNode() }
+        dollNodes.removeAll()
+        dollPlaced = false
+        dollContent.isHidden = true
+        for tile in pointsRoot.childNodes {
+            tile.removeFromParentNode()
+        }
+        tileNodes = [:]
+    }
+
+    // MARK: - 即時點雲疊加（空間磚 + ARAnchor 錨定，防漂移殘影）
+
+    /// Processing uses a separate review cloud. Release GPU geometry before allocating it;
+    /// the accumulator retains geometry and redraws all tiles when scanning resumes.
+    func releasePointCloudGeometry() {
+        for node in tileNodes.values { node.geometry = nil; node.removeFromParentNode() }
+        tileNodes.removeAll()
+    }
+
+    func setPointCloudHidden(_ hidden: Bool) {
+        pointsRoot.isHidden = hidden
+    }
+
+    // MARK: - RoomPlan 即時疊加（掃到哪就看到哪）
+
+    func setRoomHidden(_ hidden: Bool) {
+        roomRoot.isHidden = hidden
+    }
+
+    /// 發光核心的半徑（公尺）。6mm 直徑。
+    private static let kEdgeRadius: CGFloat = 0.003
+    /// 外暈半徑。1.8cm 直徑。
+    ///
+    /// **視覺粗細是由這一層決定的，不是核心。** 外暈是等 alpha 的圓柱（不是真的
+    /// 有衰減的光暈），而且是加法混色 —— 在明亮的室內牆面上，0.16 的 alpha 疊上去
+    /// 就已經接近飽和，於是整條讀起來就是外暈的直徑。
+    /// 先前兩次調細都只動核心，所以看起來沒什麼變化；這次外暈一起收，
+    /// 並把 alpha 再降一階讓它真的只是暈。
+    private static let kGlowRadius: CGFloat = 0.009
+
+    /// 用 RoomPlan 當下偵測到的面疊出**發光白色邊框**。
+    ///
+    /// 為什麼是邊框不是填色面板：填色會把整面牆蓋掉，使用者反而看不到真實畫面
+    /// 與點雲；而 RoomPlan 要傳達的資訊是「這個面已經被認出來了、範圍到哪」，
+    /// 邊框剛好只講這件事。這也是 Apple 自己的 RoomCaptureView 的做法。
+    ///
+    /// **重用節點而不是每次重建。** didUpdate 觸發得比畫面更新還密，
+    /// 每次重建整組節點會讓 SceneKit 不斷重新上傳幾何 —— 掃描中最不能做的就是
+    /// 在主執行緒上製造這種尖峰（會餓死 ARKit 的 VIO）。
+    /// 面數變動時只增減差額，其餘就地改尺寸與變換。
+    /// 生長動畫的時間。**略長於 didUpdate 的節流間隔（0.2s）** ——
+    /// 這樣每一次更新的補間都還沒走完就接上下一次，看起來是連續長出來的；
+    /// 短於節流間隔的話會變成「動一下、停一下」，比直接跳還難看。
+    private static let kGrowDuration: CFTimeInterval = 0.24
+    /// 新面「畫出來」的時間。刻意比延伸慢 —— 那一段是要被看見的過程本身，
+    /// 用 0.24s 畫完等於又回到「一口氣出現」。
+    private static let kDrawDuration: CFTimeInterval = 0.5
+
+    func updateRoomSurfaces(_ surfaces: [RoomSurface]) {
+        while roomNodes.count > surfaces.count {
+            roomNodes.removeLast().removeFromParentNode()
+        }
+        // 新面：先以「長度趨近 0、全透明」就位，下面的補間才會是**從零長出來**，
+        // 而不是整個矩形憑空出現。
+        var fresh: [Int] = []
+        while roomNodes.count < surfaces.count {
+            let n = Self.makeFrameNode(parent: roomRoot)
+            n.opacity = 0
+            fresh.append(roomNodes.count)
+            roomNodes.append(n)
+        }
+        if !fresh.isEmpty {
+            // 初始狀態要自己一個 duration 0 的交易 —— 否則它會跟目標狀態
+            // 在同一次提交裡被合併掉，等於沒有起點可以補間
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0
+            for i in fresh {
+                let s = surfaces[i]
+                // **起點放在這面牆的一端，不是中心。**
+                //
+                // 尺寸 0 擺在最終中心的話，補間出來是「從中間往兩邊綻開」——
+                // 那看起來像一個矩形憑空長大，不是線被畫出去。
+                // 退到局部 -X 那一端再長回來，才是「掃到哪畫到哪」的手感。
+                //
+                // （既有面的延伸本來就已經是端點錨定的：RoomPlan 把牆加長時
+                //   會同時回報新的中心與新的寬度，兩者一起線性補間的結果
+                //   就是一端不動、另一端往外走。缺的一直只有第一次出現。）
+                var t = s.transform
+                t.columns.3 -= t.columns.0 * (s.size.x / 2)
+                Self.layoutEdges(roomNodes[i], size: .zero, box: s.isBox,
+                                 color: Self.roomColor(s.kind))
+                roomNodes[i].simdTransform = t
+            }
+            SCNTransaction.commit()
+        }
+
+        // **新面與既有面用不同的緩動，而且必須分成兩個交易。**
+        //
+        // 新面要的是「畫出來」的手感 → easeOut，起步快、末段收慢。
+        // 既有面要的是連續延伸 → 必須線性：每 0.2s 就有一個新目標，
+        // 而 easeOut 每一段末尾都在減速、下一段開頭又衝出去 ——
+        // 疊起來就是規律的脈動，正是「不夠流暢」的來源。
+        // 線性讓速度跨段一致，看起來就是一條穩定往前長的線。
+        let existing = Set(0..<surfaces.count).subtracting(fresh)
+        func apply(_ indices: some Sequence<Int>, timing: CAMediaTimingFunctionName,
+                   duration: CFTimeInterval) {
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = duration
+            SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: timing)
+            for i in indices {
+                let s = surfaces[i]
+                Self.layoutEdges(roomNodes[i], size: s.size, box: s.isBox,
+                                 color: Self.roomColor(s.kind))
+                roomNodes[i].simdTransform = s.transform
+                roomNodes[i].opacity = 1
+            }
+            SCNTransaction.commit()
+        }
+        // 新面用比較長的時間 —— 這一段是「線被畫出去」，太快就看不出過程；
+        // 既有面則要跟上 0.2s 的資料節奏，慢了會落後於實際掃到的範圍。
+        apply(fresh, timing: .easeOut, duration: Self.kDrawDuration)
+        apply(existing.sorted(), timing: .linear, duration: Self.kGrowDuration)
+    }
+
+    /// 一個面的邊框 = 四條**圓管**（上下左右），每條再套一層外暈。
+    ///
+    /// **為什麼是圓管不是平面細條。** 邊框躺在牆面的平面上，而掃描時使用者
+    /// 大多是沿著牆走、以掠射角看它 —— 平面細條在那個角度會縮成一條看不見的線，
+    /// 於是「掃到哪了」這件事在最需要的時候剛好消失。
+    /// 圓管的截面從任何方向看都一樣，這也是 RoomPlan 原生視覺的做法。
+    /// 一律配 12 條邊（3D 盒的上限）。平面矩形只用前 4 條，其餘隱藏 ——
+    /// 這樣同一個節點可以在「牆」與「家具」之間重用，不必因為種類變了就重建。
+    private static let kMaxEdges = 12
+
+    private static func makeFrameNode(parent: SCNNode) -> SCNNode {
+        let node = SCNNode()
+        for _ in 0..<kMaxEdges {
+            let edge = SCNNode()
+            // 外暈掛成子節點：跟著同一個位置與旋轉，只是更粗更淡。
+            // 它不再自己縮放 —— 長度由父節點的 scale 帶著走。
+            edge.addChildNode(SCNNode())
+            node.addChildNode(edge)
+        }
+        node.renderingOrder = 10
+        parent.addChildNode(node)
+        return node
+    }
+
+    /// 共用的單位圓柱（高度 1），長度改由節點的 Y 縮放決定。
+    ///
+    /// **不要每條邊各自持有一份幾何。** 一個房間可能有 30 個元素 × 最多 12 條邊
+    /// × 2 層（核心＋外暈）＝ 720 份幾何與 draw call ——
+    /// 而這是疊在 ARKit 之上、每幀都要畫的東西，主執行緒與 GPU 都吃不消。
+    /// 依「顏色 × 層」快取之後只剩 8 份，SceneKit 就能把它們批次掉。
+    private static var tubeCache: [String: SCNCylinder] = [:]
+
+    private static func tube(color: UIColor, glow: Bool) -> SCNCylinder {
+        let key = "\(color.hashValue)-\(glow)"
+        if let c = tubeCache[key] { return c }
+        let c = SCNCylinder(radius: glow ? kGlowRadius : kEdgeRadius, height: 1)
+        // 圓周分段壓到 8：這是 2cm 粗的管子，再細分也看不出來
+        c.radialSegmentCount = 8
+        let m = SCNMaterial()
+        m.lightingModel = .constant     // 不吃場景光照：這是 HUD 疊加不是實體
+        m.writesToDepthBuffer = false   // 不遮住點雲與真實畫面的深度關係
+        m.blendMode = .add              // 加法混色 → 亮處發光，暗處不會變成灰塊
+        m.diffuse.contents = color
+        m.transparency = glow ? 0.10 : 1.0
+        c.materials = [m]
+        tubeCache[key] = c
+        return c
+    }
+
+    // MARK: - Dollhouse：掃到哪就長到哪的房間縮圖
+
+    /// 縮圖的邊長上限（公尺）。
+    ///
+    /// **這是角尺寸問題，不是「大小」問題。** 固定距離 ＋ 固定邊長 ＝ 固定的螢幕占比：
+    ///   0.25m @ 0.55m 遠 → 張角 ~25°，在 ~60° 的垂直視角下佔掉螢幕四成
+    /// 實機畫面因此被縮圖蓋住下半部。官方大約只佔 15~18%，換算張角 ~10°：
+    ///   0.12m @ 0.65m 遠 → 張角 ~10.6°
+    private static let kDollSize: Float = 0.12
+    /// 擺放位置：視點前方 / 下方（公尺）。
+    ///
+    /// 螢幕上的高度由俯角決定：atan(down / forward)，在 ~60° 的垂直視角下
+    /// 每 0.6° 約等於螢幕 1%。0.19 / 0.65 → 16.3° → 中心約在螢幕 77% 高度、
+    /// 整塊佔 68~86%，剛好落在快門鈕上方。
+    /// （60° 是估的 —— 不同機型的視角有差，這兩個值是可以直接調的。）
+    private static let kDollForward: Float = 0.65
+    private static let kDollDown: Float = 0.19
+
+    /// 用 RoomPlan 當下的房間長出白色實體縮圖：地板板 + 半透明牆 + 家具方塊。
+    ///
+    /// 為什麼要有它：線框告訴使用者「這個面被認出來了」，但看不出**整體**掃到多少。
+    /// 縮圖把已辨識的房間整個攤在眼前，缺一面牆、少一塊角落一眼就看得到 ——
+    /// 那正是大範圍掃描最需要、而掃完才發現就來不及的資訊。
+    /// 縮圖出現的門檻：至少兩面牆、且水平跨度像個房間。
+    ///
+    /// **沒有這道閘門，縮圖會在還不成房間的時候就畫出一堆歪斜白面。**
+    /// RoomPlan 是房間掃描器 —— 對著桌面掃時它會把螢幕邊、桌緣硬判成「牆」，
+    /// 那時的「房間」只是兩三片方向亂七八糟的面。把它縮放到 12cm 擺在眼前，
+    /// 看起來就是幾片橫跨畫面的白色斜板，而不是房間縮圖。
+    /// 線框那一層不必等（單獨一面牆被認出來也是有用的回饋），但縮圖要。
+    private static let kDollMinWalls = 2
+    private static let kDollMinSpanM: Float = 1.2
+
+    func updateDollhouse(_ surfaces: [RoomSurface]) {
+        func clear() {
+            for n in dollNodes { n.removeFromParentNode() }
+            dollNodes.removeAll()
+            dollContent.isHidden = true
+        }
+        guard !surfaces.isEmpty else { return clear() }
+
+        // 房間的世界包圍盒：逐元素轉換 8 個角點（元素不多，精確算比估算省事）
+        var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        for s in surfaces {
+            let h = s.size / 2
+            for sx in [-h.x, h.x] { for sy in [-h.y, h.y] { for sz in [-h.z, h.z] {
+                let p = s.transform * SIMD4<Float>(sx, sy, sz, 1)
+                lo = simd_min(lo, SIMD3(p.x, p.y, p.z))
+                hi = simd_max(hi, SIMD3(p.x, p.y, p.z))
+            } } }
+        }
+        let extent = hi - lo
+        let center = (hi + lo) / 2
+
+        let walls = surfaces.reduce(0) { $1.kind == .wall ? $0 + 1 : $0 }
+        guard walls >= Self.kDollMinWalls,
+              max(extent.x, extent.z) >= Self.kDollMinSpanM else { return clear() }
+        dollContent.isHidden = false
+
+        let scale = Self.kDollSize / max(0.1, max(extent.x, max(extent.y, extent.z)))
+
+        // 節點增減必須在交易**之外**：新節點要以 opacity 0 起步，
+        // 若在動畫交易裡設 0 會先淡出再淡入，變成閃一下
+        let need = surfaces.count + 1
+        while dollNodes.count > need { dollNodes.removeLast().removeFromParentNode() }
+        while dollNodes.count < need {
+            let n = SCNNode()
+            n.geometry = SCNBox(width: 1, height: 1, length: 1, chamferRadius: 0)
+            n.opacity = 0                 // 新元素淡入，與線框的生長動畫同一個節奏
+            dollContent.addChildNode(n)
+            dollNodes.append(n)
+        }
+
+        // 以下全部走補間。**比例尺也要在裡面** —— 房間長大時 scale 每 0.4s 就換一次，
+        // 那是整個縮圖一跳一跳最主要的來源，比單一元素的尺寸變化明顯得多。
+        // 線性：縮圖的比例尺與各元素尺寸每 0.2s 就換一次目標，
+        // 緩動會讓整個房間規律地漲一下停一下。等速才看得出是穩定長大。
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = Self.kGrowDuration
+        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .linear)
+        defer { SCNTransaction.commit() }
+
+        // 內容節點：把世界座標的房間搬到原點並縮小；擺放由 dollRoot 負責
+        dollContent.simdScale = SIMD3<Float>(repeating: scale)
+        dollContent.simdPosition = -center * scale
+        for n in dollNodes { n.opacity = 1 }
+
+        // 地板：房間 XZ 範圍的一片薄板，落在最低點
+        let plate = dollNodes[0]
+        if let b = plate.geometry as? SCNBox {
+            b.width = CGFloat(max(0.1, extent.x))
+            b.length = CGFloat(max(0.1, extent.z))
+            b.height = CGFloat(max(0.02, extent.y) * 0.02)
+            b.firstMaterial = Self.dollMaterial(.floor)
+        }
+        plate.simdPosition = SIMD3<Float>(center.x, lo.y, center.z)
+        plate.simdOrientation = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+
+        for (i, s) in surfaces.enumerated() {
+            let n = dollNodes[i + 1]
+            guard let b = n.geometry as? SCNBox else { continue }
+            b.width = CGFloat(max(0.01, s.size.x))
+            b.height = CGFloat(max(0.01, s.size.y))
+            // 牆的 depth 常常是 0 —— 給它一點厚度才看得出是一片牆而不是一條線
+            b.length = CGFloat(max(s.isBox ? 0.01 : 0.04, s.size.z))
+            b.firstMaterial = Self.dollMaterial(s.isBox ? .object : .wall)
+            n.simdTransform = s.transform
+        }
+    }
+
+    private enum DollPart { case floor, wall, object }
+
+    /// 材質共用（三種），理由同 tube()：這是每幀都要畫的疊加，不能一個節點一份材質。
+    private static var dollMaterials: [String: SCNMaterial] = [:]
+    private static func dollMaterial(_ part: DollPart) -> SCNMaterial {
+        let key = "\(part)"
+        if let m = dollMaterials[key] { return m }
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.isDoubleSided = true
+        // **半透明幾何不能寫深度。** 先寫入的面會把它後面、還沒畫到的半透明面
+        // 整片剔掉 —— 結果就是大塊的白色多邊形硬邊，而不是層層疊透的房間。
+        // 實機畫面上那些橫跨螢幕的白色斜面就是這個。
+        m.writesToDepthBuffer = false
+        switch part {
+        case .floor:  m.diffuse.contents = UIColor.white;                    m.transparency = 0.95
+        case .wall:   m.diffuse.contents = UIColor(white: 0.88, alpha: 1);   m.transparency = 0.55
+        case .object: m.diffuse.contents = UIColor(white: 0.97, alpha: 1);   m.transparency = 0.92
+        }
+        dollMaterials[key] = m
+        return m
+    }
+
+    /// 每幀擺位：**畫面座標**的固定偏移（螢幕位置固定），但朝向維持世界對齊。
+    ///
+    /// 位置用視點座標、朝向用世界座標，這個組合才對：
+    ///   · 位置若用世界座標（相機位置 ＋ 水平前方，忽略俯仰）——
+    ///     低頭掃地板時那個世界點沒動，但視線轉下去了，縮圖就往螢幕上方跑掉。
+    ///   · 朝向若也跟著相機轉，它就變成一張貼在鏡頭上的貼紙，讀不出方位；
+    ///     維持世界對齊才像一張攤在眼前的地圖。
+    ///
+    /// - Parameter pov: **必須是 ARSCNView.pointOfView 的世界變換，不是
+    ///   ARCamera.transform。** 後者的座標系與介面方向無關：X 軸永遠沿著裝置長軸
+    ///   （前鏡頭 → Home 鍵）、Y 軸是 landscapeRight 下的「上」。
+    ///   直向 App 直接拿它當「下方」用，實際會偏到螢幕左邊 ——
+    ///   實機看到縮圖跑到左上角就是這個。
+    ///   pointOfView 已經套過介面方向，+X 右、+Y 上、-Z 前，各方向都不必再換算。
+    ///
+    /// 位置做指數平滑，否則手震會讓它抖。
+    func placeDollhouse(pov: simd_float4x4) {
+        guard !dollContent.isHidden else { return }
+        let local = SIMD4<Float>(0, -Self.kDollDown, -Self.kDollForward, 1)
+        let w = pov * local
+        let target = SIMD3<Float>(w.x, w.y, w.z)
+        if dollPlaced {
+            dollRoot.simdPosition += (target - dollRoot.simdPosition) * 0.18
+        } else {
+            dollRoot.simdPosition = target
+            dollPlaced = true
+        }
+    }
+
+    func setDollhouseHidden(_ hidden: Bool) { dollRoot.isHidden = hidden }
+
+    /// 一條邊：長度、中心位置、沿哪個軸
+    private enum EdgeAxis { case x, y, z }
+    private struct Edge { var length: Float; var at: SIMD3<Float>; var axis: EdgeAxis }
+
+    /// 平面矩形取 4 條邊（XY 平面上），3D 盒取 12 條。
+    private static func edges(size: SIMD3<Float>, box: Bool) -> [Edge] {
+        let hx = max(0.01, size.x) / 2, hy = max(0.01, size.y) / 2
+        let w = hx * 2, h = hy * 2
+        guard box else {
+            return [Edge(length: w, at: [0,  hy, 0], axis: .x),
+                    Edge(length: w, at: [0, -hy, 0], axis: .x),
+                    Edge(length: h, at: [-hx, 0, 0], axis: .y),
+                    Edge(length: h, at: [ hx, 0, 0], axis: .y)]
+        }
+        let hz = max(0.01, size.z) / 2
+        let d = hz * 2
+        var out: [Edge] = []
+        for sy in [hy, -hy] { for sz in [hz, -hz] {
+            out.append(Edge(length: w, at: [0, sy, sz], axis: .x))
+        } }
+        for sx in [hx, -hx] { for sz in [hz, -hz] {
+            out.append(Edge(length: h, at: [sx, 0, sz], axis: .y))
+        } }
+        for sx in [hx, -hx] { for sy in [hy, -hy] {
+            out.append(Edge(length: d, at: [sx, sy, 0], axis: .z))
+        } }
+        return out
+    }
+
+    /// SCNCylinder 的軸是 +Y：沿 X 的邊繞 Z 轉 90°，沿 Z 的邊繞 X 轉 90°，沿 Y 的不動。
+    private static func layoutEdges(_ node: SCNNode, size: SIMD3<Float>, box: Bool,
+                                    color: UIColor) {
+        let list = edges(size: size, box: box)
+        for (i, child) in node.childNodes.enumerated() {
+            guard i < list.count else { child.isHidden = true; continue }
+            child.isHidden = false
+            let e = list[i]
+            // 幾何是共用的單位圓柱，長度用 Y 縮放做出來（子節點的外暈跟著一起拉）
+            child.geometry = tube(color: color, glow: false)
+            child.childNodes.first?.geometry = tube(color: color, glow: true)
+            child.simdScale = SIMD3<Float>(1, max(0.01, e.length), 1)
+            child.simdPosition = e.at
+            switch e.axis {
+            case .x: child.simdEulerAngles = SIMD3<Float>(0, 0, .pi / 2)
+            case .y: child.simdEulerAngles = .zero
+            case .z: child.simdEulerAngles = SIMD3<Float>(.pi / 2, 0, 0)
+            }
+        }
+    }
+
+    /// 牆用白色 —— 那是 RoomPlan 原生的視覺語言，使用者一眼認得出「這是房間結構」。
+    /// 門窗開口給顏色，因為那正是最該檢查有沒有被誤判的地方。
+    /// 疊加混色下顏色會被相機畫面加亮，所以不必再調高 alpha。
+    private static func roomColor(_ kind: RoomSurface.Kind) -> UIColor {
+        switch kind {
+        case .wall, .object: UIColor.white
+        case .door:          UIColor.systemGreen
+        case .window:        UIColor.systemTeal
+        case .opening:       UIColor.systemOrange
+        }
+    }
+
+    /// 刷新一塊空間磚：geometry 的頂點是「錨點局部座標」，節點變換 = 該磚錨點當下變換。
+    /// ARKit 漂移修正 / 重定位調整錨點 → syncTileTransforms 把節點移到新位置 →
+    /// 整磚點雲跟著實體表面走，回原視角不錯位（Scaniverse 同款行為）。
+    /// 渲染資料已在 actor 端打包完成，這裡只做 O(1) 包裝 —— 不佔主執行緒時間。
+    func updateTile(_ tile: TileRenderData, transform: simd_float4x4) {
+        guard tile.count > 0 else { return }
+        let node: SCNNode
+        if let existing = tileNodes[tile.key] {
+            node = existing
+        } else {
+            node = SCNNode()
+            pointsRoot.addChildNode(node)
+            tileNodes[tile.key] = node
+        }
+        node.simdTransform = transform
+        node.geometry = PointCloudRendering.geometry(positions: tile.positions,
+                                                     colors: tile.colors,
+                                                     indices: tile.indices,
+                                                     count: tile.count,
+                                                     minScreenRadius: 1.5,
+                                                     maxScreenRadius: 6,
+                                                     pointSize: 0.01)
+    }
+
+    /// 每幀同步：ARKit 修正了哪些磚錨點，對應節點就移到哪（防殘影核心）
+    func syncTileTransforms(_ transforms: [Int64: simd_float4x4]) {
+        for (key, xform) in transforms {
+            tileNodes[key]?.simdTransform = xform
+        }
+    }
+
+    // MARK: - 圓頂
+
+    func addKeyframe(pose: simd_float4x4) {
+        let p = MatrixUtil.position(pose)
+        pathPoints.append(SCNVector3(p.x, p.y, p.z))
+        if pathPoints.count >= 2 {
+            pathNode.geometry = PointCloudRendering.polyline(pathPoints,
+                                                            color: .systemGreen)
+        }
+        addDirectionMarker(pose: pose)
+    }
+
+    /// 小箭錐標記已拍視角（線框，底面貼相機、尖端指向拍攝方向）。
+    /// 全部標記共用一個幾何與材質：先前每張照片一個節點，SceneKit 每幀就多一次繪製呼叫，
+    /// 拍到數百張後這部分會佔掉大半幀時間。重建只在存下照片時發生（每秒數次、數千個頂點）。
+    private func addDirectionMarker(pose: simd_float4x4) {
+        CameraMarkerLines.append(pose: pose, to: &markerVertices)
+        let source = SCNGeometrySource(vertices: markerVertices.map { SCNVector3($0.x, $0.y, $0.z) })
+        let element = SCNGeometryElement(indices: CameraMarkerLines.indices(markers: markerVertices.count / CameraMarkerLines.corners.count),
+                                         primitiveType: .line)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        geometry.materials = [markerMaterial]
+        markerNode.geometry = geometry
+    }
+
+}

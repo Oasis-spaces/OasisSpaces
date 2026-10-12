@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
+import ARKit
+
+/// 新掃描才能載入世界地圖；續掃沿用 session 的座標系與錨點。
+@MainActor
+enum CaptureSessionConfiguration {
+    static func make(config: CaptureConfig, useLiDAR: Bool = true, initialWorldMap: ARWorldMap? = nil) -> ARWorldTrackingConfiguration {
+        let result = ARWorldTrackingConfiguration()
+        result.worldAlignment = .gravity
+        result.environmentTexturing = .none
+        result.isAutoFocusEnabled = true
+        result.initialWorldMap = initialWorldMap
+        if useLiDAR, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            result.frameSemantics.insert(.sceneDepth)
+        }
+        // All capture/fusion paths use sceneDepth; do not allocate an unused smoothed-depth stream.
+        if useLiDAR, config.useSceneMesh, ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            result.sceneReconstruction = .mesh
+        }
+        return result
+    }
+}

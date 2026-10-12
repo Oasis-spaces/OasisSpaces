@@ -1,0 +1,711 @@
+// App text. Keep keys and format placeholders in sync across languages.
+"  ← 目前使用" = "  ← Current";
+"%@ 分鐘前" = "%@ min ago";
+"%@ 天前" = "%@ days ago";
+"%@ 小時前" = "%@ hr ago";
+"%@ 幀" = "%@ frames";
+"%@ 幀未選為訓練影像，深度仍供融合" = "%@ frames not selected for training; depth remains available for fusion";
+"%@ 張低紋理或資料不足，無法判定清晰度。" = "%@ images have low texture or insufficient data to assess sharpness.";
+"%@ 張影像" = "%@ images";
+"%@ 張拍攝時的運動估計偏高；這不代表照片已模糊，也不單獨要求補拍。" = "%@ images have high estimated motion during capture. This does not confirm blur or require recapture on its own.";
+"%@ 張視角細節偏弱，建議檢查或補拍（影格 %@）。" = "%@ views have weak detail. Review or recapture them (frames %@).";
+"%@ 房 · %@ 牆 · " = "%@ rooms · %@ walls · ";
+"%@ 牆 · 由點雲抽出" = "%@ walls · Extracted from point cloud";
+"%@ 門 · %@ 窗" = "%@ doors · %@ windows";
+"%@ 項掃描提醒" = "%@ scan notes";
+"%@k 點" = "%@k points";
+"3D 點雲" = "3D point cloud";
+"3DGS 那種繞著物件拍的路徑產生不出完整的牆）" = "circling an object for 3DGS does not capture complete walls.)";
+"BA 保留集 %@ 通過，但總開關關著 ⇒ 位姿未修正" = "BA holdout %@ passed, but pose updates are disabled";
+"BA 已套用位姿（保留集 %@）" = "BA poses applied (holdout %@)";
+"BA 未套用（保留集 %@，此距離下位姿誤差低於觀測雜訊）" = "BA not applied (holdout %@; estimated pose error below observation noise at this range)";
+"LiDAR 已關閉" = "LiDAR disabled";
+"LiDAR 深度掃描" = "LiDAR depth scanning";
+"LiDAR 開啟" = "LiDAR on";
+"LiDAR 關閉・相機模式" = "LiDAR off · Camera mode";
+"RoomPlan 需要沿著牆面掃過去；\n只繞著物件拍不會產生牆" = "RoomPlan needs views along the walls.\nCircling an object alone does not capture the walls.";
+"・%@ 個點" = " · %@ points";
+"上一張" = "Previous image";
+"下一張" = "Next image";
+"世界地圖已存 %.1f MB —— 下次可延續同一座標系" = "Saved %.1f MB world map — reuse the coordinate system next time";
+"仍可播放拍攝影像" = "Captured images can still be played";
+"例如：客廳、主臥、書房" = "For example: living room, bedroom, study";
+"修正幅度超出安全範圍，保留原本位置。" = "Correction exceeds safety limits. Original poses preserved.";
+"停止後以重疊照片重建點雲，需較多處理時間" = "Reconstruct a point cloud from overlapping photos after stopping; requires more processing time";
+"停止跟隨拍攝位置" = "Stop following camera position";
+"側向移動以驗證特徵點" = "Move sideways to validate features";
+"僅相機追蹤，保留影像與稀疏點雲" = "Camera tracking only; saves images and a sparse point cloud";
+"優化版本已儲存" = "Optimized copy saved";
+"優化訓練資料" = "Optimize training data";
+"儲存" = "Save";
+"儲存影像並產生點雲" = "Save images and generate point cloud";
+"儲藏" = "Storage";
+"光線不足，請補光或移至較亮處" = "Too dark. Add light or move to a brighter area.";
+"光線不足，請開燈" = "Too dark. Turn on a light.";
+"光線過強，注意過曝" = "Light is too bright. Watch for overexposure.";
+"全螢幕預覽" = "Full-screen preview";
+"全選" = "Select all";
+"全部刪除" = "Delete all";
+"共 %@ 筆" = "%@ scans";
+"分享 .zip" = "Share .zip";
+"分享掃描" = "Share scan";
+"切換真實顏色" = "Switch to true colors";
+"刪除" = "Delete";
+"刪除 %@ 筆掃描？" = "Delete %@ scans?";
+"刪除全部 %@ 筆掃描？" = "Delete all %@ scans?";
+"刪除所選（%@）" = "Delete selected (%@)";
+"刪除掃描資料" = "Delete scan data";
+"刪除掃描？" = "Delete scans?";
+"刪除照片、模型與所有資料" = "Delete photos, models, and all data";
+"刪除這次掃描？" = "Delete this scan?";
+"剛剛" = "Just now";
+"包含舊版拍攝的掃描。刪除會一併移除照片、模型、點雲與分享檔案。" = "Includes scans from earlier versions. Deleting removes photos, models, point clouds, and share archives.";
+"匯出 3DGS 訓練資料" = "Export 3DGS dataset";
+"匯出失敗：%@。資料已保留，可重新匯出。" = "Export failed: %@. Data is preserved; you can retry.";
+"匯出影像、相機姿態與點雲，供外部 3DGS 訓練使用。" = "Export images, camera poses, and a point cloud for external 3DGS training.";
+"匯出與分享" = "Export and share";
+"原始深度不足以產生點雲，可切換查看影像。" = "Raw depth is insufficient to build a point cloud. Switch to images.";
+"取消" = "Cancel";
+"取消全選" = "Deselect all";
+"取消選取" = "Cancel selection";
+"可切換查看拍攝影像。" = "Switch to captured images to view photos.";
+"可追蹤紋理不足，請對準有細節的區域並緩慢側向移動" = "Not enough trackable texture. Aim at details and slowly move sideways.";
+"單指旋轉・雙指縮放與平移" = "One finger to rotate · Two fingers to zoom and pan";
+"單指旋轉・雙指縮放，檢查是否有遺漏的區域" = "One finger to rotate · Two fingers to zoom. Check for missing areas.";
+"回到點雲" = "Back to point cloud";
+"回放速度" = "Playback speed";
+"地板 %.1f m²　·　外接 %.2f × %.2f m　·　樓高 %.2f m" = "Floor %.1f m² · Bounds %.2f × %.2f m · Height %.2f m";
+"外接 %.2f × %.2f m　·　最長牆 %.2f m　·　樓高 %.2f m" = "Bounds %.2f × %.2f m · Longest wall %.2f m · Height %.2f m";
+"多走動、少原地旋轉，讓同一個表面被不同角度看見。" = "Move around instead of only rotating in place, so each surface is seen from different angles.";
+"好" = "OK";
+"姿態修正 中位數 %.0fcm / 最大 %.0fcm" = "Pose correction: median %.0fcm / maximum %.0fcm";
+"姿態已修正 %@ 幀（ARKit 地圖優化）" = "Corrected %@ frame poses (ARKit map optimization)";
+"完成" = "Done";
+"完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。" = "Completed scans are saved here for preview, sharing, or deletion.";
+"客廳" = "Living room";
+"對焦" = "Focus";
+"尚未取得可用影像，請繼續掃描並緩慢移動" = "No usable images yet. Continue scanning and move slowly.";
+"尚無可用影像，請繼續掃描後再匯出" = "No usable images yet. Continue scanning before exporting.";
+"已刪除 %@ 筆，另有 %@ 筆未能完整刪除。請重新整理後重試。\n%@" = "Deleted %@ scans; %@ could not be fully deleted. Refresh and retry.\n%@";
+"已匹配 %@ 張影像，%@ 張位置通過驗證並修正。" = "Matched %@ images; validated and corrected %@ camera positions.";
+"已另存優化版本，原始掃描仍保留" = "Saved as an optimized copy. The original scan is preserved.";
+"已完成：%@ 張影像・%@ 個點" = "Complete: %@ images · %@ points";
+"已有分享檔案" = "Share archive available";
+"請回到已拍過的區域：已在新區域走了 %.0f m，回頭重疊一段，讓漂移得到修正" = "Please return to an area you captured: %.0f m of new ground so far. Overlap a stretch so drift can be corrected";
+"已回到拍過的區域，漂移可以得到修正" = "Back in a captured area; drift can be corrected";
+"已選取" = "Selected";
+"已選取 %@ 筆" = "%@ selected";
+"已開啟" = "On";
+"已關閉" = "Off";
+"平面圖" = "Floor plan";
+"平面圖（%d 牆 · %.1f×%.1fm）" = "Floor plan (%d walls · %.1f×%.1fm)";
+"廚房" = "Kitchen";
+"延續上次座標系（%.1f MB · %@）" = "Continue previous coordinate system (%.1f MB · %@)";
+"建立平面圖…" = "Building floor plan…";
+"建立空間結構…" = "Building spatial structure…";
+"影像儲存失敗：%@。已停止掃描，先前成功儲存的資料仍保留。" = "Failed to save an image: %@. Scanning stopped; previously saved data is preserved.";
+"影像多視角重建…" = "Reconstructing from multiple images…";
+"影像深度重建" = "Image depth reconstruction";
+"影像重建 %@ 點 · %@ 個參考視角" = "Image reconstruction: %@ points · %@ reference views";
+"影像重建報告儲存失敗：%@" = "Unable to save image reconstruction report: %@";
+"影像重建未取得可靠匹配，目前顯示已驗證的稀疏特徵點。請側向補拍至少三張重疊照片。" = "Image reconstruction found no reliable matches. Showing validated sparse features. Move sideways to capture at least three overlapping photos.";
+"影像重建：尚無可靠匹配" = "Image reconstruction: no reliable matches yet";
+"快門" = "Shutter";
+"房間" = "Room";
+"房間名稱" = "Room name";
+"所選掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。" = "All photos, models, point clouds, depth and pose data, floor plans, and matching ZIP archives for the selected scans will be permanently deleted.";
+"手動" = "Manual";
+"打包 COLMAP 資料集…" = "Packaging COLMAP dataset…";
+"找不到掃描資料，請重新整理歷史紀錄" = "Scan data not found. Refresh scan history.";
+"找不到訓練影像：%@" = "Training image not found: %@";
+"把眼前的空間，\n留下來。" = "Keep the space\nin front of you.";
+"拍攝品質資訊" = "Capture quality information";
+"拍攝影像" = "Captured images";
+"拍攝影像進度" = "Captured image progress";
+"拍攝時間 +%02d:%02d" = "Capture time +%02d:%02d";
+"拍攝路線" = "Camera path";
+"拍攝路線回放" = "Camera path playback";
+"拍攝路線點雲；橘色標記為目前影像的相機位置與方向" = "Camera path point cloud; the orange marker shows the current image’s camera position and direction";
+"挑選清晰照片並準備訓練資料…" = "Selecting clear photos and preparing training data…";
+"挑選訓練影像…" = "Selecting training images…";
+"捨棄本次掃描" = "Discard this scan";
+"捨棄這次掃描？" = "Discard this scan?";
+"掃描原始資料已保留，但歷史點雲預覽儲存失敗：%@" = "Raw scan data is saved, but saving the history point cloud preview failed: %@";
+"掃描已暫停，回到相機後會重新定位" = "Scanning paused. The camera will relocalize when you return.";
+"掃描影像" = "Scan image";
+"掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。" = "This scan is saved in Scan history for preview, sharing, or deletion. You cannot resume this live scan session after leaving.";
+"掃描檔案已關閉" = "Scan files are closed";
+"掃描紀錄" = "Scan history";
+"掃描與資料優化都在裝置上進行" = "Capture and data refinement run on your device";
+"掃描設定" = "Scan settings";
+"排除 %@ 幀（幾何不可信）、%@ 幀（RGB 品質篩選）" = "Excluded %@ frames (unreliable geometry) and %@ frames (RGB quality selection)";
+"播放拍攝路線" = "Play camera path";
+"收合掃描設定" = "Collapse scan settings";
+"改為全新掃描" = "Start a fresh scan";
+"放慢一點" = "Slow down";
+"新掃描" = "New scan";
+"旋轉點雲檢查缺漏，隨時回到原處補拍。" = "Rotate the point cloud to find gaps, then return to capture missing views.";
+"既有點雲無法讀取，嘗試從原始深度重建預覽。" = "Unable to read the existing point cloud. Attempting to rebuild a preview from raw depth.";
+"暫停回放" = "Pause playback";
+"曝光補償" = "Exposure compensation";
+"書房" = "Study";
+"會一併寫進匯出的 floorplan.json 與 .svg" = "Also saved in the exported floorplan.json and .svg";
+"未選取" = "Not selected";
+"查看完整路線" = "View full path";
+"校正相機位置，完成後需較多處理時間" = "Refine camera positions; requires more processing time after capture";
+"標準相機" = "Standard camera";
+"橘色：目前視角 · 綠色：拍攝路線" = "Orange: current view · Green: camera path";
+"檔案已準備好" = "Files ready";
+"檢查掃描成果" = "Review scan";
+"檢查與補掃" = "Review and rescan";
+"正在保存世界地圖…" = "Saving world map…";
+"正在保存掃描預覽…" = "Saving scan preview…";
+"正在儲存最後的影像…" = "Saving final images…";
+"正在刪除照片與模型…" = "Deleting photos and models…";
+"正在匯出" = "Exporting";
+"正在壓縮檔案，完成後即可分享…" = "Compressing files for sharing…";
+"正在完成最後的特徵處理…" = "Finishing feature processing…";
+"正在完成空間擷取…" = "Finishing spatial capture…";
+"正在掃描" = "Scanning";
+"正在整理場景網格…" = "Preparing scene mesh…";
+"正在整理影像與點雲…" = "Preparing images and point cloud…";
+"正在整理掃描" = "Processing scan";
+"此影像沒有對應位置" = "No camera position for this image";
+"此掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。" = "All photos, models, point clouds, depth and pose data, floor plans, and the matching ZIP archive for this scan will be permanently deleted.";
+"此處紋理不足，請對準有特徵的區域" = "Low texture here. Aim at an area with more detail.";
+"此裝置不支援 AR 掃描" = "AR scanning is not supported on this device";
+"此裝置可擷取影像與稀疏點雲；完整幾何與平面圖建議使用 LiDAR 裝置。" = "This device captures images and a sparse point cloud. A LiDAR device is recommended for fuller geometry and floor plans.";
+"此點雲格式不支援預覽" = "This point cloud format cannot be previewed";
+"歷史掃描 3D 點雲" = "Saved scan 3D point cloud";
+"每秒 %@ 張" = "%@ images per second";
+"每秒影格數" = "Frames per second";
+"永久刪除 %@ 筆掃描" = "Permanently delete %@ scans";
+"沒有偵測到任何門窗：沿牆掃過時請讓門窗完整入鏡" = "No doors or windows detected. Include their full outlines while scanning the walls.";
+"沒有偵測到牆面" = "No walls detected";
+"沒有可用的相機姿態與清晰影像，無法產生 3DGS 訓練資料" = "No usable camera poses and clear images are available to create a 3DGS dataset";
+"沒有可預覽的點雲" = "No point cloud to preview";
+"沒有拍攝影像" = "No captured images";
+"沒有點雲或路線資料" = "No point cloud or path data";
+"沿著空間移動，手機會自動擷取影像。" = "Move through the space. Photos are captured automatically.";
+"沿著空間緩慢移動・新視角會自動存成照片" = "Move slowly · New views are saved as photos automatically";
+"沿著空間緩慢移動，影像會自動儲存" = "Move slowly through the space. Images are saved automatically.";
+"洗衣間" = "Laundry";
+"深度不足或記憶體不足，未發布新的優化版本；原始掃描仍保留。" = "Insufficient depth or memory. No optimized copy was published; the original scan is preserved.";
+"深度影格不足，保留原本相機位置。" = "Not enough depth frames. Original camera poses preserved.";
+"深度量測與彩色點雲" = "Depth measurements and colored point cloud";
+"清除" = "Clear";
+"準備優化…" = "Preparing optimization…";
+"準備完成，按下開始掃描" = "Ready. Tap Start scanning.";
+"準備就緒" = "Ready";
+"準備相機" = "Preparing camera";
+"準備預覽…" = "Preparing preview…";
+"無 LiDAR" = "No LiDAR";
+"無法完成操作" = "Unable to complete operation";
+"無法建立掃描資料夾：%@" = "Unable to create scan folder: %@";
+"無法編碼影像" = "Unable to encode image";
+"無法讀取紀錄" = "Unable to load history";
+"無牆面資料" = "No wall data";
+"照片已保留，但尚無可靠點雲。請對準有紋理的表面側向補拍至少三張重疊照片。" = "Photos are saved, but no reliable point cloud is available. Aim at a textured surface and move sideways to capture at least three overlapping photos.";
+"照片已保留，但尚無通過多視角驗證的特徵點。請對準有紋理的表面緩慢側向補拍。" = "Photos are saved, but no features passed multi-view validation. Aim at a textured surface and slowly move sideways to capture more views.";
+"牆" = "Wall";
+"牆只掃到 %.1fm 高 —— 請把鏡頭往上帶到牆與天花板的交界" = "Walls captured to only %.1fm — aim up toward the wall–ceiling junction";
+"牆只掃到 %.2fm 高（樓高看起來是 %.2fm）：" = "Walls captured to %.2fm (estimated room height %.2fm): ";
+"牆只掃到 %.2fm 高：請把鏡頭往上帶到牆與天花板的交界" = "Walls captured to only %.2fm: aim up toward the wall–ceiling junction";
+"牆是靠「同一位置的垂直跨度」認出來的，掃得越高越完整" = "Walls are identified by vertical coverage at the same location; greater coverage helps complete the plan.";
+"牆面破碎、房間未閉合：請沿著牆面走一圈並回到起點" = "Fragmented walls and an open outline: walk around the walls and return to the start.";
+"牆面破碎：多半是家具擋住了牆的下半部，或只掃了房間的一角 —— " = "Fragmented walls: furniture may hide the lower wall, or only a corner was scanned. ";
+"用修正後位置重融合深度…" = "Fusing depth with corrected poses…";
+"留在這裡" = "Stay here";
+"畫面不夠清晰，已略過 %@ 個候選影格・請稍停讓對焦穩定" = "Image not clear enough; skipped %@ candidate frames. Pause briefly for focus.";
+"畫面不夠清晰，請稍停讓對焦穩定" = "Image is not clear enough. Pause briefly for focus.";
+"白平衡" = "White balance";
+"目前資源不足以完成相機精修，原始掃描未變更。請關閉其他工作後重試。" = "Not enough resources to refine camera poses. The original scan is unchanged. Close other tasks and retry.";
+"相機模式・未使用 LiDAR 深度" = "Camera mode · No LiDAR depth";
+"相機權限尚未開啟，請到設定允許 ARKit 3DGS Scanner 使用相機" = "Camera access is off. Allow ARKit 3DGS Scanner to use the camera in Settings.";
+"相機發生錯誤：%@" = "Camera error: %@";
+"相機追蹤中斷，已停止掃描並保留資料。匯出後請開始新掃描。" = "Camera tracking was interrupted. Scanning stopped and data was saved. Export, then start a new scan.";
+"相機追蹤已失效。請先匯出目前資料，再開始新掃描。" = "Camera tracking is no longer valid. Export the current data, then start a new scan.";
+"相機進階控制" = "Advanced camera controls";
+"移動太快會產生動態模糊，請放慢" = "Fast movement increases motion blur risk. Slow down.";
+"移動過快・放慢後自動繼續" = "Moving too fast · Slow down to resume automatically";
+"窗" = "Window";
+"第 %@ 張影像的相機參數不完整，無法產生訓練資料" = "Image %@ has incomplete camera parameters; the training dataset cannot be created";
+"第 %@ 張，共 %@ 張" = "Image %@ of %@";
+"等待畫面清晰・請稍停讓對焦穩定" = "Waiting for a clear image · Pause briefly for focus";
+"等待追蹤恢復" = "Waiting for tracking";
+"精修未通過或資料不足，保留原本位置。" = "Refinement did not pass or data was insufficient. Original poses preserved.";
+"精修未降低殘差，保留原本位置。" = "Refinement did not reduce residuals. Original poses preserved.";
+"精修資源不足，保留原本位置。" = "Not enough resources for refinement. Original poses preserved.";
+"精細掃描" = "Refined scanning";
+"精細掃描已開啟・沿著空間緩慢移動" = "Refined scanning enabled · Move slowly through the space";
+"紋理不足・請對準有細節的表面" = "Low texture · Aim at a detailed surface";
+"結束掃描" = "Stop scanning";
+"結束掃描並檢視成果" = "Stop scanning and review";
+"緩慢掃描" = "Scan slowly";
+"緩慢移動手機，讓相機辨識周圍環境" = "Move the phone slowly to recognize your surroundings";
+"續掃" = "Resume scan";
+"臥室" = "Bedroom";
+"自動" = "Auto";
+"自動跟隨拍攝位置與方向" = "Following camera position and direction";
+"舊版報告有 %@ 張品質待確認的視角，未區分運動估計與實測細節；可重新優化資料。" = "An older report lists %@ views with uncertain quality without separating motion estimates from measured detail. You can optimize the data again.";
+"舊版掃描可能需要從深度資料重建點雲" = "Older scans may need a preview rebuilt from depth data";
+"處理中…" = "Processing…";
+"融合時記憶體不足，已停止精細融合並保留即時點雲預覽；照片與深度資料仍完整保留。" = "Memory was insufficient for refined fusion. The live point cloud preview was retained; photos and depth data are preserved.";
+"融合點雲…" = "Fusing point cloud…";
+"衛浴" = "Bathroom";
+"衣櫃間" = "Closet";
+"裝置過熱，已停止掃描並保留資料。請等手機降溫後再繼續。" = "Device too hot. Scanning stopped and data was saved. Let the phone cool before continuing.";
+"裝置過熱，建議暫停散熱" = "Device too hot. Pause to let it cool.";
+"複核模糊幀…" = "Reviewing frame quality…";
+"視角 %.0f%%" = "View coverage %.0f%%";
+"訓練選用 %@ / %@ 張影像" = "%@ / %@ images selected for training";
+"記憶體不足以安全保存世界地圖，已略過；掃描照片與預覽已保留。" = "Not enough memory to save the world map safely; skipped. Scan photos and preview are preserved.";
+"語言" = "Language";
+"請允許相機存取，才能開始掃描" = "Allow camera access to start scanning";
+"請回到剛才的位置，對準掃描過的區域" = "Return to your previous position and aim at an area already scanned";
+"請把鏡頭往上帶、沿牆面上下掃過去 —— " = "Aim upward and scan along the wall from bottom to top. ";
+"請沿著牆面走，讓每一面牆從地板到天花板都被掃過" = "Walk along every wall and capture it from floor to ceiling.";
+"讀取掃描紀錄…" = "Loading scan history…";
+"讀取關鍵幀…" = "Reading keyframes…";
+"走一圈、檢查點雲與拍攝路線，再匯出空間掃描資料。" = "Walk through your space, review the point cloud and camera path, then export your scan.";
+"走了 %.0fm 都沒回到拍過的區域 —— 遠端可能有累積漂移" = "Walked %.0fm without returning to a captured area — distant areas may have accumulated drift";
+"走廊" = "Hallway";
+"距離太近，請後退一點" = "Too close. Step back a little.";
+"距離太遠，請靠近目標" = "Too far away. Move closer to the subject.";
+"跟隨拍攝位置" = "Follow camera position";
+"跨影格匹配不足（%@ 張達到求解需求），保留原本位置。" = "Not enough cross-frame matches (%@ frames meet the solver requirements). Original poses preserved.";
+"較長曝光會增加運動模糊風險" = "Longer exposures increase motion blur risk";
+"追蹤不穩，請放慢並對準紋理豐富的區域" = "Tracking is unstable. Slow down and aim at a textured area.";
+"追蹤恢復中・請保持畫面穩定" = "Recovering tracking · Keep the view steady";
+"追蹤暫時不穩，請放慢並對準有紋理的表面" = "Tracking is unstable. Slow down and aim at a textured surface.";
+"逐張匹配拍攝影像…" = "Matching captured images…";
+"逐張匹配拍攝影像… %@%%" = "Matching captured images… %@%%";
+"逐張匹配與驗證相機位置…" = "Matching images and validating camera positions…";
+"這是由舊版深度資料重建的預覽；原始檔案未變更。" = "This preview was rebuilt from older depth data. Original files are unchanged.";
+"這次掃描沒有儲存點雲或深度資料，可切換查看影像。" = "This scan has no saved point cloud or depth data. Switch to images.";
+"這次掃描沒有可預覽的點雲，仍可查看拍攝影像。" = "No point cloud is available for this scan. Captured images can still be viewed.";
+"選取" = "Select";
+"還沒有掃描紀錄" = "No scans yet";
+"重新啟動相機" = "Restart camera";
+"重新定位中：請把鏡頭對準上次掃描過的區域" = "Relocalizing: aim at a previously scanned area";
+"重新播放" = "Replay";
+"重試" = "Retry";
+"鎖定曝光 / 白平衡" = "Lock exposure / white balance";
+"門" = "Door";
+"開口" = "Opening";
+"開啟相機設定" = "Open camera settings";
+"開始掃描" = "Start scanning";
+"隱藏點雲" = "Hide point cloud";
+"離牆面遠一點" = "Move farther from the wall";
+"離開並保留檔案" = "Leave and keep files";
+"離開掃描" = "Leave scan";
+"離開掃描檢視？" = "Leave scan review?";
+"靠近牆面一點" = "Move closer to the wall";
+"預覽內容" = "Preview content";
+"顯示掃描品質熱圖" = "Show scan quality heatmap";
+"顯示點雲" = "Show point cloud";
+"餐廳" = "Dining room";
+"驗證殘差未改善至少 3%，保留原本位置。" = "Validation residuals did not improve by at least 3%. Original poses preserved.";
+"驗證用匹配不足，保留原本位置。" = "Not enough validation matches. Original poses preserved.";
+"驗證相機位置修正…" = "Validating camera pose corrections…";
+"點房間可命名 · 雙擊置中" = "Tap a room to name it · Double-tap to center";
+"點雲優化中：姿態修正 + 多視角加權融合…" = "Optimizing point cloud: pose correction and multi-view weighted fusion…";
+"點雲含有無效座標，無法產生訓練資料" = "Point cloud contains invalid coordinates; the training dataset cannot be created";
+"點雲檔案不完整" = "The point cloud file is incomplete";
+"點雲與路線" = "Point cloud and path";
+"（3DGS 那種繞著物件拍的路徑產生不出完整的牆）" = "(Circling an object for 3DGS does not capture complete walls.)";
+"（RoomPlan 需要沿牆掃一圈，" = "(RoomPlan needs a walk along the walls; ";
+
+"離開第一人稱" = "Leave first-person view";
+
+"第一人稱視角" = "First-person view";
+
+"第一人稱 · 同步拍攝位置與方向" = "First person · Synced camera position and direction";
+
+"拍攝路線點雲；第一人稱同步影像位置，總覽顯示橘色相機標記" = "Capture route point cloud; first person follows the photo position, overview shows an orange camera marker";
+
+"空間重建" = "SPATIAL RECONSTRUCTION";
+
+"裝置端處理" = "ON DEVICE";
+
+"正在合成你的空間" = "Building your space";
+
+"將拍攝視角與深度逐步融合為 3D 點雲" = "Bringing your views and depth together into a 3D point cloud";
+
+"整體進度 %" = "TOTAL PROGRESS %";
+
+"處理進度" = "Processing progress";
+
+"已用時間" = "Elapsed time";
+
+"階段 %@ / %@" = "Stage %@ / %@";
+
+"保存拍攝資料" = "Save capture data";
+
+"對齊相機視角" = "Align camera views";
+
+"檢查影像品質" = "Check image quality";
+
+"融合空間點雲" = "Fuse the point cloud";
+
+"整理掃描成果" = "Prepare scan results";
+
+"處理中" = "IN PROGRESS";
+
+"已完成" = "COMPLETE";
+
+"請保持 App 開啟。照片越多，處理時間越長；完成後會自動顯示預覽。" = "Keep the app open. Larger scans take longer; your preview will appear when processing finishes.";
+
+"融合點雲… %@ / %@ 幀" = "Fusing point cloud… %@ / %@ frames";
+
+"篩選並儲存融合點雲…" = "Filtering and saving the fused point cloud…";
+
+"儲存掃描成果…" = "Saving scan results…";
+
+"上次精細融合未完成，目前顯示備援預覽。照片與深度仍保留，可使用「優化訓練資料」重新處理。" = "The previous fusion did not finish. This is a fallback preview; photos and depth remain available. Use Refine training data to process them again.";
+
+"融合點雲… 176 / 399 幀" = "Fusing point cloud… 176 / 399 frames";
+
+"請選取相隔至少 10 公分的兩點，並輸入有效的已知公尺長度。" = "Choose points at least 10 cm apart and enter a valid known length in meters.";
+
+"請選另一處或不同方向的距離驗證，不可用校正的同一段距離驗證自己。" = "Validate a distance elsewhere or in a different direction. Do not validate with the same calibration segment.";
+
+"點雲已更新，請重新選點校正與驗證尺度。" = "The point cloud has changed. Select new points to calibrate and validate scale.";
+
+"尺度倍率超出 0.5–2 倍，請檢查選點與公尺單位。" = "The scale factor is outside 0.5–2. Check the selected points and meter units.";
+
+"目前沒有可量測的點雲。" = "No point cloud is available for measurement.";
+
+"參考距離驗證通過" = "Reference distance checks passed";
+
+"參考距離存在誤差" = "Reference distance checks failed";
+
+"已校正，尚未獨立驗證" = "Calibrated, not independently validated";
+
+"ARKit 公尺尺度，尚未驗證" = "ARKit meter scale, unverified";
+
+"旋轉點雲後，點選兩個表面位置量距。青色線段是目前選取的距離。" = "Rotate the cloud, then tap two surface points. The cyan segment shows the selected distance.";
+
+"尺度量測點雲，點選兩個可見表面位置" = "Measurement point cloud. Tap two visible surface points.";
+
+"距離 %.3f m" = "Distance %.3f m";
+
+"已選取 %@ / 2 點" = "Selected %@ / 2 points";
+
+"重新選點" = "Clear points";
+
+"尺度倍率 %.6f" = "Scale factor %.6f";
+
+"通過標準：各參考距離誤差不超過 2 公分或已知長度的 1%，取較大值。這不代表整個場景的絕對精度。" = "Checks allow 2 cm or 1% of each reference length, whichever is greater. Passing does not certify absolute accuracy across the scene.";
+
+"驗證 %d：誤差 %+.1f cm" = "Check %d: error %+.1f cm";
+
+"這段距離的實際長度（公尺）" = "Known length of this segment (meters)";
+
+"設為尺度校正" = "Calibrate scale";
+
+"作為獨立驗證" = "Validate distance";
+
+"先用捲尺或雷射測距取得已知長度。校正後請改選另一處距離驗證；重新校正會清除舊驗證。" = "Use a tape or laser measure for the known length. Validate elsewhere after calibration. Recalibrating clears previous checks.";
+
+"準備公尺尺度資料…" = "Preparing metric data…";
+
+"分享公尺尺度資料" = "Share metric data";
+
+"匯出公尺尺度 3DGS 資料" = "Export metric 3DGS data";
+
+"校正倍率會同時套用至匯出的相機位置與點雲。原始照片、深度與一般匯出不會改寫；公尺版不附原始深度，避免混用尺度。" = "The factor applies to both exported camera positions and points. Original photos, depth and standard exports stay unchanged. The metric copy omits raw depth to prevent mixing scales.";
+
+"重設尺度與驗證" = "Reset scale and checks";
+
+"空間尺度與驗證" = "Scene scale and validation";
+
+"閉環：%@ 組候選，%@ 組通過幾何驗證。" = "Loop closure: %@ candidate pairs, %@ geometrically verified pairs.";
+
+"閉環修正已套用；參考距離仍需獨立驗證。" = "Loop corrections applied; physical distances still need independent validation.";
+
+"未套用閉環修正，保留原本的姿態精修結果。" = "Loop correction was not applied; the local refinement result is retained.";
+
+"搜尋並驗證重訪視角…" = "Finding and validating revisited views…";
+
+"開啟全螢幕選點，可放大表面，分別確認起點與終點。" = "Open full-screen selection to zoom into surfaces and confirm each endpoint.";
+
+"全螢幕精準選點" = "Precise point selection";
+
+"點選表面預覽橘色候選點，再按確認。" = "Tap a surface to preview an orange candidate, then confirm.";
+
+"單指旋轉、雙指平移或縮放。輕點表面先預覽，不會立即更改端點。" = "Rotate with one finger; pan or zoom with two. Tap to preview a point before changing an endpoint.";
+
+"恢復倍率" = "Reset zoom";
+
+"放大候選位置" = "Zoom to candidate";
+
+"顯示完整點雲" = "Fit cloud";
+
+"選擇要調整的端點" = "Choose an endpoint to edit";
+
+"起點（未設定）" = "Start · unset";
+
+"起點（已設定）" = "Start · set";
+
+"終點（未設定）" = "End · unset";
+
+"終點（已設定）" = "End · set";
+
+"輕點想量測的表面；空白處不會選取。" = "Tap the surface to measure. Empty space selects nothing.";
+
+"橘色是候選位置，可放大確認後再設定端點。" = "Orange marks the candidate. Zoom in before confirming the endpoint.";
+
+"確認起點" = "Confirm start";
+
+"確認終點" = "Confirm end";
+
+"表面重建（實驗）" = "Surface reconstruction (experimental)";
+
+"包含姿態精修；容量或涵蓋不足時使用原融合" = "Includes pose refinement; uses original fusion if capacity or coverage is insufficient";
+
+"局部表面對齊已通過深度與影像驗證。" = "Local surface alignment passed depth and image validation.";
+
+"局部表面對齊未取得可靠改善，保留原姿態。" = "Local surface alignment found no reliable improvement; previous poses were retained.";
+
+"驗證局部表面對齊…" = "Validating local surface alignment…";
+
+"表面重建未達容量或涵蓋要求，已使用完整原融合結果。" = "Surface reconstruction did not meet resource or coverage requirements; the complete original fusion was used.";
+
+"掃描模式" = "Capture mode";
+
+"品質與處理" = "Quality and processing";
+
+"座標系" = "Coordinate system";
+
+"表面重建已包含姿態精修" = "Included in surface reconstruction";
+
+"設定只影響接下來的掃描。完成後的處理時間依照片數量與場景而異。" = "Settings apply to the next scan. Processing time depends on the number of photos and the scene.";
+
+"掃描品質資訊" = "Scan quality details";
+
+"查看掃描品質資訊" = "Review scan quality details";
+
+"顯示空間結構" = "Show room structure";
+
+"更多操作" = "More actions";
+
+"第一次掃描？查看操作指南" = "First scan? View the guide";
+
+"重設相機參數" = "Reset camera settings";
+
+"拍攝品質需要檢查" = "Review capture quality";
+"檢查照片對齊…" = "Checking photo alignment…";
+"照片對齊檢查已通過。" = "The photo alignment check passed.";
+"照片對齊檢查未確認改善，保留原本相機位置。" = "The photo alignment check did not confirm an improvement. Original camera positions preserved.";
+"重疊照片不足以確認修正，保留原本相機位置。" = "Too few overlapping photos to confirm the correction. Original camera positions preserved.";
+"%@ 個點" = "%@ points";
+"相機模式" = "Camera mode";
+"移動速度" = "Motion speed";
+"影像重建 %@ 點" = "%@ image points";
+"顯示家具" = "Show furniture";
+"預覽、分享或刪除之前的掃描" = "Preview, share, or delete previous scans";
+"返回開始掃描" = "Back to scanning";
+"視角跨度" = "View angle span";
+"紅色為單一角度，綠色為 %.0f° 以上" = "Red is a single angle, green is %.0f° or more";
+
+/* On-device 3DGS training */
+"%@ 個高斯" = "%@ Gaussians";
+"%@ 次迭代・訓練影像長邊 %@ px・最多 %@ 個高斯・SH %@ 階" = "%@ iterations · %@ px training images (long edge) · up to %@ Gaussians · SH degree %@";
+"3DGS 模型檔案不完整" = "The 3DGS model file is incomplete";
+"3DGS 模型預覽，單指旋轉、雙指平移、捏合縮放" = "3DGS model preview. Drag to orbit, two fingers to pan, pinch to zoom";
+"3DGS 訓練" = "3DGS training";
+"3DGS 訓練中" = "Training 3DGS";
+"3DGS 訓練可繼續" = "3DGS training can resume";
+"GPU 運算失敗：%@" = "GPU computation failed: %@";
+"PPISP 校正" = "PPISP corrected";
+"PPISP 相機校正" = "PPISP camera correction";
+"PPISP 色彩校正" = "PPISP color correction";
+"上次訓練中斷，可從第 %@ 次迭代繼續" = "The last training run was interrupted. You can resume from iteration %@";
+"上次訓練中斷，沒有可用的進度" = "The last training run was interrupted without saved progress";
+"以 ARKit 姿態為基準微調，保留公制尺度" = "Refines poses around ARKit's, keeping metric scale";
+"以目前設定重新訓練" = "Retrain with current settings";
+"保留進度時會先儲存目前的檢查點，之後可從掃描紀錄繼續。" = "Keeping progress saves a checkpoint first, so you can resume later from Scan history.";
+"停止並保留進度" = "Stop and keep progress";
+"停止並刪除這次訓練" = "Stop and delete this training run";
+"停止訓練" = "Stop training";
+"停止訓練？" = "Stop training?";
+"儲存進度" = "Save progress";
+"分享 3DGS 模型" = "Share 3DGS model";
+"刪除 3DGS 模型" = "Delete 3DGS model";
+"刪除 3DGS 模型？" = "Delete the 3DGS model?";
+"刪除模型與訓練進度" = "Delete model and training progress";
+"刪除進度" = "Delete progress";
+"匯出的 gaussians.ply 可用於一般 3DGS 檢視器；色彩校正資料另存於 ppisp.json。" = "The exported gaussians.ply opens in standard 3DGS viewers; color correction data is saved separately in ppisp.json.";
+"另一筆掃描正在訓練，完成或停止後才能開始" = "Another scan is training. Start after it finishes or stops";
+"只刪除訓練結果；掃描的照片、深度與姿態不受影響。" = "Only the training results are deleted; the scan's photos, depth, and poses are kept.";
+"可用記憶體不足，已儲存進度並暫停訓練。關閉其他 App 後可繼續。" = "Available memory is low. Progress was saved and training is paused. Close other apps, then resume.";
+"可用記憶體不足：需要約 %@ MB，目前可用 %@ MB。請關閉其他 App 或降低訓練品質後重試。" = "Not enough memory: about %@ MB is needed and %@ MB is available. Close other apps or choose a lower quality, then try again.";
+"尚無可用影像，請繼續掃描後再訓練" = "No usable images yet. Continue scanning before training";
+"已停止" = "Stopped";
+"已儲存至第 %@ 次迭代" = "Saved at iteration %@";
+"已暫停" = "Paused";
+"已暫停，進度已儲存" = "Paused; progress saved";
+"已有 3DGS 模型" = "3DGS model available";
+"影像解析度與相機參數不一致，無法訓練" = "Image resolution does not match the camera parameters, so training cannot start";
+"找不到可用的 GPU" = "No usable GPU was found";
+"找不到可用的訓練進度" = "No saved training progress was found";
+"找不到訓練影像，掃描資料可能不完整" = "Training images are missing; the scan may be incomplete";
+"抗鋸齒（Mip 濾波）" = "Anti-aliasing (mip filter)";
+"損失 %.4f" = "Loss %.4f";
+"新的模型完成後才會取代目前的模型。" = "The current model is replaced only when the new one is finished.";
+"暫停" = "Pause";
+"未校正" = "Uncorrected";
+"未校正（與匯出檔相同）" = "Uncorrected (as in the exported file)";
+"標準" = "Standard";
+"模型沒有可匯出的高斯" = "The model has no Gaussians to export";
+"檢視 3DGS 模型" = "View 3DGS model";
+"檢視選項" = "View options";
+"此 3DGS 模型格式不支援" = "This 3DGS model format is not supported";
+"沒有可用於訓練的影像與相機姿態" = "No images with camera poses are available for training";
+"為避免記憶體不足，已停止增加高斯" = "Stopped adding Gaussians to avoid running out of memory";
+"無法讀取訓練影像：%@" = "Cannot read training image: %@";
+"畫面中的高斯數量超出記憶體配置，已儲存進度並停止。請降低訓練品質後繼續。" = "The view needs more Gaussians than the memory plan allows. Progress was saved and training stopped. Choose a lower quality to continue.";
+"相機姿態微調" = "Camera pose refinement";
+"縮放檢視時減少閃爍與鋸齒" = "Reduces flicker and jagged edges when zooming";
+"繼續訓練" = "Resume training";
+"色彩校正" = "Color correction";
+"補償照片間的曝光、白平衡與暗角差異" = "Compensates exposure, white balance, and vignetting differences between photos";
+"裝置過熱，已自動暫停並儲存進度；降溫後會自動繼續" = "The device is too hot. Training paused and saved; it resumes automatically after cooling down";
+"訓練 3DGS" = "Train 3DGS";
+"訓練中（降速以控制溫度與電量）" = "Training (slowed to manage heat and battery)";
+"訓練失敗" = "Training failed";
+"訓練程式元件不完整，請重新安裝 App" = "Training components are missing. Reinstall the app";
+"訓練設定超出可計算的記憶體範圍" = "The training settings exceed the memory that can be calculated";
+"訓練進度" = "Training progress";
+"訓練進度檔已損毀，無法繼續；請重新開始訓練" = "The training progress file is damaged and cannot be resumed. Start training again";
+"訓練進度與目前的掃描資料或設定不一致，請重新開始訓練" = "The saved progress does not match this scan or its settings. Start training again";
+"記憶體不足，無法配置 %@ MB 的訓練緩衝區" = "Not enough memory to allocate %@ MB of training buffers";
+"記憶體不足，無法開啟 3DGS 模型（約需 %@ MB）。請關閉其他 App 後重試。" = "Not enough memory to open the 3DGS model (about %@ MB needed). Close other apps and try again.";
+"載入 3DGS 模型…" = "Loading 3DGS model…";
+"迭代 %@ / %@" = "Iteration %@ / %@";
+"這台裝置的 GPU 不支援手機端 3DGS 訓練（需要 A14 或更新的晶片）" = "This device's GPU does not support on-device 3DGS training (A14 or newer is required)";
+"這次掃描沒有可用的點雲，無法初始化 3DGS 模型" = "This scan has no usable point cloud to initialize a 3DGS model";
+"進階設定" = "Advanced settings";
+"重新訓練" = "Retrain";
+"重新訓練？" = "Retrain?";
+"重新開始" = "Start over";
+"重設視角" = "Reset view";
+"開始訓練" = "Start training";
+"電量低於 15%，已暫停；接上電源後會自動繼續" = "Battery is below 15%. Training paused and resumes automatically when charging";
+"預估記憶體 %@ MB・最多 %@ 個高斯" = "Estimated memory %@ MB · up to %@ Gaussians";
+"驗證 PSNR %.1f dB" = "Validation PSNR %.1f dB";
+"高品質" = "High quality";
+"拍攝時曝光固定（變化 %.2f EV），預設關閉；仍可補償暗角與色調" = "Exposure was locked during capture (%.2f EV variation), so this is off by default; it can still correct vignetting and tone";
+"拍攝時曝光變化 %.1f EV，建議開啟以補償曝光與白平衡差異" = "Exposure varied by %.1f EV during capture; keep this on to compensate exposure and white balance differences";
+"上次儲存時的 3DGS 模型" = "The 3DGS model at the last save";
+"App 不在前景時無法使用 GPU，已暫停並儲存進度；回到 App 後會自動繼續" = "The GPU is unavailable while the app is not in the foreground. Training paused and saved; it resumes automatically when you return";
+"App 記憶體 %@ MB・訓練配置 %@ MB" = "App memory %@ MB · training allocation %@ MB";
+"%@的訓練規格" = "%@ training details";
+"3DGS 模型完成" = "3DGS model ready";
+"3DGS 訓練已暫停" = "3DGS training paused";
+"上次訓練未完成，點此查看並重試" = "The last run did not finish. Tap to see why and retry";
+"不到 1 分鐘" = "under a minute";
+"儲存 3DGS 模型" = "Saving the 3DGS model";
+"剩餘不到 1 分鐘" = "Less than a minute left";
+"剩餘約 %@ 分鐘" = "About %@ min left";
+"剩餘約 %@ 小時 %@ 分鐘" = "About %@ h %@ min left";
+"匯出的 gaussians.ply 可用於一般 3DGS 檢視器。" = "The exported gaussians.ply opens in standard 3DGS viewers.";
+"訓練完成，正在轉存為 SOG 格式" = "Training done; saving as SOG";
+"訓練完成" = "Training done";
+"檢查驗證照片 %@/%@" = "Checking held-out photos %@/%@";
+"整理高斯的位置、方向與大小" = "Arranging Gaussian positions, rotations and sizes";
+"壓縮顏色細節・第 %@/%@ 輪" = "Compressing color detail, pass %@/%@";
+"編碼 SOG 圖層 %@/%@" = "Encoding SOG images %@/%@";
+"寫入 SOG 檔案" = "Writing the SOG file";
+"寫入姿態、報告與封面" = "Writing poses, report and cover";
+"模型儲存進度" = "Model saving progress";
+"可以切到其他 App，儲存會在背景繼續" = "You can switch apps; saving continues in the background";
+"儲存完成前請留在 App 內；切到其他 App 的話，回來後會重新儲存" = "Stay in the app until saving finishes; if you switch apps, saving starts over when you return";
+"展開面板" = "Expand panel";
+"收合面板" = "Collapse panel";
+"大多數掃描維持預設即可。" = "The defaults suit most scans.";
+"已完成 %@%%，上次進度已儲存" = "%@%% done; progress was saved";
+"已完成 %@%%，可從上次進度繼續" = "%@%% done; resume where you left off";
+"已完成 %@%%，點此繼續" = "%@%% done; tap to resume";
+"建立形狀並增加細節" = "Building shape and adding detail";
+"建議" = "Recommended";
+"從上次進度繼續" = "Resume where you left off";
+"快速預覽" = "Quick preview";
+"拖曳旋轉・雙指平移・捏合縮放" = "Drag to orbit · two fingers to pan · pinch to zoom";
+"旋轉檢視或分享模型" = "Orbit around it or share the model";
+"最後修飾" = "Final touches";
+"最快看到成果，細節較少" = "See a result soonest, with less detail";
+"檔案已準備好，點此分享" = "The file is ready. Tap to share";
+"正在估算剩餘時間…" = "Estimating time left…";
+"兼顧清晰度與時間，適合多數掃描" = "Balances sharpness and time; suits most scans";
+"照片、相機姿態與點雲，可在電腦上訓練" = "Photos, camera poses and point cloud for training on a computer";
+"用時 %@" = "Elapsed %@";
+"用這次掃描的 %@ 張照片在 iPhone 上建立模型，完成後可自由旋轉檢視並分享。" = "Builds a model on this iPhone from the scan's %@ photos. When it is done you can orbit around it and share it.";
+"用這次掃描的照片在 iPhone 上建立模型，完成後可自由旋轉檢視並分享。" = "Builds a model on this iPhone from the scan's photos. When it is done you can orbit around it and share it.";
+"直接在 iPhone 上建立模型" = "Build a model right on this iPhone";
+"直接在 iPhone 上建立模型・標準品質%@" = "Build a model right on this iPhone · Standard: %@";
+"約 %@ 分鐘" = "about %@ min";
+"約 %@ 小時 %@ 分鐘" = "about %@ h %@ min";
+"細節最多，需要最長時間與較多電量" = "Most detail; takes the longest and uses more battery";
+"繼續訓練 3DGS" = "Resume 3DGS training";
+"訓練時可以使用 App 的其他功能，建議接上電源；可隨時暫停，進度會自動儲存。" = "You can use the rest of the app while it trains. Train on power when you can; pause any time, and progress is saved.";
+"記憶體足夠" = "Enough memory";
+"讀取照片與點雲" = "Reading photos and point cloud";
+"讓細節更清晰" = "Sharpening details";
+"進度已儲存，可隨時繼續" = "Progress is saved; resume anytime";
+"PLY 格式，可用一般 3DGS 檢視器開啟；色彩校正另存 ppisp.json" = "PLY format for standard 3DGS viewers; color correction is saved in ppisp.json";
+"PLY 格式，可用一般 3DGS 檢視器開啟" = "PLY format for standard 3DGS viewers";
+"迭代次數" = "Iterations";
+"再訓練次數" = "More iterations";
+"預估 %@，依這支手機上次訓練的速度" = "Estimate: %@, at this phone's last measured speed";
+"在這支手機完成一次訓練後，會依它的速度顯示預估時間" = "After a first run on this phone, the time is estimated from its speed";
+"恢復自動" = "Use automatic";
+"已手動調整；自動計算為 %@ 次" = "Set by hand; the automatic count is %@";
+"依品質預設" = "From the quality preset";
+"依 %@ 張照片增加，每張約訓練 %@ 次" = "Raised for %@ photos, about %@ updates each";
+"品質預設的次數；%@ 張照片，每張約訓練 %@ 次" = "The preset's count for %@ photos, about %@ updates each";
+"SOG 格式，約為 PLY 的 1/12，可用 SuperSplat 等 3DGS 檢視器開啟；色彩校正另存 ppisp.json" = "SOG format, about 1/12 the size of PLY, for SuperSplat and other 3DGS viewers; color correction is saved in ppisp.json";
+"SOG 格式，約為 PLY 的 1/12，可用 SuperSplat 等 3DGS 檢視器開啟" = "SOG format, about 1/12 the size of PLY, for SuperSplat and other 3DGS viewers";
+"GPU 運算反覆失敗，已停止訓練並保留最後的進度：%@" = "The GPU failed repeatedly. Training stopped and the last progress was kept: %@";
+"上次重新訓練沒有完成：%@" = "The last retraining did not finish: %@";
+"刪除訓練進度？" = "Delete training progress?";
+"刪除（請先停止 3DGS 訓練）" = "Delete (stop 3DGS training first)";
+"只刪除訓練進度；掃描的照片、深度與姿態不受影響。" = "Only the training progress is deleted; the scan's photos, depth, and poses are kept.";
+"只刪除這次未完成的訓練；已完成的 3DGS 模型會保留。" = "Only this unfinished run is deleted; the completed 3DGS model is kept.";
+"可用記憶體不足以載入上次的進度（約需 %@ MB）。請關閉其他 App 後再繼續，進度仍保留。" = "Not enough memory to load the saved progress (about %@ MB needed). Close other apps and resume; the progress is kept.";
+"正在訓練 3DGS 的掃描沒有刪除；請先停止訓練。" = "The scan being trained was not deleted. Stop its 3DGS training first.";
+"1440 px，細節較多；時間約 1.7 倍" = "1440 px: more detail; about 1.7× the time";
+"960 px，最快、最省記憶體" = "960 px: fastest, least memory";
+"中" = "Medium";
+"低" = "Low";
+"原始 1920 px，細節最多；時間約 2.6 倍，記憶體用量最高" = "Original 1920 px: the most detail; about 2.6× the time and the most memory";
+"訓練解析度" = "Training resolution";
+"高（原始）" = "High (original)";
+"正在拍攝，3DGS 訓練先暫停；結束拍攝後會自動繼續" = "Capturing: 3DGS training is paused and continues when the capture closes";
+"可以切到其他 App，訓練會在背景繼續" = "You can switch to other apps; training continues in the background";
+"可以在 App 內切換頁面；切到其他 App 時會先暫停並儲存進度" = "You can browse the rest of the app; switching to another app pauses and saves progress";
+"3DGS 訓練已暫停・%@%%" = "3DGS training paused · %@%%";
+"3DGS 訓練中・%@%%" = "Training 3DGS · %@%%";
+"可用記憶體不足以載入已保存的模型（約需 %@ MB）。請選較低的訓練解析度，或關閉其他 App 後再試；模型仍保留。" = "Not enough memory to load the saved model (about %@ MB needed). Choose a lower training resolution or close other apps and try again; the model is kept.";
+"完成並保存模型" = "Finish and save model";
+"現在完成並保存模型？" = "Finish and save the model now?";
+"完成並保存" = "Finish and save";
+"以目前的訓練結果建立模型並結束訓練。之後可以用「加強模型」繼續訓練它。" = "The model is saved as it is now and training ends. You can keep training it later with Enhance model.";
+"加強模型" = "Enhance model";
+"從這個模型繼續訓練，也可以改用更高的解析度" = "Keep training this model, optionally at a higher resolution";
+"%@ 次迭代" = "%@ iterations";
+"加強 3DGS 模型" = "Enhance 3DGS model";
+"從已保存的模型（%@ 次迭代・%@ 個高斯）繼續訓練；新的結果完成前，會保留目前的模型。" = "Training continues from the saved model (%@ iterations · %@ Gaussians). The current model is kept until the new result is complete.";
+"開始加強" = "Start enhancing";
+"再訓練 %@ 次（共 %@ 次）・訓練影像長邊 %@ px・最多 %@ 個高斯・SH %@ 階" = "%@ more iterations (%@ in total) · training image long edge %@ px · up to %@ Gaussians · SH degree %@";
+"稍微加強" = "Light enhancement";
+"標準加強" = "Standard enhancement";
+"大幅加強" = "Thorough enhancement";
+"再訓練 %@ 次" = "%@ more iterations";
+"讀取照片與模型" = "Reading photos and the model";
+"%@ 次迭代（提前完成）" = "%@ iterations (finished early)";
+
+"共 1 筆" = "1 scan";
+"刪除 1 筆掃描？" = "Delete 1 scan?";
+"永久刪除 1 筆掃描" = "Permanently delete 1 scan";
