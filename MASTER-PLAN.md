@@ -37,7 +37,7 @@ tools), lists the measurements still to take on the iPhone 13 and the licences t
 for, and names two owner decisions:
 
 - whether a small Claude proxy may hold the API key, or the Mac stays the gateway;
-- whether editing moves to the phone.
+- whether splat editing moves to the phone (layout editing comes with the scene viewer).
 
 Until that lands, the Mac and Colab chain below is how a room gets built.
 

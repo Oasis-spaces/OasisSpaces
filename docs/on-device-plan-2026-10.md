@@ -43,11 +43,11 @@ render check, splat, fill, mixed scene.
 | Dense cloud | MoGe-2-L on keyframes (Mac or Colab), scaled to COLMAP; mirror, window and screen planes | MoGe-2-S on keyframes after recording, scaled per frame to ARKit's points (`DepthScale`), mirror planes ported, TSDF-fused over the same poses as everything else | `DepthScale` runs live per frame; the pass and the fusion are to write |
 | Objects, outlines, names | Claude's room list steers GroundingDINO; SAM 2.1 per keyframe; SAM 2 video tracking on CUDA | YOLOE boxes, EdgeTAM outlines, identity from `ObjectTracker`'s ARKit/depth voxels; Claude renames and drops tracks from crops | Pieces exist; the post-capture pass is to write |
 | Room shape | `shapes.py`, `placement.py`, `room_score.py` on the Mac | Planes from MoGe depth plus ARKit's plane classes, a floor-plan fit, and the silhouette search and room score ported to Swift | To port |
-| Room model and render check | `blender_room.py`, rendered from the video's cameras by `room_views.py` in Blender | The room built in SceneKit (already in the app) and rendered offscreen from keyframe poses for Claude's render check | To write |
+| Room model and render check | `blender_room.py`, rendered from the video's cameras by `room_views.py` in Blender | The room built in SceneKit (the app already uses it for plane outlines and wireframe boxes in the live view) and rendered offscreen for Claude's render check | To write |
 | Splat | OpenSplat (AGPL) on a Colab T4 or the Mac's Metal build | The vendored Swift + Metal trainer (Apache-2.0), seeded from the fused cloud | Vendored; adapter to write; untimed on an A15 |
 | Surface fill | Big-LaMa on the Mac's CPU or the Colab VM (fill step, object removal, mixed scene) | The same Big-LaMa as Core ML (`SurfaceFill.mlpackage`: 512, fp32 on the GPU, int8 weights) | Converter built; its weights checked in PyTorch; Core ML `--check` needs a Mac. `surface_fill.py` now fills at 512 too |
 | Mixed scene | `mixed_scene.py` (Mac or Colab); the scene viewer served to the phone by the paired Mac | Shell textures, pieces and cuboid models built on the phone; the scene viewer bundled in the app | To port, after the splat |
-| Viewing and editing | MetalSplatter on the Mac and on the phone (renders sent by the Mac); editing in the Mac app | MetalSplatter for the trainer's PLY; editing by reusing the Mac app's Swift editing code | Splat viewing in the app; editing to decide |
+| Viewing and editing | MetalSplatter on the Mac and on the phone (renders sent by the Mac); editing in the Mac app | MetalSplatter for the trainer's PLY; layout editing in the bundled scene viewer; splat editing by sharing the Mac app's editing model, with a touch layer | Splat viewing in the app; splat editing to decide |
 
 Measured here this round:
 
@@ -66,16 +66,18 @@ Measured here this round:
 
 ## The stack, stage by stage
 
-### 1. Recording (`Recorder.swift`, `SceneRunner.swift`)
+### 1. Recording (`Recorder.swift`, `CaptureController.swift`, `SceneRunner.swift`)
 
 **Already written** (commit 90598e8; not yet built or run):
 
-- An `ARAnchor` at the camera every 15 written frames, twice a second. ARKit moves anchors when it
-  corrects its map (relocalising, closing a loop), so where they end up are corrected keyframe poses.
-  `capture.json`'s `keyframeAnchors` gives each anchor's pose as placed and at the end, and how many
-  times it moved (moves under half a millimetre are not counted). The vendored code reads back
-  keyframe anchors the same way. Whether an A15 without LiDAR moves them is what the first
-  recordings will show.
+- An `ARAnchor` at the camera every 15 written frames, twice a second.
+  - ARKit can move anchors when it corrects its map (relocalising, closing a loop), so where they end
+    up should be corrected keyframe poses. Nobody has measured whether per-keyframe anchors actually
+    capture those corrections, on any phone; the first recordings will show it for the A15.
+  - `capture.json`'s `keyframeAnchors` gives each anchor's pose as placed and at the end, and how many
+    times it moved. An update that moves it under half a millimetre and turns it under about 0.03° is
+    not counted.
+  - The vendored code reads back keyframe anchors the same way.
 - The motion sensors at 100 Hz: the samples since the last frame ride on each `frames.jsonl` line as
   `imu` (time, bias-corrected gyro, acceleration with gravity). The jump check below does not need
   them. They are there for an inertial bundle adjustment later; the vendored one uses ARKit's
@@ -90,8 +92,10 @@ Measured here this round:
   - Run MLComputePlan on the iPhone 13 first, to see which ops leave the Neural Engine.
   - Then load the models with `.cpuAndNeuralEngine`. Ops the Neural Engine rejects then go to the CPU
     instead of the GPU, which keeps the GPU for ARKit and the camera preview while recording.
-- **Plane classes.** Log each ARKit plane's classification in `capture.json` (section 5 needs its hit
-  rate).
+- **Plane classes.** `capture.json`'s `roomMap.planes` already records each plane's kind from ARKit's
+  classification. But a vertical plane ARKit did not classify is written as "wall"
+  (`CaptureController.kind(of:)`). Also log the raw classification (or "none"), so the wall hit rate
+  (measurement 2) can be read.
 - **A live "the view is not shifting" rule** (audit decision 7): the distance moved over the last few
   seconds against the depth in view, both from ARKit. It needs tuning on real app recordings.
 
@@ -139,10 +143,12 @@ only Apple frameworks: no Ceres, no COLMAP.
 - **What it does not include:** the vendored `OfflinePoseRefinement.swift` and
   `LoopClosureRefiner.swift` are its LiDAR path and do not run without depth. Without LiDAR there is
   no loop closure in the vendored code. Drift of tens of centimetres has to come out through ARKit's
-  own corrections, read back through the keyframe anchors, or through the fallback below.
+  own corrections, read back through the keyframe anchors. Nothing shows that the fallback below
+  removes slow drift either. If ARKit's corrections are not enough, evaluate a pose-graph and
+  loop-closure layer over ARKit's odometry, such as RTAB-Map (BSD-3). Its iOS app so far requires
+  LiDAR.
 
-**The fallback** is for when the gate keeps rejecting, the result is worse than COLMAP's, or drift
-remains. Rebuild the triangulation-free formulation of arXiv 2608.21008 with Ceres (BSD-3):
+**The fallback** is for when the gate keeps rejecting, or the result is worse than COLMAP's. Rebuild the triangulation-free formulation of arXiv 2608.21008 with Ceres (BSD-3):
 
 - per-observation ray depth;
 - symmetric two-view residuals;
@@ -180,11 +186,12 @@ keyframes. It is already in the app as `RoomMetricDepth` (MIT).
 - **Bare walls** are where per-frame scale fails. In the live app, borrowing a neighbouring frame's
   correction directly measured worse than none. Recovering scale through the fused geometry, from
   frames that have points, is a different method and untested. Measure it on the reference rooms
-  before relying on it, and use the wall/floor masks with ARKit's planes.
+  (measurement 4) before relying on it, and use the wall/floor masks with ARKit's planes.
 
 **Mirrors, windows and screens.** Port `mirrors.py` into this pass. Each such outline takes the depth
-of the plane through the strip of frame or wall around it, as it does today. Fused as they are,
-these surfaces would put the reflection or the view outside into the room.
+of the plane through the strip of frame or wall around it, as it does today. Fused as they are, their
+depth is the reflection's or the view's, beyond the surface. The TSDF would grow a phantom room behind
+the glass and carve away the mirror, the window's wall or the wardrobe front.
 
 **Fusion.** Fuse with a TSDF at 2-3 cm voxels over the same poses as everything else: ARKit's,
 refined where the gate accepted the refinement.
@@ -198,13 +205,15 @@ refined where the gate accepted the refinement.
   and its LiDAR noise weighting is replaced.
 
 **Labels carry through the fusion.** Each voxel keeps a vote of the object ids from EdgeTAM's
-keyframe masks. The splat's cut into pieces (section 8) needs per-point object names, as the dense
-cloud has them today.
+keyframe masks. The splat's cut into pieces (section 8) uses whether each point lies on a detected
+object, as the dense cloud records today, to drop paint left hanging off the walls. Without it, the
+pieces are cut by their boxes alone.
 
 **Memory.** A larger post-capture MoGe input needs its own fixed-shape `.mlpackage`. At about 2,500
-tokens, that is 812x602 at 4:3. At the default memory limit, a 4 GB phone risks killing the pass, so
-probably request the increased-memory-limit entitlement too. Measure peak memory in Instruments
-first.
+tokens, that is 812x602 at 4:3. At the default memory limit a 4 GB phone risks killing the pass, and
+the increased-memory-limit entitlement may do nothing on the iPhone 13 (section 7). So size the input
+to fit the default limit, and measure peak memory in Instruments with and without the entitlement
+(measurement 4).
 
 **Fix the yardstick first** (measurement 4). The project's depth error figures were measured against
 a reconstruction scaled by MoGe-2-L's own metric scale. So they show MoGe-S agreeing with MoGe-L, not
@@ -299,11 +308,15 @@ Blender does not run on iOS. Today Blender builds the room from walls and boxes 
 the video's own cameras. Claude grades those renders against the real frames, and a structural
 problem sends the room back to its structure review.
 
-The app already draws planes and boxes in SceneKit. On the phone:
+The app already uses SceneKit, for plane outlines and wireframe boxes in the live view; it builds no
+room model yet. On the phone:
 
-- build the room's walls, floor and cuboid furniture as SceneKit geometry;
-- render it offscreen (`SCNRenderer`) from the keyframe poses;
-- send those renders with the frames to Claude, as today.
+- build the room's walls and floor, and furniture from simple parts (a bed is base, mattress and
+  pillow; a wardrobe has doors), as SceneKit geometry;
+- keep the render check's colour conventions (sand floor, grey walls, blue-grey furniture, beige for
+  walls nobody filmed), or change its prompt to match;
+- render it offscreen (`SCNRenderer`) from an angle, from above, and from keyframe poses beside their
+  frames, as today, and send those to Claude.
 
 ### 7. Splat (replaces OpenSplat)
 
@@ -363,7 +376,8 @@ Android. On iOS it runs only through john-rocky's ios-main patches. Those peaked
 iPhone 17 Pro with no splat cap (1.2 GB on a masked capture), so a 4 GB phone needs `max_splats` at
 about 150-250k.
 
-**Off the phone:** the long splat and Spirula Studio (GPL-3.0) stay Mac research tools. This also
+**Off the phone:** the long splat (Colab or Mac) and Spirula Studio (GPL-3.0, Mac) stay research
+tools. This also
 retires OpenSplat (AGPL-3.0) from the product, and with it audit decision 1.
 
 ### 8. Surface fill and the mixed scene
@@ -455,20 +469,34 @@ On the phone, pieces get the cuboid models only.
 ### 9. Viewing and editing
 
 The splat shows in MetalSplatter, already in the app. Today the room renders and the scene viewer
-reach the phone from the paired Mac, and editing (remove, add, recolour, resize) is in the Mac app.
-The Mac app's editing code is Swift (`apps/SplatViewer/Sources/Editing`, `Viewer/SceneEditing.swift`),
-so it can be shared with the phone. `splat_edit.py remove` uses LaMa through SurfaceFill like the fill
-step. Whether editing moves to the phone, or stays a Mac feature for now, is the owner's call.
+reach the phone from the paired Mac, and splat editing (remove, add, recolour, resize) is in the Mac
+app.
+
+- **Layout editing comes with section 8.** The scene viewer is itself an editor: moving, turning,
+  hiding and swapping pieces come to the phone with the bundled viewer.
+- **Splat editing.** The Mac app's editing model (`apps/SplatViewer/Sources/Editing`: selection,
+  furniture, surface patches) is plain Swift (Foundation, simd, SplatIO) and can be shared with the
+  phone. Its input layer (`Viewer/SceneEditing.swift`) is AppKit mouse-and-keyboard code, and the
+  phone needs a touch version.
+- **Filling what a removed object hid.** The Mac app's Swift editing covers the gap with thin
+  Gaussians (`Editing/SurfacePatch.swift`). `splat_edit.py remove` (Python, on the Mac) fills it with
+  Big-LaMa through `surface_fill`, like the fill step. A phone port would keep the patches or call
+  SurfaceFill.
+
+Whether splat editing moves to the phone, or stays a Mac feature for now, is the owner's call.
 
 ### 10. Claude and the agent
 
 **Claude is called from the Mac today**, by `pipeline/advisor.py` through the `claude` CLI login or
 an API key. Colab jobs relay their questions back to the Mac. Its calls:
 
+- how to retry a weak solve, and whether a joined MapAnything walk is sound (both go away with ARKit
+  poses);
 - choosing frames;
 - naming the room's objects;
 - checking detection boxes;
 - the structure review;
+- where a dropped piece stands, when no keyframe saw it;
 - the render check;
 - each splat's opening view;
 - keeping or rejecting each fill;
@@ -484,13 +512,25 @@ the Claude gateway, is the owner's call.
 **What the phone must produce for those reviews:**
 
 - contact sheets of frames;
-- the capture map and shot list;
+- keyframes with every detection box drawn (the label review);
+- the plan of the room's candidate walls and boxes, and the per-object frame sheet (the structure
+  review and where a piece stands);
 - room renders (section 6);
+- six candidate opening views rendered from the splat;
 - splat renders at trained and held-out views;
-- before-and-after renders of each fill.
+- before-and-after renders of each fill;
+- the capture map's metrics (`capture-map.json`) for the capture advice. The shot list is computed
+  for the report, not shown to Claude.
 
-**The checks that overrule Claude** port with them: the room score, the splat guard (SSIM 0.01 and
-PSNR 0.3 dB) and the fill's pixel-change check. The agent's own logic in `pipeline/agent.py` (which
+**The checks that overrule Claude** port with them:
+
+- the room score;
+- the mask check that downgrades a render-check "misplaced" claim when the piece's own masks agree
+  with its box;
+- the guard on boxes the structure review adds;
+- the splat guard (SSIM 0.01 and PSNR 0.3 dB);
+- the fill's pixel-change check.
+ The agent's own logic in `pipeline/agent.py` (which
 reviews run, retries, rollbacks and the report) ports to Swift.
 
 ### 11. Android (later)
@@ -507,12 +547,14 @@ started.
 
 ### Left off the phone
 
-- COLMAP's dense multi-view stereo (CUDA), replaced by MoGe-2-S with TSDF fusion.
+- COLMAP's optional dense multi-view stereo (`reconstruct.py --dense`, CUDA), which the agent never
+  runs. (MoGe-2-S with TSDF fusion replaces `densify.py`'s MoGe-2-L pass, not this.)
 - MapAnything.
-- The long splat and Spirula Studio.
-- Image-to-3D object meshes (TRELLIS, SAM 3D Objects).
+- The long splat (Colab or Mac) and Spirula Studio (Mac).
+- Image-to-3D object meshes: TRELLIS (`tools/object_mesh.py`) is a Colab GPU job, and SAM 3D Objects
+  is not set up (its weights are gated).
 
-These stay Mac or Colab research tools.
+These stay research tools off the phone.
 
 ## Measurements the first iPhone 13 run has to take
 
@@ -531,7 +573,9 @@ These stay Mac or Colab research tools.
 4. **Depth:**
    - The yardstick: MoGe-2-S with and without `DepthScale`, against tape-measured furniture and
      ARKit's metric poses in two rooms.
-   - The post-capture pass: time per keyframe and peak memory.
+   - The post-capture pass: time per keyframe, and peak memory with and without the entitlement.
+   - Bare walls: depth error on frames with no sound `DepthScale` fit, with scale recovered through
+     the fused geometry against MoGe's own scale.
    - TSDF fusion: time and memory at 2-3 cm.
 5. **Outlines and room shape:**
    - The post-capture EdgeTAM pass: time per frame and per object, and peak memory.
@@ -583,9 +627,11 @@ These stay Mac or Colab research tools.
    (ScanNet++, Waymo Open, Argoverse 2).
    - *Ask:* counsel to review. Optionally ask the microsoft/MoGe maintainers to confirm commercial use
      of the released weights.
-5. **Detector training data.** YOLOE-26, a SigLIP 2-retrained YOLOE and D-FINE's Objects365
-   checkpoints are all trained on Objects365, GQA (Visual Genome images) and Flickr30k Entities.
-   - *Ask:* counsel to review those terms before any of these ships.
+5. **Detector training data.** YOLOE-11m-seg (shipped now), YOLOE-26, a SigLIP 2-retrained YOLOE and
+   D-FINE's Objects365 checkpoints are trained on Objects365, GQA (Visual Genome images) and
+   Flickr30k Entities.
+   - *Ask:* counsel to review those terms before a commercial release, and ask Ultralytics whether it
+     warrants or indemnifies them (item 2).
    - Add the CC BY attributions for Objects365 to the app's notices.
 
 ### For the new on-phone stages
@@ -651,16 +697,22 @@ any model trained on them ships.
 
 1. **On a Mac with the iPhone 13:**
    - build the app with `REFINER=edgetam`;
-   - check that the recording changes already written build and record correctly;
-   - take measurement 1 and switch the compute units;
-   - run `--check` for the EdgeTAM and SurfaceFill packages.
+   - check that the recording changes already written build and record correctly, and add the raw
+     plane classification to `capture.json` (section 1);
+   - take measurements 1 and 7, and switch the compute units;
+   - run SurfaceFill's `--check`. EdgeTAM's `--check` tests only the PyTorch wrapper, so also load
+     the fp16 EdgeTAM packages with coremltools on the Mac and compare their masks with
+     SAM2ImagePredictor (or add that to the converter's `--check`).
 2. **Reference rooms:** record 10-20 rooms with the app, and run the Mac pipeline on them as the
-   reference. Take measurements 2 and 4's yardstick.
-3. **Trainer:** write the adapter and a timing harness, then take measurements 3 and 6 on those rooms.
+   reference. Take measurement 2 and measurement 4's yardstick.
+3. **Poses and trainer:** write the camera-only refinement's adapter (our `frames.jsonl` and keyframe
+   anchors in, refined poses out), the trainer's adapter and a timing harness. Then take measurements
+   3 and 6 on those rooms.
 4. **The post-capture pass:** MoGe-2-S on keyframes, mirror planes, TSDF fusion with labels, and
-   EdgeTAM outlines on tracked objects.
+   EdgeTAM outlines on tracked objects. Then take the rest of measurement 4, and measurement 5's
+   EdgeTAM pass and identity.
 5. **Port the rest:**
-   - room shape and score;
+   - room shape and score, then measurement 5's room-shape comparison;
    - the SceneKit room model and render check;
    - the fill with `SurfaceFill.mlpackage`;
    - the review images and the agent's logic;
@@ -672,4 +724,5 @@ any model trained on them ships.
    - NVIDIA and MIT CSAIL (SegFormer and its ADE20K data);
    - counsel on MoGe-2's training data.
 
-   The owner also decides the Claude gateway (section 10) and whether editing moves to the phone.
+   The owner also decides the Claude gateway (section 10) and whether splat editing moves to the
+   phone (section 9).
