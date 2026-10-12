@@ -214,7 +214,7 @@ are gitignored: large, generated, or personal footage.)
 ### Colab, scripts, docs
 - `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything), clone, Claude relay, upload, the four stages, download.
 - `scripts/process_video.sh` — the whole chain without the agent; `scripts/make_sample.py` — a synthetic demo room.
-- `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed.
+- `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed; `docs/audit-prompts-and-stack-2026-10.md` — every Claude question and every stage-1 option measured on 16 clips, with the field's state of the art per layer and the decisions it leaves open.
 - `splats/<video>/best.splat` — the published best splat of each test video.
 
 ## 8. Prerequisites to run everything

@@ -53,8 +53,10 @@ MAX_PATH_JUMP = 0.3
 GLOBAL_MAPPER_SEEDS = (0, 1, 2)
 INCREMENTAL_MAPPER_SEEDS = (0, 1, 2)
 # A model with fewer points than this is no solve, however many frames it
-# placed (sound solves of the 16 test clips held 731 to 17,159).
+# placed; one with every frame and SOUND_SOLVE_POINTS ends the search for a
+# better seed (sound solves of the 16 test clips held 731 to 17,159).
 MIN_SOLVE_POINTS = 100
+SOUND_SOLVE_POINTS = 500
 # The incremental mapper's triangulation angles for footage whose camera moves
 # little against the room's depth (a slow slide, a pan from one spot). COLMAP's
 # defaults (16 degrees for the first pair, 1.5 to keep a point) can refuse to
@@ -70,7 +72,7 @@ SMALL_BASELINE_MAPPER = ["--Mapper.init_min_tri_angle", "4",
 # COLMAP 4.x feature types: classic SIFT, or the learned ALIKED detector.
 # ALIKED was meant for low-texture walls, but on the 16 test clips it never
 # placed more frames than SIFT with the same mapper and found fewer points on
-# 15, so nothing selects it automatically. It is matched by brute force, not
+# all 14 clips both solved, so nothing selects it automatically. It is matched by brute force, not
 # LightGlue: on this CPU-only build LightGlue took 99 s for one frame's
 # neighbours and then crashed inside Apple's ONNX runtime.
 FEATURE_TYPES = {
@@ -463,8 +465,8 @@ def incremental_mapping(workspace: Path, database: Path, images_dir: Path, spars
     few seeds, keeping the best model's run in sparse_dir. It picks its first
     pair at random: on the slow studio slide (27975843) seeds 0 and 4 placed
     all 14 frames with 4,196 points and seeds 1-3 placed 11 with none, from
-    the same database. A run that places every frame with points ends the
-    search."""
+    the same database. A run that places every frame with SOUND_SOLVE_POINTS
+    ends the search."""
     total = sum(1 for p in images_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
     best, best_score = None, None
     tries = [(options, seed) for options in variants for seed in INCREMENTAL_MAPPER_SEEDS]
@@ -487,7 +489,9 @@ def incremental_mapping(workspace: Path, database: Path, images_dir: Path, spars
             best, best_score = out, score
         else:
             shutil.rmtree(out, ignore_errors=True)
-        if score[0] and score[1] == total:
+        # Only a sound model ends the search: one fresh run of the studio slide
+        # stopped at all 14 frames on 247 points, where other seeds give 4,000.
+        if score[1] == total and score[2] >= SOUND_SOLVE_POINTS:
             break
     for model in solved_models(best):
         shutil.move(str(model), str(sparse_dir / model.name))

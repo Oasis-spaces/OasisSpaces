@@ -72,6 +72,13 @@ def test_frames_with_no_points_lose_to_fewer_frames_with_points():
     kept, calls, _ = solve([reconstruct.SMALL_BASELINE_MAPPER, []],
                            {(True, 0): (10, 6), (False, 1): (12, 4049)})
     assert kept == [(12, 4049)] and calls[-1] == (False, 1)
+    # Every frame on a thin 247 points does not end the search; a sound model found later wins.
+    kept, calls, _ = solve([reconstruct.SMALL_BASELINE_MAPPER, []],
+                           {(True, 0): (12, 247), (True, 1): (9, 0), (True, 2): (12, 4358)})
+    assert kept == [(12, 4358)] and calls == [(True, 0), (True, 1), (True, 2)]
+    # And when nothing better comes, the thin model is still kept rather than nothing.
+    kept, calls, _ = solve([[]], {(False, 0): (12, 247)})
+    assert kept == [(12, 247)] and len(calls) == 3
 
 
 if __name__ == "__main__":
