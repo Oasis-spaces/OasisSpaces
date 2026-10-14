@@ -15,12 +15,23 @@ reviews, they will send their questions to the Mac's station, as recordings go t
 
 - **The Mac:**
   - Xcode and XcodeGen (`brew install xcodegen`);
-  - the `~/.venvs/oasis-coreml` environment from the README (Python 3.12, torch, transformers,
-    coremltools);
   - the clone of this repository.
+  - the `~/.venvs/oasis-coreml` environment that `apps/OasisCapture/build.sh` converts the models with.
+    It is a Python 3.12 virtual environment with:
+    - torch 2.5.1;
+    - transformers 4.46;
+    - coremltools 8.3 (9 also works);
+    - ultralytics 8.4 (`convert_objects.py`);
+    - MoGe installed with `--no-deps` (`convert_depth_moge.py`);
+    - MobileSAM (`convert_refiner.py`);
+    - Pillow and numpy.
+
+    Each converter's docstring names what it needs. If the environment already built the app's
+    models before, it is ready.
 - **The iPhone 13:**
   - paired with the Mac, unlocked, with Developer Mode on;
-  - `xcrun devicectl list devices` should list it as `available (paired)`.
+  - `xcrun devicectl list devices` lists it as `available (paired)`. Its Identifier column is the
+    `<id>` used below.
 
 ## 1. Get the branch
 
@@ -44,7 +55,8 @@ it was compiled when it was written. If the build fails, the errors print and th
 - `Sources/Recorder.swift`: keyframe anchors, motion samples, the jump flag and plane classes;
 - `Sources/CaptureController.swift`: adding the anchors to the session, and passing on updates and
   removals;
-- `Sources/SceneRunner.swift`: the EdgeTAM path, built in step 6.
+- `Sources/SceneRunner.swift`: the EdgeTAM path. It compiles now; which refiner runs is decided at
+  run time by the packages bundled, and step 6 bundles EdgeTAM.
 
 Fix them, then commit and push the fixes to this branch.
 
@@ -56,30 +68,54 @@ Fix them, then commit and push the fixes to this branch.
 3. **The wall test:** 20 seconds facing plain walls. This shows whether ARKit classifies planes on
    them.
 
-Send each one to the Mac from the app's Scans tab. Each lands in
-`~/Library/Application Support/Splat Viewer/Station/jobs/<id>/input/` (`video.mov`, `frames.jsonl`,
-`capture.json`).
+Let each recording finish; tap Stop and wait for the review. A recording the app was closed in has no
+`capture.json`.
+
+**Copy them off the phone.** This sends nothing through the pipeline:
+
+```bash
+xcrun devicectl device info files --device <id> --domain-type appDataContainer \
+    --domain-identifier com.oasisspaces.capture --subdirectory Documents/Captures
+xcrun devicectl device copy from --device <id> --domain-type appDataContainer \
+    --domain-identifier com.oasisspaces.capture --source Documents/Captures/<Capture-...> \
+    --destination ~/oasis-device-run/<Capture-...>
+```
+
+If `copy from` will not take a folder, copy `frames.jsonl`, `capture.json` and `video.mov` one at a
+time.
+
+**Or send them to the Mac from the app's Scans tab.** This needs Splat Viewer built
+(`apps/SplatViewer/build.sh`) and open. Its Phone captures section should say it is ready on this
+network, with its Pipeline folder set to the clone, and the phone paired in the app's Mac tab. Each
+send also queues a full pipeline run on the Mac.
+
+- Sent over the local network, a recording lands in
+  `~/Library/Application Support/Splat Viewer/Station/jobs/<id>/input/`.
+- Sent through the cloud, it lands in `~/Library/Application Support/Splat Viewer/Station/Cloud/<id>/`.
 
 ## 4. Check each recording
 
 ```bash
-python3 tools/check_phone_capture.py ~/"Library/Application Support/Splat Viewer/Station/jobs/<id>/input"
+python3 tools/check_phone_capture.py ~/oasis-device-run/<Capture-...>
 ```
 
-Each line ends in ok, warn or fail:
+Each line starts with ok, warn or fail, then says what it found:
 
+- whether the recording finished;
 - frames and tracking;
 - whether the exposure held (measurement 7);
 - the 100 Hz motion samples;
 - jumps;
-- the keyframe anchors: how many ARKit moved, and how far (measurement 2);
+- the keyframe anchors: any missing, how many ARKit moved, and how far (measurement 2);
 - ARKit's plane classes, and how much of the vertical area it classified.
 
 `--json` prints everything.
 
 ## 5. Time the live models (measurement 1)
 
-1. **The app's own timings.** Copy the app's log:
+1. **The app's own timings.** The log keeps only the app's last launch. Copy it right after
+   recording, before the app is opened again; if it was reopened, open Scan and record 30 seconds
+   first.
 
    ```bash
    xcrun devicectl device copy from --device <id> --domain-type appDataContainer \
@@ -88,7 +124,8 @@ Each line ends in ok, warn or fail:
    grep -E "loaded in|analysis #|models ready" oasis-capture.log | tail -40
    ```
 
-   The lines give each model's load time and compute unit, and the milliseconds per analysed frame.
+   The lines give each model's load time and the unit it was loaded for, and the milliseconds per
+   analysed frame.
 2. **Where each op runs, on the phone.** In Xcode, open each package in
    `apps/OasisCapture/Resources/`:
    - `RoomObjects`
@@ -96,8 +133,10 @@ Each line ends in ok, warn or fail:
    - `RoomSegmentation`
    - `RoomMetricDepth`
 
-   On the Performance tab, add a report on the connected iPhone. Note the median prediction time and
-   the share of ops on the Neural Engine, GPU and CPU.
+   On the Performance tab, add a report on the connected iPhone. Make one with compute units "All"
+   (what the app uses today) and one with "CPU and Neural Engine". Note each report's median
+   prediction time and the share of ops on the Neural Engine, GPU and CPU. The report covers time
+   and placement only, not memory.
 
 ## 6. EdgeTAM in place of MobileSAM
 
@@ -115,14 +154,23 @@ Then:
 rm -rf apps/OasisCapture/Resources/MaskEncoder.mlpackage apps/OasisCapture/Resources/MaskDecoder.mlpackage
 REFINER=edgetam apps/OasisCapture/build.sh
 ~/.venvs/oasis-coreml/bin/python apps/OasisCapture/scripts/convert_refiner_edgetam.py \
-    --check <a room photo with a TV or a sofa> --box X0 Y0 X1 Y1 --point X Y --coreml
+    --check <frame.jpg> --box X0 Y0 X1 Y1 --point X Y --coreml
 ```
 
-`--coreml` runs the fp16 packages on the Neural Engine and CPU and compares their masks with
-EdgeTAM's own predictor. The IoU should be close to the PyTorch line above it.
+**The test image** must be a JPEG or PNG; Pillow cannot read HEIC. A frame from one of the
+recordings works. ffmpeg turns it upright by itself:
 
-- If the conversion fails on the environment's coremltools 8.3, try coremltools 9. It converted
-  with 9.0 in the cloud.
+```bash
+ffmpeg -i ~/oasis-device-run/<Capture-...>/video.mov -vf "select=eq(n\,100)" -frames:v 1 frame.jpg
+```
+
+- The box and the point are in that image's pixels, around a TV or a sofa and on it. The check prints
+  the image's size.
+- Each image gets one line. Compare its "Core ML IoU" with the "stretch IoU" just before it: the
+  Core ML packages run on the Neural Engine and CPU, and should agree closely with the PyTorch
+  wrapper.
+- If the conversion fails with coremltools 8.3, try coremltools 9. It converted with 9.0 in the
+  cloud.
 
 Then repeat step 5 for `MaskEncoder` and `MaskDecoder`, and record once with the app to see the
 outlines.
@@ -136,18 +184,26 @@ outlines.
 
 - The first command fetches `big-lama.pt` (206 MB, GitHub) if it is missing.
 - `--check` compares the Core ML package with PyTorch. The two should agree to well over 30 dB.
-- Then open `apps/OasisCapture/Resources/SurfaceFill.mlpackage` in Xcode and run its Performance
-  report on the iPhone. That is the A15's time and memory per 512 fill (measurement 6), without the
-  app.
+- **Time on the phone:** open `apps/OasisCapture/Resources/SurfaceFill.mlpackage` in Xcode and run
+  its Performance report on the iPhone with compute units "CPU and GPU". That gives the A15's time
+  per 512 fill.
+- **Peak memory:** the report does not measure memory. That half of measurement 6 waits for the
+  fill stage in the app, profiled with Instruments (Allocations).
 
 ## 8. Only then: the compute units
 
-If step 5 shows a model's ops mostly on the Neural Engine, load it with `.cpuAndNeuralEngine`
-instead of `.all`:
+Choose per model, from step 5's two reports: a model whose "CPU and Neural Engine" report is as fast
+as its "All" report moves to `.cpuAndNeuralEngine`.
 
-- in `SceneRunner.swift` (`Self.model(name, units: [.all, .cpuAndGPU])`), make it
-  `[.cpuAndNeuralEngine, .cpuOnly]` and fix the unit label in `model(_:units:)`;
-- rebuild, and compare the analysis milliseconds in the log.
+1. In `SceneRunner.swift`, the call `Self.model(name, units: [.all, .cpuAndGPU])` sits in the loop
+   over all five models. Make it choose by name, for example:
+
+   ```swift
+   neuralEngine.contains(name) ? [.cpuAndNeuralEngine, .cpuOnly] : [.all, .cpuAndGPU]
+   ```
+
+2. Fix the unit label in `model(_:units:)`.
+3. Rebuild, and compare the analysis milliseconds in the log.
 
 ## What to send back
 
@@ -155,6 +211,6 @@ Paste these into the conversation, or commit them under `docs/` on this branch:
 
 - `check_phone_capture.py` output for each recording;
 - the log lines from step 5;
-- per model, the Performance report's median time and its Neural Engine, GPU and CPU split;
-- the `--check` output of steps 6 and 7, and SurfaceFill's Performance numbers;
+- per model, both Performance reports' median times and their Neural Engine, GPU and CPU splits;
+- the `--check` output of steps 6 and 7, and SurfaceFill's Performance time;
 - any build errors and how they were fixed.

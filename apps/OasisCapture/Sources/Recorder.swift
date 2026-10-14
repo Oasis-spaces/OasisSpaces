@@ -37,6 +37,9 @@ final class Recorder {
         var moves = 0
     }
     private var keyframes: [UUID: Keyframe] = [:]
+    /// Every keyframe anchor this recording added, so all of them can be taken out of the
+    /// session at the end (one added just before Stop is not in the session's frame yet).
+    private(set) var placedAnchors: [ARAnchor] = []
     private var lastPosition: SIMD3<Float>?
     /// Every plane ARKit reported while recording, with its raw classification (the room
     /// map writes an unclassified vertical plane as a wall), for capture.json's planeClasses.
@@ -97,6 +100,7 @@ final class Recorder {
         let anchor = ARAnchor(name: "keyframe-\(framesWritten - 1)", transform: frame.camera.transform)
         keyframes[anchor.identifier] = Keyframe(frame: framesWritten - 1, placed: frame.camera.transform,
                                                 last: frame.camera.transform)
+        placedAnchors.append(anchor)
         return anchor
     }
 
@@ -202,11 +206,13 @@ final class Recorder {
         let position = SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z)
         if let last = lastPosition, simd_distance(last, position) > Self.jumpMetres { line["jump"] = true }
         lastPosition = position
-        // The motion sensors since the last frame: [t, gyro x y z (rad/s, bias-corrected),
-        // acceleration x y z (g, gravity included)], device axes.
+        // The motion sensors since the last frame, up to this frame's capture time: [t, gyro x y z
+        // (rad/s, bias-corrected), acceleration x y z (g, gravity included)], device axes. Samples
+        // taken after it (ARKit hands a frame over some milliseconds after capture) wait for the next.
         motionLock.lock()
-        let samples = motionSamples
-        motionSamples.removeAll(keepingCapacity: true)
+        let cut = motionSamples.firstIndex { $0[0] > frame.timestamp } ?? motionSamples.count
+        let samples = Array(motionSamples[..<cut])
+        motionSamples.removeFirst(cut)
         motionLock.unlock()
         if !samples.isEmpty { line["imu"] = samples }
         // The tracking's points, every tenth frame (about as often as frames are analysed), so that a
@@ -252,12 +258,15 @@ final class Recorder {
         poses = nil
         // Each keyframe's camera where it was placed and where ARKit has it now
         // (camera to world, column-major, as in frames.jsonl), and how often it moved.
+        // An anchor added just before Stop is not in the session's last frame yet: its
+        // last known pose stands in, and `atStop` says so.
         let finalAnchors = Dictionary(anchors.map { ($0.identifier, $0.transform) }, uniquingKeysWith: { a, _ in a })
         var keyframeAnchors: [[String: Any]] = []
         for (id, keyframe) in keyframes.sorted(by: { $0.value.frame < $1.value.frame }) {
-            guard let now = finalAnchors[id] else { continue }
+            let now = finalAnchors[id] ?? keyframe.last
             let entry: [String: Any] = ["frame": keyframe.frame, "placed": Self.columnMajor(keyframe.placed),
-                                        "final": Self.columnMajor(now), "updates": keyframe.moves]
+                                        "final": Self.columnMajor(now), "updates": keyframe.moves,
+                                        "atStop": finalAnchors[id] != nil]
             keyframeAnchors.append(entry)
         }
         let planeList = Array(planeClasses.values)

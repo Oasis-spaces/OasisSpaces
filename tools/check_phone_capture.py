@@ -45,8 +45,11 @@ def matrix(values) -> np.ndarray:
 
 
 def angle_deg(a: np.ndarray, b: np.ndarray) -> float:
-    r = a[:3, :3].T @ b[:3, :3]
-    return float(np.degrees(np.arccos(np.clip((np.trace(r) - 1) / 2, -1.0, 1.0))))
+    """The rotation between two poses, from the chord between their rotation matrices:
+    exactly 0 for equal ones and well conditioned for small turns (the arccos of the
+    trace is not, with rotations written in single precision)."""
+    chord = float(np.linalg.norm(a[:3, :3] - b[:3, :3]))
+    return float(np.degrees(2 * np.arcsin(min(1.0, chord / (2 * np.sqrt(2))))))
 
 
 def frames_report(records: list[dict], capture: dict) -> dict:
@@ -90,9 +93,9 @@ def imu_report(records: list[dict]) -> dict:
     gaps = np.diff(st)
     seconds = float(st[-1] - st[0]) if len(st) > 1 else 0.0
     rate = (len(st) - 1) / seconds if seconds > 0 else 0.0
-    # The samples ride on the frame written after them: each should be no later than
-    # that frame (same clock), allowing for the sensor's own latency.
-    late = sum(1 for r in with_imu for s in r["imu"] if s[0] > r["t"] + 0.05)
+    # Recorder cuts the samples at each frame's capture time (same clock), so none
+    # on a frame should be later than it.
+    late = sum(1 for r in with_imu for s in r["imu"] if s[0] > r["t"] + 1e-6)
     gravity = np.linalg.norm(samples[:, 4:7], axis=1)
     problems = []
     if np.any(gaps <= 0):
@@ -102,7 +105,7 @@ def imu_report(records: list[dict]) -> dict:
     if len(gaps) and gaps.max() > 0.1:
         problems.append(f"longest gap {gaps.max() * 1000:.0f} ms")
     if late:
-        problems.append(f"{late} samples later than the frame they ride on")
+        problems.append(f"{late} samples later than the frame they ride on (the cut at capture time failed)")
     if not 0.8 < float(np.median(gravity)) < 1.2:
         problems.append(f"median acceleration {np.median(gravity):.2f} g, expected about 1 g at rest")
     return {
@@ -134,7 +137,10 @@ def anchors_report(records: list[dict], capture: dict) -> dict:
     anchors = capture.get("keyframeAnchors")
     if anchors is None:
         return {"status": "fail", "note": "capture.json has no keyframeAnchors"}
-    expected = (len(records) + ANCHOR_EVERY - 1) // ANCHOR_EVERY
+    # Recorder leaves an anchor on every written frame whose index is a multiple of ANCHOR_EVERY.
+    expected_frames = {r["frame"] for r in records if r["frame"] % ANCHOR_EVERY == 0}
+    expected = len(expected_frames)
+    missing = sorted(expected_frames - {a["frame"] for a in anchors})
     by_frame = {r["frame"]: r for r in records}
     mismatched, moves, shifts, turns = [], [], [], []
     for a in anchors:
@@ -147,14 +153,15 @@ def anchors_report(records: list[dict], capture: dict) -> dict:
         turns.append(angle_deg(placed, final))
     moved = sum(1 for m in moves if m > 0)
     problems = []
-    if len(anchors) < expected:
-        problems.append(f"{len(anchors)} anchors for {len(records)} frames, expected {expected} "
-                        "(some were dropped by ARKit or by a relocalisation)")
+    if missing:
+        problems.append(f"no anchor for keyframes {missing[:8]}{' ...' if len(missing) > 8 else ''}")
+    not_seen = [a["frame"] for a in anchors if a.get("atStop") is False]
     if mismatched:
         problems.append(f"{len(mismatched)} anchors placed away from their frame's pose")
     shifts_cm = np.array(shifts) * 100 if shifts else np.zeros(1)
     return {
-        "anchors": len(anchors), "expected": expected, "moved": moved,
+        "anchors": len(anchors), "expected": expected, "missing": missing, "moved": moved,
+        "not_in_last_frame": not_seen,
         "updates_total": int(sum(moves)),
         "shift_cm_median": round(float(np.median(shifts_cm)), 2), "shift_cm_max": round(float(shifts_cm.max()), 2),
         "turn_deg_median": round(float(np.median(turns)), 3) if turns else None,
@@ -193,11 +200,18 @@ def planes_report(capture: dict) -> dict:
 
 
 def check(folder: Path) -> dict:
-    records = [json.loads(line) for line in (folder / "frames.jsonl").read_text().splitlines() if line.strip()]
-    capture = json.loads((folder / "capture.json").read_text())
+    records, broken = [], 0
+    for line in (folder / "frames.jsonl").read_text().splitlines():
+        if line.strip():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                broken += 1             # a line cut short when the app was killed mid-recording
+    finished = (folder / "capture.json").exists()
+    capture = json.loads((folder / "capture.json").read_text()) if finished else {}
     if not records:
         return {"frames": {"status": "fail", "note": "frames.jsonl is empty"}}
-    return {
+    report = {
         "device": capture.get("device"), "system": capture.get("system"), "app": capture.get("app"),
         "frames": frames_report(records, capture),
         "exposure": exposure_report(records),
@@ -206,6 +220,11 @@ def check(folder: Path) -> dict:
         "keyframe_anchors": anchors_report(records, capture),
         "plane_classes": planes_report(capture),
     }
+    if not finished or broken:
+        report["recording"] = {"status": "fail", "note": (
+            "no capture.json: the recording was never finished (the app was closed or killed while recording)"
+            if not finished else f"{broken} unreadable line(s) in frames.jsonl")}
+    return report
 
 
 def main() -> int:

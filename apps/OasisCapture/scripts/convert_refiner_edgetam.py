@@ -159,7 +159,7 @@ def check(paths: list[str], boxes: list[list[float]], points: list[list[float]],
     stretched and letterboxed; IoU of the final masks in image pixels. With `coreml`, the
     built fp16 packages too, on the stretched square the app feeds them, loaded for the
     Neural Engine and CPU as the app will (needs macOS)."""
-    from PIL import Image
+    from PIL import Image, ImageOps
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
     if coreml:
@@ -174,14 +174,18 @@ def check(paths: list[str], boxes: list[list[float]], points: list[list[float]],
     encoder, decoder, predictor = Encoder(model).eval(), Decoder(model).eval(), SAM2ImagePredictor(model)
     iou = lambda a, b: float((a & b).sum()) / max(1, float((a | b).sum()))
     for path, box, point in zip(paths, boxes, points):
-        image = Image.open(path).convert("RGB")
+        # Upright as a viewer shows it (a phone photo's rotation tag applied), so the box
+        # and point given in its pixels land where they were read off. JPEG or PNG; Pillow
+        # does not read HEIC.
+        image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
         with torch.inference_mode():
             predictor.set_image(image)
             have_point = point is not None
             kw = dict(point_coords=np.array([point], np.float32), point_labels=np.array([1])) if have_point else {}
             ref, ref_score, _ = predictor.predict(box=np.array(box, np.float32), multimask_output=False, **kw)
             ref = ref[0] > 0
-            line = [f"{Path(path).name}: reference {ref.mean():.3f} of the image, score {float(ref_score[0]):.2f}"]
+            line = [f"{Path(path).name} ({image.width}x{image.height}): reference {ref.mean():.3f} of the image, "
+                    f"score {float(ref_score[0]):.2f}"]
             for mode in ("stretch", "letterbox"):
                 sq, (sx, sy) = square(image, mode)
                 x = torch.from_numpy(np.asarray(sq, np.float32)).permute(2, 0, 1)[None]

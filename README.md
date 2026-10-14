@@ -765,7 +765,7 @@ phone (no model calls, no network while recording). Build and install with
   and the wardrobe, with one 25 cm sliver still called a bed beside it.
 - **Logs:** the app writes `Documents/oasis-capture.log` (model load times,
   analysis ms per frame); read it with
-  `xcrun devicectl device copy from --domain-type appDataContainer --domain-identifier com.oasisspaces.capture --source Documents/oasis-capture.log --destination oasis-capture.log`.
+  `xcrun devicectl device copy from --device <id> --domain-type appDataContainer --domain-identifier com.oasisspaces.capture --source Documents/oasis-capture.log --destination oasis-capture.log` (`<id>` from `xcrun devicectl list devices`). It holds the last launch only.
 - **After recording:** a review (length, walls covered, floor shown, moments
   to watch, what was placed), then `video.mov` (HEVC, 4K where offered),
   `frames.jsonl` (ARKit pose and intrinsics per frame) and `capture.json`.

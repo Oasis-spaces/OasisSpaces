@@ -122,6 +122,31 @@ def test_plane_hit_rate_counts_live_planes_by_area():
     assert report["by_class"]["vertical wall"] == {"planes": 1, "area_m2": 6.0}
 
 
+def test_a_missing_keyframe_is_named_and_an_unmoved_anchor_turns_exactly_zero():
+    records, capture = recording()
+    del capture["keyframeAnchors"][3]
+    report = run(records, capture)["keyframe_anchors"]
+    assert report["status"] == "warn" and report["missing"] == [45]
+    assert report["turn_deg_max"] == 0.0 and report["shift_cm_max"] == 0.0
+
+
+def test_a_sample_after_its_frame_is_caught():
+    records, capture = recording()
+    records[20]["imu"].append([records[20]["t"] + 0.004, 0, 0, 0, 0, -1, 0])
+    report = run(records, capture)["imu"]
+    assert report["status"] == "warn" and "later than the frame" in report["note"]
+
+
+def test_an_unfinished_recording_is_reported_not_a_crash():
+    records, _ = recording()
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        (folder / "frames.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records) + '{"t": 1, "fra')
+        report = cpc.check(folder)
+    assert report["recording"]["status"] == "fail" and "never finished" in report["recording"]["note"]
+    assert report["frames"]["frames"] == len(records)
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

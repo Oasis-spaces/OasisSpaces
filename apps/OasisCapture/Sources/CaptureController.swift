@@ -191,7 +191,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
                                                   objectsSeen: self.state.detected, map: self.latestMap)
             }
             self.recorder = nil
-            keyframes.forEach { self.session.remove(anchor: $0) }
+            recorder.placedAnchors.forEach { self.session.remove(anchor: $0) }
         }
     }
 
