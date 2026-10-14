@@ -38,6 +38,9 @@ final class Recorder {
     }
     private var keyframes: [UUID: Keyframe] = [:]
     private var lastPosition: SIMD3<Float>?
+    /// Every plane ARKit reported while recording, with its raw classification (the room
+    /// map writes an unclassified vertical plane as a wall), for capture.json's planeClasses.
+    private var planeClasses: [UUID: [String: Any]] = [:]
 
     private let motion = CMMotionManager()
     private let motionQueue = OperationQueue()
@@ -97,9 +100,19 @@ final class Recorder {
         return anchor
     }
 
-    /// Counts the times ARKit moved a keyframe anchor (called on the capture
-    /// queue). An update that leaves it within half a millimetre is not a move.
+    /// Counts the times ARKit moved a keyframe anchor, and notes each plane's
+    /// classification (called on the capture queue, for added and updated
+    /// anchors). An update that moves a keyframe under half a millimetre (and
+    /// turns it under about 0.03 degrees) is not a move.
     func anchorsUpdated(_ anchors: [ARAnchor]) {
+        for case let plane as ARPlaneAnchor in anchors {
+            planeClasses[plane.identifier] = [
+                "alignment": plane.alignment == .vertical ? "vertical" : "horizontal",
+                "classification": Self.classification(of: plane),
+                "extent": [plane.planeExtent.width, plane.planeExtent.height],
+                "removed": false,
+            ]
+        }
         for anchor in anchors {
             guard var keyframe = keyframes[anchor.identifier] else { continue }
             let t = anchor.transform, last = keyframe.last
@@ -109,6 +122,34 @@ final class Recorder {
             keyframe.last = t
             keyframe.moves += 1
             keyframes[anchor.identifier] = keyframe
+        }
+    }
+
+    /// Marks planes ARKit removed (merged into another, usually) so they are not counted twice.
+    func anchorsRemoved(_ anchors: [ARAnchor]) {
+        for anchor in anchors where planeClasses[anchor.identifier] != nil {
+            planeClasses[anchor.identifier]?["removed"] = true
+        }
+    }
+
+    private static func classification(of plane: ARPlaneAnchor) -> String {
+        guard ARPlaneAnchor.isClassificationSupported else { return "unsupported" }
+        switch plane.classification {
+        case .wall: return "wall"
+        case .floor: return "floor"
+        case .ceiling: return "ceiling"
+        case .table: return "table"
+        case .seat: return "seat"
+        case .door: return "door"
+        case .window: return "window"
+        case .none(let status):
+            switch status {
+            case .notAvailable: return "none (not available)"
+            case .undetermined: return "none (undetermined)"
+            case .unknown: return "none (unknown)"
+            @unknown default: return "none"
+            }
+        @unknown default: return "other"
         }
     }
 
@@ -219,6 +260,7 @@ final class Recorder {
                                         "final": Self.columnMajor(now), "updates": keyframe.moves]
             keyframeAnchors.append(entry)
         }
+        let planeList = Array(planeClasses.values)
         let write = { [folder, framesWritten, framesDropped] in
             var device = utsname()
             uname(&device)
@@ -233,6 +275,7 @@ final class Recorder {
                 "framesWritten": framesWritten,
                 "framesDropped": framesDropped,
                 "keyframeAnchors": keyframeAnchors,
+                "planeClasses": planeList,
                 "summary": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(summary))) ?? [:],
                 "advice": advice.map { ["rule": $0.rawValue, "message": config.message($0)] },
                 // What the on-device segmentation saw, and for how many seconds.

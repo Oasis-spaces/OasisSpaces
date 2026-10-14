@@ -246,6 +246,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         for case let plane as ARPlaneAnchor in anchors { planeChanged(plane) }
+        if recording { recorder?.anchorsUpdated(anchors) }
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
@@ -254,6 +255,7 @@ final class CaptureController: NSObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        if recording { recorder?.anchorsRemoved(anchors) }
         for case let plane as ARPlaneAnchor in anchors {
             mapBuilder.remove(plane: plane.identifier)
             let node = planeNodes.removeValue(forKey: plane.identifier)

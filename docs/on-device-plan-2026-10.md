@@ -68,7 +68,8 @@ Measured here this round:
 
 ### 1. Recording (`Recorder.swift`, `CaptureController.swift`, `SceneRunner.swift`)
 
-**Already written** (commit 90598e8; not yet built or run):
+**Already written** (commit 90598e8 and its follow-up; not yet built or run; `tools/check_phone_capture.py`
+checks every field on a recording, and `docs/device-run-1.md` is the first run, step by step):
 
 - An `ARAnchor` at the camera every 15 written frames, twice a second.
   - ARKit can move anchors when it corrects its map (relocalising, closing a loop), so where they end
@@ -84,6 +85,10 @@ Measured here this round:
   frame-to-frame motion, not raw IMU.
 - `jump: true` on a frame whose pose is more than 15 cm from the last (relocalising). Tracking state
   was already written per frame.
+- **Plane classes.** `capture.json`'s `planeClasses` lists every plane ARKit reported while recording,
+  with its alignment, raw classification (or "none" and why), extent, and whether ARKit removed it.
+  The room map's own `roomMap.planes` writes an unclassified vertical plane as "wall", so the wall hit
+  rate (measurement 2) is read from `planeClasses`.
 
 **Still to do:**
 
@@ -92,10 +97,6 @@ Measured here this round:
   - Run MLComputePlan on the iPhone 13 first, to see which ops leave the Neural Engine.
   - Then load the models with `.cpuAndNeuralEngine`. Ops the Neural Engine rejects then go to the CPU
     instead of the GPU, which keeps the GPU for ARKit and the camera preview while recording.
-- **Plane classes.** `capture.json`'s `roomMap.planes` already records each plane's kind from ARKit's
-  classification. But a vertical plane ARKit did not classify is written as "wall"
-  (`CaptureController.kind(of:)`). Also log the raw classification (or "none"), so the wall hit rate
-  (measurement 2) can be read.
 - **A live "the view is not shifting" rule** (audit decision 7): the distance moved over the last few
   seconds against the depth in view, both from ARKit. It needs tuning on real app recordings.
 
@@ -504,10 +505,17 @@ an API key. Colab jobs relay their questions back to the Mac. Its calls:
 - the scene review;
 - the capture advice.
 
-**The phone cannot ship an API key.** The phone-only path needs a small proxy that holds the key and
-forwards the phone's questions, for example an endpoint on the existing Render relay. That relay is a
-CPU web service, not a GPU server, but it is a server. Whether that is acceptable, or the Mac stays
-the Claude gateway, is the owner's call.
+**The Mac stays the Claude gateway** (the owner's decision, 14 October 2026). The phone cannot ship
+an API key, and no proxy will hold one.
+
+- The phone does the computing, and sends each review's images and question to the Mac's station, as
+  it sends recordings today: over the local network, or through the Render relay, which the Mac's
+  cloud worker answers.
+- The Mac's `pipeline/advisor.py` asks Claude with its own login and sends the answer back.
+- With no Mac reachable, the reviews wait. Or the agent goes on with its numeric rules, as
+  `advisor.py` already does when Claude is offline.
+
+Nothing on the phone asks Claude yet. This lands with the first phone stage that needs a review.
 
 **What the phone must produce for those reviews:**
 
@@ -695,14 +703,14 @@ any model trained on them ships.
 
 ## Order of work
 
-1. **On a Mac with the iPhone 13:**
-   - build the app with `REFINER=edgetam`;
-   - check that the recording changes already written build and record correctly, and add the raw
-     plane classification to `capture.json` (section 1);
-   - take measurements 1 and 7, and switch the compute units;
-   - run SurfaceFill's `--check`. EdgeTAM's `--check` tests only the PyTorch wrapper, so also load
-     the fp16 EdgeTAM packages with coremltools on the Mac and compare their masks with
-     SAM2ImagePredictor (or add that to the converter's `--check`).
+1. **On a Mac with the iPhone 13**, as `docs/device-run-1.md` sets out command by command:
+   - build the app, which compiles the recording changes for the first time;
+   - record three test captures and check them with `tools/check_phone_capture.py`;
+   - take measurements 1 and 7;
+   - build with `REFINER=edgetam` and run its `--check --coreml` (the fp16 packages against EdgeTAM's
+     own predictor);
+   - run SurfaceFill's `--check`, and time it on the phone in Xcode's Performance report;
+   - then switch the compute units.
 2. **Reference rooms:** record 10-20 rooms with the app, and run the Mac pipeline on them as the
    reference. Take measurement 2 and measurement 4's yardstick.
 3. **Poses and trainer:** write the camera-only refinement's adapter (our `frames.jsonl` and keyframe
@@ -724,5 +732,5 @@ any model trained on them ships.
    - NVIDIA and MIT CSAIL (SegFormer and its ADE20K data);
    - counsel on MoGe-2's training data.
 
-   The owner also decides the Claude gateway (section 10) and whether splat editing moves to the
-   phone (section 9).
+   The owner has decided the Claude gateway: the Mac (section 10). Whether splat editing moves to
+   the phone (section 9) is still open.

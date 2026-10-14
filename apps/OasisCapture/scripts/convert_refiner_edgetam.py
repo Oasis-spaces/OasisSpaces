@@ -39,6 +39,8 @@ both against the predictor.
 Needs EdgeTAM installed without its CUDA extension, and coremltools:
     SAM2_BUILD_CUDA=0 pip install --no-build-isolation -e <EdgeTAM clone>
     ~/.venvs/oasis-coreml/bin/python apps/OasisCapture/scripts/convert_refiner_edgetam.py [--check frame.jpg ...]
+--check compares the PyTorch wrapper; add --coreml (on a Mac, after building) to run
+the fp16 packages themselves on the Neural Engine and CPU and compare their masks too.
 The checkpoint is fetched from the EdgeTAM repo into ~/.cache/oasis-models/edgetam.pt.
 """
 
@@ -152,12 +154,22 @@ def mask_in_image(logits, image, mode: str):
     return np.array(Image.fromarray(m).resize(image.size, Image.BILINEAR)) > 127
 
 
-def check(paths: list[str], boxes: list[list[float]], points: list[list[float]]) -> None:
+def check(paths: list[str], boxes: list[list[float]], points: list[list[float]], coreml: bool = False) -> None:
     """The wrapper (what is converted) against SAM2ImagePredictor on each image and box,
-    stretched and letterboxed; IoU of the final masks in image pixels."""
+    stretched and letterboxed; IoU of the final masks in image pixels. With `coreml`, the
+    built fp16 packages too, on the stretched square the app feeds them, loaded for the
+    Neural Engine and CPU as the app will (needs macOS)."""
     from PIL import Image
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
+    if coreml:
+        if sys.platform != "darwin":
+            sys.exit("--coreml runs the Core ML packages, which needs macOS")
+        import coremltools as ct
+
+        units = ct.ComputeUnit.CPU_AND_NE
+        ml_encoder = ct.models.MLModel(str(ENCODER_OUT), compute_units=units)
+        ml_decoder = ct.models.MLModel(str(DECODER_OUT), compute_units=units)
     model = load()
     encoder, decoder, predictor = Encoder(model).eval(), Decoder(model).eval(), SAM2ImagePredictor(model)
     iou = lambda a, b: float((a & b).sum()) / max(1, float((a | b).sum()))
@@ -179,6 +191,13 @@ def check(paths: list[str], boxes: list[list[float]], points: list[list[float]])
                 logits, score = decoder(emb, s0, s1, b, p)
                 ours = mask_in_image(logits[0].numpy(), image, mode)
                 line.append(f"{mode} IoU {iou(ours, ref):.3f} (score {float(score[0]):.2f})")
+                if coreml and mode == "stretch":
+                    feats = ml_encoder.predict({"image": sq})
+                    out = ml_decoder.predict({"embedding": feats["embedding"], "feat_s0": feats["feat_s0"],
+                                              "feat_s1": feats["feat_s1"], "box": b.numpy(), "point": p.numpy()})
+                    cm = mask_in_image(np.asarray(out["mask"]).reshape(-1, 256, 256)[0], image, mode)
+                    line.append(f"Core ML IoU {iou(cm, ref):.3f}, {iou(cm, ours):.3f} against PyTorch "
+                                f"(score {float(np.ravel(out['score'])[0]):.2f})")
         print("  " + "; ".join(line))
 
 
@@ -228,11 +247,13 @@ if __name__ == "__main__":
                         help="one per --check image, in its pixels")
     parser.add_argument("--point", nargs=2, type=float, action="append", metavar=("X", "Y"),
                         help="optional, one per --check image: a point on the thing")
+    parser.add_argument("--coreml", action="store_true",
+                        help="with --check: also run the built Core ML packages (macOS)")
     args = parser.parse_args()
     if args.check:
         if not args.box or len(args.box) != len(args.check):
             sys.exit("give one --box per --check image")
         points = args.point if args.point and len(args.point) == len(args.check) else [None] * len(args.check)
-        check(args.check, args.box, points)
+        check(args.check, args.box, points, coreml=args.coreml)
     else:
         convert()

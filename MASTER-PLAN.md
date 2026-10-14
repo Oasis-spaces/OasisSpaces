@@ -34,10 +34,13 @@ gives the open-source stack for each stage:
 
 It also says what stays off the phone (Claude, image-to-3D meshes, the Mac's research
 tools), lists the measurements still to take on the iPhone 13 and the licences to ask
-for, and names two owner decisions:
+for, and records the owner's decisions:
 
-- whether a small Claude proxy may hold the API key, or the Mac stays the gateway;
-- whether splat editing moves to the phone (layout editing comes with the scene viewer).
+- the Mac stays the Claude gateway: the phone sends its reviews to the Mac's station, and no proxy
+  holds an API key (decided 14 October 2026);
+- whether splat editing moves to the phone is still open (layout editing comes with the scene viewer).
+
+`docs/device-run-1.md` is the first run on the iPhone 13, step by step.
 
 Until that lands, the Mac and Colab chain below is how a room gets built.
 
@@ -204,12 +207,12 @@ are gitignored: large, generated, or personal footage.)
 ### `tools/` — stage helpers and the editing tools
 - `classify_shapes.py`, `blender_room.py`, `blender_views.py`, `furniture_library.py`, `shapes_to_obj.py` — label and sanity-check boxes, finish the room, build it in Blender with parametric furniture, render it from the video's own cameras, export OBJ.
 - `room_views.py`, `plan_image.py`, `object_frames.py`, `capture_map.py` — the pose-matched render rows, the plan with the walk, the frames that show each object, the capture map.
-- `phone_objects.py`, `phone_sim_export.py`, `phone_capture_export.py`, `phone_video_preview.py` — the phone's perception run over a space on the Mac (`phonesim`) as a second opinion; exports and previews.
+- `phone_objects.py`, `phone_sim_export.py`, `phone_capture_export.py`, `phone_video_preview.py` — the phone's perception run over a space on the Mac (`phonesim`) as a second opinion; exports and previews. `check_phone_capture.py` checks a recording's poses, motion samples, keyframe anchors, plane classes and exposure.
 - `splat_edit.py`, `splat_tools.py`, `splat_prune.py`, `splat_render.py`, `splat_choose.py`, `compare_splats.py`, `surface_fill.py` — remove/add furniture in a splat, composite PLYs, prune floaters, CPU render, Claude's choice of the best splat, floor/wall/face fill with LaMa.
 - `mixed_scene.py`, `mesh_render.py`, `object_mesh.py` — the textured shell and movable pieces; GLB drawing; TRELLIS meshes on a GPU.
 - `evaluate_space.py`, `show_prompts.py` — scoring spaces; printing every question the pipeline asks Claude.
 - `colab_pipeline.py`, `claude_relay.py`, `paced_proxy.py` — the Colab driver, the Claude relay, the paced upload proxy for this network.
-- `tools/tests/` — nineteen test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, capture map, crop vote, frame choice, incremental seeds, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room score, room views, shot list, stage-1 gaps, structure review, surface fill, tracking.
+- `tools/tests/` — twenty test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room score, room views, shot list, stage-1 gaps, structure review, surface fill, tracking.
 - Gitignored but needed locally: `tools/opensplat` + `tools/default.metallib` (OpenSplat built for Metal, AGPL, patched), `tools/colab-cache/` (the OpenSplat binary built on Colab), `tools/spirula-studio/`.
 
 ### `apps/OasisCapture/` — the iPhone capture app
@@ -237,7 +240,7 @@ are gitignored: large, generated, or personal footage.)
 ### Colab, scripts, docs
 - `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything), clone, Claude relay, upload, the four stages, download.
 - `scripts/process_video.sh` — the whole chain without the agent; `scripts/make_sample.py` — a synthetic demo room.
-- `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed; `docs/audit-prompts-and-stack-2026-10.md` — every Claude question and every stage-1 option measured on 16 clips, with the field's state of the art per layer and the decisions it leaves open; `docs/on-device-plan-2026-10.md` — the open-source stack that moves reconstruction onto the phone, what was measured for it, and the licence asks.
+- `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed; `docs/audit-prompts-and-stack-2026-10.md` — every Claude question and every stage-1 option measured on 16 clips, with the field's state of the art per layer and the decisions it leaves open; `docs/on-device-plan-2026-10.md` — the open-source stack that moves reconstruction onto the phone, what was measured for it, and the licence asks. `docs/device-run-1.md` — the first run on the iPhone 13 and the Mac, command by command. `docs/test-videos.md` — where the test videos are.
 - `third_party/arkit-3dgs-scanner/` — the Apache-2.0 snapshot (commit d5d8e31) of Kuo Feng-Yuan's Swift + Metal splat trainer and camera-only pose refinement, kept verbatim; `OASIS-PROVENANCE.md` says why and what we owe.
 - `splats/<video>/best.splat` — the published best splat of each test video.
 

@@ -774,8 +774,11 @@ phone (no model calls, no network while recording). Build and install with
   `jump` flag when the pose leapt more than 15 cm from the last frame. Twice a
   second an `ARAnchor` is left at the camera. ARKit moves anchors when it
   corrects its map, so `capture.json`'s `keyframeAnchors` gives each one's pose
-  as placed and as ARKit has it at the end, with how often it moved. Not yet
-  built or run on a phone.
+  as placed and as ARKit has it at the end, with how often it moved, and
+  `planeClasses` gives every plane ARKit reported with its raw classification.
+  `python3 tools/check_phone_capture.py <capture folder>` checks all of it on a
+  recording. Not yet built or run on a phone: `docs/device-run-1.md` is the
+  first run, step by step.
 - **With the Mac:** the Scans tab sends a recording to Splat Viewer on the same
   Wi-Fi (`apps/OasisLink`: Bonjour discovery, pairing by code or by a shared
   account), follows the analysis stage by stage, and shows the room renders
