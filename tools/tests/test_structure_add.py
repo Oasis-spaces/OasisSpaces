@@ -373,6 +373,63 @@ def test_an_edit_that_lowers_the_measured_room_score_is_rolled_back():
     assert applied == ["dropped B1"] and not shapes["boxes"][1]["build"]
 
 
+def wall_drop_room():
+    """room() with a short sliver of wall standing inside it (W5), and two wardrobe boxes measured on
+    one spot (B0, B1) beside the bed (B2)."""
+    shapes = room()
+    sliver = wall(x=-12.0)
+    sliver.update(center=[-12.0, 2.0, 0.0], half_a=1.5, points=80)
+    shapes["planes"].append(sliver)
+    shapes["boxes"] = [{"label": "wardrobe", "detected": "wardrobe", "source": "detected", "build": True, "points": 300,
+                        "min": [-20.0, 10.0, -11.5], "max": [-14.0, 15.0, 7.0]},
+                       {"label": "wardrobe", "detected": "chest of drawers", "source": "detected", "build": True,
+                        "points": 400, "min": [-20.0, 10.5, -11.5], "max": [-14.0, 15.0, 7.0]},
+                       {"label": "bed", "detected": "bed", "source": "detected", "build": True, "points": 5000,
+                        "min": [-16.0, -4.0, -11.5], "max": [-7.0, 5.0, -6.0]}]
+    return shapes
+
+
+def wall_aware(shapes=None):
+    """A measurement like room_score's: W1, the far wall the frames measured in place, is worth 0.5 and
+    W2 holds no support (nothing is lost by dropping it); the sliver W5 cuts the room and costs 0.1;
+    each built box is worth 0.3, less 0.5 while both wardrobes stand on one spot."""
+    planes, built = shapes["planes"], [b for b in shapes["boxes"] if b.get("build", True)]
+    both = sum(1 for b in built if b.get("label") == "wardrobe") == 2
+    return {"score": round(0.3 * len(built) - (0.5 if both else 0.0)
+                           - (0.0 if planes[1].get("build", True) else 0.5)
+                           - (0.1 if planes[5].get("build", True) else 0.0), 3)}
+
+
+def test_each_wall_drop_is_measured_on_its_own_and_undone_when_it_loses_a_measured_wall():
+    agent_ = stub(Answers())
+    agent_.phone_matches = lambda: {}
+    agent_.measure_room = wall_aware
+    shapes = wall_drop_room()
+    assert wall_aware(shapes)["score"] == 0.3
+    verdict = {"drop_walls": [{"id": "W1", "why": "looks like a door"}, {"id": "W5", "why": "a sliver"},
+                              {"id": "W2", "why": "a wardrobe front"}],
+               "drop_boxes": [{"id": "B0", "why": "a sliver of the wardrobe"}]}
+    applied = agent.Agent.apply_structure_review(agent_, shapes, verdict)
+    # the far wall's drop is measured as a loss and undone, so the box drop after it is judged
+    # on its own and kept; the drop slot it gave back lets W2 (the review's word, nothing lost) go
+    assert applied == ["dropped W1", "rolled back dropping W1: it lowered the measured room score from 0.30 to -0.20",
+                       "dropped W5", "dropped W2", "dropped B0"]
+    assert [p.get("build", True) for p in shapes["planes"]] == [True, True, False, True, True, False]
+    assert "review" not in shapes["planes"][1] and shapes["planes"][5]["review"] == "Claude: a sliver"
+    assert [b["build"] for b in shapes["boxes"]] == [False, True, True]
+    assert wall_aware(shapes)["score"] == 0.6
+    # without a measurement, the review's word stands within the limits: never the largest wall
+    # (W0, first of the equals), never more than half
+    agent_.measure_room = lambda shapes=None: (_ for _ in ()).throw(FileNotFoundError("no densify.json"))
+    shapes = wall_drop_room()
+    applied = agent.Agent.apply_structure_review(
+        agent_, shapes, {"drop_walls": [{"id": "W0", "why": "x"}, {"id": "W1", "why": "x"},
+                                        {"id": "W5", "why": "x"}, {"id": "W2", "why": "x"}]})
+    assert applied == ["kept W0: the largest wall is never dropped", "dropped W1", "dropped W5",
+                       "kept W2: at most half the walls can be dropped"]
+    assert [p.get("build", True) for p in shapes["planes"]] == [True, False, True, True, True, False]
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

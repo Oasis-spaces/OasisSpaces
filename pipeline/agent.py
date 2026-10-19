@@ -1389,9 +1389,10 @@ class Agent:
 
     def apply_structure_review(self, shapes: dict, verdict: dict) -> list[str]:
         """Apply Claude's decisions within fixed limits; report what happened.
-        Each group of edits that touches the furniture is measured
-        (room_score.py) and undone when it lowers the room's score: Claude
-        names what looks wrong, the measurements decide."""
+        Each group of edits (the furniture fronts, each wall dropped, each box
+        dropped, relabelled or added) is measured (room_score.py) and undone
+        when it lowers the room's score: Claude names what looks wrong, the
+        measurements decide."""
         applied = []
         measured = self.safe(self.measure_room, shapes)
 
@@ -1435,6 +1436,7 @@ class Agent:
             fronted.clear()
         biggest = max(walls, key=lambda i: walls[i]["points"]) if walls else None
         can_drop = len(walls) // 2  # never remove more than half the walls
+        snapshot = checkpoint()
         for item in verdict.get("drop_walls") or []:
             ident = str(item.get("id", ""))
             i = int(ident[1:]) if ident[:1] == "W" and ident[1:].isdigit() else None
@@ -1451,6 +1453,17 @@ class Agent:
                 walls[i]["review"] = f"Claude: {item.get('why', '')}"
                 can_drop -= 1
                 applied.append(f"dropped {ident}")
+                # One wall at a time, measured like the boxes below: a drop that
+                # lowers the score is undone here. Left unmeasured, its loss
+                # would be charged to the first box edit after it, and that
+                # edit undone in its place while the wall stayed dropped.
+                if settle(f"dropping {ident}", snapshot):
+                    # the rollback put back copies of the planes: index those,
+                    # and the wall kept frees its drop for another
+                    walls = {i: p for i, p in enumerate(shapes["planes"])
+                             if p["kind"] == "wall" and p.get("build", True)}
+                    can_drop += 1
+                snapshot = checkpoint()
         boxes = shapes["boxes"]
         snapshot = checkpoint()
         vouched = self.safe(self.phone_matches, default={}) or {}
