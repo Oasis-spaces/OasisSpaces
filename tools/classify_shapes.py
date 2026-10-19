@@ -49,6 +49,19 @@ FLOOR_AREA_MIN_FRAC = 0.40       # floor candidate: area >= this frac of largest
 FLOOR_LEVEL_TOL_FRAC = 0.25      # floor candidate: at most this * H above the wall-bottom estimate...
 FLOOR_BELOW_TOL_FRAC = 0.50      # ...or this * H below it: furniture often hides the lower walls
 CEILING_MIN_HEIGHT_FRAC = 0.65   # ceiling: at least this * H above floor level
+# A ceiling level nearer the floor than this is a table or cabinet face, not
+# the ceiling (pipeline/shapes.py MIN_CEILING_METRES, which it can only check
+# when it also found the floor).
+CEILING_MIN_METRES = 1.8
+# Without a ceiling level the room's height is inferred: each wall's visible
+# top is only a lower bound on the ceiling (a phone at chest height, pitched
+# down, rarely films the top of the walls; on synthetic pans and turns their
+# median came out 0.7-0.9 m short of a 2.60 m room, and tables and armchairs
+# seen from above were dropped as floating). With a metric scale it is kept
+# between a residential minimum and a cap. A ceiling lower than the minimum
+# sits close above the phone and is almost always filmed, so it is measured.
+ROOM_MIN_METRES = 2.40
+ROOM_MAX_METRES = 3.50
 
 SEAT_MAX_FOOTPRINT_FRAC = 0.06   # seat: footprint <= 6% of floor area
 SEAT_MAX_HEIGHT_FRAC = 0.25      # seat/table height band: < ~25% of room height
@@ -117,6 +130,11 @@ class RoomContext:
     ref_density: float | None       # scene points-per-area reference (median over planes)
     floor_source: str
     height_source: str
+    # Where the height came from, for later stages (room_level's height_source):
+    # "ceiling" (measured to a ceiling level), "wall tops" (as high as the
+    # walls were seen to reach, a lower bound) or "prior" (the metric minimum
+    # or cap, or a guess with no walls to go by: assumed rather than seen).
+    height_kind: str = "wall tops"
     walls: list[dict] = field(default_factory=list)
     surfaces: list[dict] = field(default_factory=list)
     room: dict | None = None  # footprint the walls enclose (see room_footprint)
@@ -672,15 +690,18 @@ def orientation_class(plane: dict) -> str:
     return "slanted"
 
 
-def classify_planes(planes: list[dict]) -> tuple[list[str], list[str], RoomContext]:
+def classify_planes(planes: list[dict], units_per_metre: float | None = None
+                    ) -> tuple[list[str], list[str], RoomContext]:
     """Label every plane and derive the room context used for boxes."""
     orient = [orientation_class(p) for p in planes]
     walls = [p for p, o in zip(planes, orient) if o == "vertical"]
     horiz = [(i, p) for i, (p, o) in enumerate(zip(planes, orient)) if o == "horizontal"]
 
-    # Room height and floor level, estimated from the vertical span of walls.
-    # Walls are the most reliable cue: horizontal planes may be table tops or
-    # duplicate ceiling detections, so the lowest one is NOT necessarily the floor.
+    # Floor level and a first room height, estimated from the vertical span of
+    # walls, to find the floor by; the height is measured properly once the
+    # floor is known (below). Walls are the most reliable cue: horizontal
+    # planes may be table tops or duplicate ceiling detections, so the lowest
+    # one is NOT necessarily the floor.
     if walls:
         room_height = median(2.0 * plane_z_extent(w) for w in walls)
         floor_est = median(w["center"][2] - plane_z_extent(w) for w in walls)
@@ -737,20 +758,44 @@ def classify_planes(planes: list[dict]) -> tuple[list[str], list[str], RoomConte
             # The floor gets resized to the walls' footprint, so size the room by it.
             floor_area = 4.0 * room["half_u"] * room["half_v"]
             floor_source += ", sized to the walls' footprint"
-        if walls and floor_z < floor_est:
-            # The walls were only seen above the furniture, so measure the room
-            # from the floor that was actually found up to the wall tops.
-            wall_top = median(w["center"][2] + plane_z_extent(w) for w in walls)
-            if wall_top - floor_z > room_height:
-                room_height = wall_top - floor_z
-                height_source += "; measured from the floor plane to the wall tops"
-        if "ceiling" in level_of:
-            room_height = planes[level_of["ceiling"]]["center"][2] - floor_z
-            height_source = "floor level to ceiling level"
     else:
         floor_z = floor_est
         floor_area = max((plane_area(p) for _, p in horiz), default=0.0)
         floor_source = "wall-bottom estimate (no floor plane detected)"
+
+    # Room height. A ceiling level is a measurement, and it counts without a
+    # floor level too (from the walls' bottoms then): a level clip sees the
+    # ceiling but not the floor near it.
+    height_kind = "wall tops" if walls else "prior"
+    ceiling = planes[level_of["ceiling"]]["center"][2] if "ceiling" in level_of else None
+    lowest_ceiling = CEILING_MIN_METRES * units_per_metre if units_per_metre else 0.0
+    if ceiling is not None and ceiling - floor_z > lowest_ceiling:
+        room_height = ceiling - floor_z
+        height_source = ("floor level to ceiling level" if floor_idx
+                         else "wall-bottom estimate to ceiling level")
+        height_kind = "ceiling"
+    else:
+        if walls:
+            # The walls stop at the ceiling, so the room is as tall as they
+            # were seen to reach above the floor, not as tall as the median
+            # wall. A plane's extent already leaves out its outer 1% of
+            # points (shapes.py oriented_rect); the second-highest top is
+            # taken so one stray tall plane (a building seen through a
+            # window) cannot raise the whole room.
+            tops = sorted((w["center"][2] + plane_z_extent(w) for w in walls), reverse=True)
+            top = tops[1] if len(tops) > 1 else tops[0]
+            if top - floor_z > room_height:
+                room_height = top - floor_z
+                height_source = (f"{'second-highest' if len(tops) > 1 else 'top'} of "
+                                 f"{len(tops)} wall tops above the floor")
+        if units_per_metre:
+            low, high = ROOM_MIN_METRES * units_per_metre, ROOM_MAX_METRES * units_per_metre
+            if not low <= room_height <= high:
+                bound, metres = (low, ROOM_MIN_METRES) if room_height < low else (high, ROOM_MAX_METRES)
+                height_source += (f"; {room_height / units_per_metre:.2f} m seen, "
+                                  f"so {metres:.2f} m assumed (no ceiling seen)")
+                room_height = bound
+                height_kind = "prior"
     if floor_area <= 0.0:  # last-resort so ratios stay finite
         floor_area = room_height * room_height
         floor_source += "; area from room height"
@@ -787,6 +832,7 @@ def classify_planes(planes: list[dict]) -> tuple[list[str], list[str], RoomConte
         ref_density=ref_density,
         floor_source=floor_source,
         height_source=height_source,
+        height_kind=height_kind,
         walls=walls,
         surfaces=[p for p, lab in zip(planes, labels) if lab == "surface"],
         room=room,
@@ -979,7 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
     planes = data.get("planes", [])
     boxes = data.get("boxes", [])
 
-    plane_labels, plane_reasons, ctx = classify_planes(planes)
+    plane_labels, plane_reasons, ctx = classify_planes(planes, units_per_metre)
     for plane, label in zip(planes, plane_labels):
         plane["label"] = label
     if ctx.room:
@@ -1028,7 +1074,10 @@ def main(argv: list[str] | None = None) -> int:
         # "clutter" only comes from a failed sanity gate: scan debris, not
         # furniture, so the Blender room skips it.
         box["build"] = label != "clutter"
-    data["room_level"] = {"floor_z": ctx.floor_z, "height": ctx.room_height}
+    # height_source tells later stages whether the height was measured to a
+    # ceiling or inferred (see RoomContext.height_kind).
+    data["room_level"] = {"floor_z": ctx.floor_z, "height": ctx.room_height,
+                          "height_source": ctx.height_kind}
     if not args.no_finish:
         for note in finish_room(data, units_per_metre, vocabulary):
             print(note)
