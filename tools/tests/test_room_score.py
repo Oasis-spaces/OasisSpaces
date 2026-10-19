@@ -369,6 +369,72 @@ def test_an_unfilmed_wall_base_does_not_cost_a_real_wall_its_support():
     assert not measured_slab["tall"] and measured_slab["support"] == 0.0
 
 
+def closed_room():
+    """A closed room in the shapes frame: floor 0..20 x 0..14 at z=0, all four
+    walls filmed full height, a doorway at x 9..12 in the back wall (y=14),
+    and through it the next room's wall along y=24, glimpsed from the
+    cameras walking about inside."""
+    rng = np.random.default_rng(9)
+    def sheet(n, xr, yr, zr):
+        return np.column_stack([rng.uniform(*xr, n), rng.uniform(*yr, n), rng.uniform(*zr, n)])
+    floor = sheet(4000, (0, 20), (0, 14), (0.0, 0.05))
+    back = np.vstack([sheet(1100, (0, 9), (13.95, 14.05), (0.0, 20.0)),
+                      sheet(1000, (12, 20), (13.95, 14.05), (0.0, 20.0))])
+    front = sheet(2000, (0, 20), (-0.05, 0.05), (0.0, 20.0))
+    left = sheet(1500, (-0.05, 0.05), (0, 14), (0.0, 20.0))
+    right = sheet(1500, (19.95, 20.05), (0, 14), (0.0, 20.0))
+    cams = np.array([[4.0, 4.0], [7.0, 6.0], [10.0, 5.0], [13.0, 6.0], [16.0, 3.0]])
+    # The next room's wall: only what each camera saw through the doorway.
+    seen = []
+    for x, y in cams:
+        lo, hi = (x + (edge - x) * (24.0 - y) / (14.0 - y) for edge in (9.0, 12.0))
+        seen.append(sheet(200, (lo, hi), (23.95, 24.05), (0.0, 20.0)))
+    glimpsed = np.vstack(seen)
+    P = np.vstack([floor, back, front, left, right, glimpsed])
+    def wall(normal, center, axis, half, points):
+        return {"kind": "wall", "normal": normal, "center": center, "axis_a": axis,
+                "half_a": half, "points": points}
+    lo, hi = float(glimpsed[:, 0].min()), float(glimpsed[:, 0].max())
+    planes = [wall([0.0, 1.0, 0.0], [10.0, 14.0, 10.0], [1.0, 0.0, 0.0], 10.0, 2100),
+              wall([0.0, 1.0, 0.0], [10.0, 0.0, 10.0], [1.0, 0.0, 0.0], 10.0, 2000),
+              wall([1.0, 0.0, 0.0], [0.0, 7.0, 10.0], [0.0, 1.0, 0.0], 7.0, 1500),
+              wall([1.0, 0.0, 0.0], [20.0, 7.0, 10.0], [0.0, 1.0, 0.0], 7.0, 1500),
+              wall([0.0, 1.0, 0.0], [(lo + hi) / 2, 24.0, 10.0], [1.0, 0.0, 0.0], (hi - lo) / 2,
+                   len(glimpsed))]
+    return P, planes, cams
+
+
+def test_in_a_closed_room_every_filmed_wall_holds_support_and_dropping_one_costs():
+    # Both wall-drop reviewers' finding: the occluder test asked only that
+    # the occluder be on the cameras' side of a wall, and in a closed room the
+    # opposite wall always is. So every wall read hidden by its opposite and
+    # held no support, and a review dropping a real, filmed wall measured
+    # "same" and was kept. An occluder must stand between the cameras and
+    # the wall; the opposite wall stands behind them.
+    import tempfile
+    P, planes, cams = closed_room()
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        walls = rs.WallEvidence(space)
+        walls._loaded = True; walls._positions = P; walls.unit = UNITS
+        shapes = {"world": np.eye(3).tolist(), "planes": [dict(p) for p in planes],
+                  "room_level": {"floor_z": 0.0, "height": 20.0},
+                  "cameras": cams.tolist(), "boxes": []}
+        no_outlines = lambda label: {"frames": {}, "unseen": {}}
+        score = lambda s: rs.room_score(space, s, no_outlines, VOCAB, walls=walls)
+        full = score(shapes)
+        for k in ("W0", "W1", "W2", "W3"):
+            assert not full["walls"][k]["occluded"] and full["walls"][k]["support"] > 0.7, k
+        # The next room's wall seen through the doorway is still hidden: the
+        # back wall stands between it and the cameras, around the doorway.
+        assert full["walls"]["W4"]["occluded"] and full["walls"]["W4"]["support"] == 0.0
+        for i in range(4):
+            dropped = json.loads(json.dumps(shapes)); dropped["planes"][i]["build"] = False
+            assert rs.compare(full, score(dropped)) == "worse", f"dropping W{i}"
+        dropped = json.loads(json.dumps(shapes)); dropped["planes"][4]["build"] = False
+        assert rs.compare(full, score(dropped)) == "same"     # nothing measured is lost
+
+
 def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():
     shapes = room()
     shapes["boxes"] = [dict(CUPBOARD, detected="wardrobe"),                       # another storage name: same kind

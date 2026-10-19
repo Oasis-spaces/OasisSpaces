@@ -235,9 +235,12 @@ def wall_support(P: np.ndarray, plane: dict, floor_z: float, cameras: np.ndarray
               beyond it (outward of the cameras): a bogus wall through the
               room has the room itself beyond it. Measured within the run,
               so a narrow plane cannot hide its slice in a big cloud.
-    occluded  another measured wall — parallel, nearer the cameras, itself
-              credible, with its own points covering this wall's run —
-              stands in front: the next room's wall seen through a doorway.
+    occluded  another measured wall — parallel, itself credible, standing
+              between the cameras and this one (nearer this wall than the
+              cameras that would have seen it), with its own points
+              covering this wall's run — stands in front: the next room's
+              wall seen through a doorway. The opposite wall of a closed
+              room stands behind the cameras and hides nothing.
               Coverage is by the occluder's measured points, not its fitted
               rectangle, so a short stub cannot hide a long wall, and a
               wall fitted across an alcove's opening (where it has no
@@ -282,15 +285,31 @@ def wall_support(P: np.ndarray, plane: dict, floor_z: float, cameras: np.ndarray
     n, a, c, half = frame(plane)
     body_cover, tall, seam, interior, inner = measure(n, a, c, half)
 
+    # How far in front of this wall the cameras stood, of those on the room's
+    # side of it: the ones whose sight lines would have reached it. Being on
+    # the cameras' side is not enough to hide a wall: in a closed room the
+    # opposite wall is too, and every wall would read hidden by its
+    # opposite, so dropping any of them would cost nothing. An occluder
+    # must stand on those sight lines, nearer this wall than the cameras.
+    depth = (np.column_stack([cameras, np.full(len(cameras), c[2])]) - c) @ (inner * n)
+    reach = float(np.median(depth[depth > 0])) if (depth > 0).any() else 0.0
+
     occluded = False
     for other in others:
         n2, a2, c2, half2 = frame(other)
         if abs(float(n @ n2)) < OCCLUDE_COS:
             continue
-        if float((c2 - c) @ (inner * n)) <= OCCLUDE_M * unit:
+        gap = float((c2 - c) @ (inner * n))
+        if gap <= OCCLUDE_M * unit:
             continue                       # not clearly on the cameras' side of this wall
+        if gap >= reach:
+            continue                       # behind the cameras, not between them and this wall
         if measure(n2, a2, c2, half2)[3] > OCCLUDER_MAX_INTERIOR:
             continue                       # the room lies beyond it: no wall, no occluder
+        # The run is covered square-on, not along each camera's sight
+        # lines: a next room's wall holds only what the cameras saw of it
+        # through the doorway, so along their own sight lines nothing hides
+        # it; square-on it shows wider than the doorway it was seen through.
         t_mine = (P[body(n2, a2, c2, half2)] - c) @ a
         picked = np.abs(t_mine) <= half
         if coverage(t_mine, picked, half) >= OCCLUDE_OVERLAP:
