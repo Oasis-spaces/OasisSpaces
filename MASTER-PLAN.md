@@ -198,6 +198,7 @@ are gitignored: large, generated, or personal footage.)
 - `tracking.py` — objects carried through the video with SAM 2.1's video model; votes, merges, doorish tracks.
 - `mirrors.py` — the plane of a mirror's surroundings written into its outline.
 - `shapes.py` — planes and boxes from the labelled dense cloud (`shapes.json`).
+- `room_up.py` — the room's up: from the cameras' level sideways axes, then levelled on the cloud's floor and ceiling (shared by shapes, splat_export and the capture map).
 - `placement.py` — a piece placed by its masks: candidate boxes' silhouettes through the real cameras against the outlines.
 - `room_score.py` — the measured room score (agreement, collision, walk, doorway).
 - `object_models.py` — per-object jobs (a frame and a cut-out) for image-to-3D models.
@@ -213,7 +214,7 @@ are gitignored: large, generated, or personal footage.)
 - `mixed_scene.py`, `mesh_render.py`, `object_mesh.py` — the textured shell and movable pieces; GLB drawing; TRELLIS meshes on a GPU.
 - `evaluate_space.py`, `show_prompts.py` — scoring spaces; printing every question the pipeline asks Claude.
 - `colab_pipeline.py`, `claude_relay.py`, `paced_proxy.py` — the Colab driver, the Claude relay, the paced upload proxy for this network.
-- `tools/tests/` — twenty-three test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room height, room score, room views, shot list, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
+- `tools/tests/` — twenty-four test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room height, room score, room up, room views, shot list, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
 - Gitignored but needed locally: `tools/opensplat` + `tools/default.metallib` (OpenSplat built for Metal, AGPL, patched), `tools/colab-cache/` (the OpenSplat binary built on Colab), `tools/spirula-studio/`.
 
 ### `apps/OasisCapture/` — the iPhone capture app

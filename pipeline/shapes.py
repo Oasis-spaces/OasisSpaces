@@ -4,7 +4,8 @@
 Detects the geometric structure of a reconstructed space and regenerates
 it as clean parametric shapes:
 
-  1. Estimate the up direction from the solved camera poses.
+  1. Estimate the up direction from the solved camera poses, then level it
+     on the cloud's floor, ceiling and furniture tops (pipeline/room_up.py).
   2. RANSAC plane detection -> walls; floor and ceiling as height levels
      inside the walls.
   3. Cluster the remaining points -> furniture volumes (oriented boxes).
@@ -28,6 +29,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from densify import read_images_bin
 from pointcloud import load_ply, space_model_dir
+from room_up import REFINE_MAX_DEGREES, WARN_DEGREES, angle_between, camera_up, refine_up
 from semantics import room_vocabulary
 
 
@@ -52,13 +54,18 @@ def read_camera_rotations(path):
     return rotations
 
 
-def estimate_up(model_dir: Path) -> np.ndarray:
-    """A phone held upright films with its image-Y pointing at the floor,
-    so world-up is the average of the cameras' -Y axes."""
-    ups = [-R.T @ np.array([0.0, 1.0, 0.0]) for R in
-           read_camera_rotations(model_dir / "images.bin")]
-    up = np.mean(ups, axis=0)
-    return up / np.linalg.norm(up)
+def estimate_up(model_dir: Path) -> tuple[np.ndarray, str]:
+    """(world-up, how it was found) from the solved cameras: see
+    room_up.camera_up. shapes.py then corrects it from the cloud's level
+    surfaces (refine_up)."""
+    return camera_up(np.stack([R.T for R in read_camera_rotations(model_dir / "images.bin")]))
+
+
+def fitted_normals(tree, points, sample, k=24):
+    """Normal of the surface each sampled point's k nearest neighbours span."""
+    _, neighbours = tree.query(points[sample], k=k)
+    local = points[neighbours] - points[neighbours].mean(axis=1, keepdims=True)
+    return np.linalg.svd(local, full_matrices=False)[2][:, 2, :]
 
 
 def ransac_plane(points, threshold, iterations=400, rng=None, normals=None,
@@ -101,6 +108,12 @@ def ransac_plane(points, threshold, iterations=400, rng=None, normals=None,
     d = -normal @ centroid
     mask = inliers(normal, d)
     return normal, d, mask
+
+
+# Without normals to trust, the up direction is levelled on surfaces fitted to
+# this many sampled points (and not at all on a cloud smaller than the minimum).
+UP_FIT_SAMPLE = 50_000
+UP_FIT_SAMPLE_MIN = 1000
 
 
 # Walls this close to parallel, this near each other (metres, or 3% of the
@@ -242,12 +255,52 @@ def main():
     densify_meta = space / "densify.json"
     if densify_meta.exists() and space_model_dir(space) is not None:
         # The dense cloud lives in the frame of the model densify used.
-        up = estimate_up(space_model_dir(space))
+        up, up_source = estimate_up(space_model_dir(space))
     elif models:
-        up = estimate_up(max(models, key=lambda d: (d / "points3D.bin").stat().st_size))
+        up, up_source = estimate_up(max(models, key=lambda d: (d / "points3D.bin").stat().st_size))
     else:
-        up = np.array([0.0, 0.0, 1.0])  # no camera solve: assume Z-up
-    print(f"up vector: {np.round(up, 3)}")
+        up, up_source = np.array([0.0, 0.0, 1.0]), "assumed +Z (no camera solve)"
+    print(f"up vector from the cameras: {np.round(up, 3)} ({up_source})")
+
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(pts)
+    normals = cloud.normals.astype(np.float64) if cloud.normals is not None else None
+    if normals is not None:
+        # Trust the cloud's normals only if they agree with the geometry. Each
+        # sampled point's normal is compared with the surface its neighbours
+        # span. (Checking against one dominant plane instead failed on a good
+        # Colab cloud: the plane landed across furniture and scored 0.65.)
+        sample = np.random.default_rng(3).choice(len(pts), min(3000, len(pts)), replace=False)
+        surface = fitted_normals(tree, pts, sample)
+        agreement = float(np.median(np.abs(np.einsum("ij,ij->i", surface, normals[sample]))))
+        if agreement <= 0.8:
+            normals = None
+        print(f"normal agreement with the local surface: {agreement:.2f} "
+              f"({'using' if normals is not None else 'ignoring'} normals)")
+
+    # The cameras cannot see their own pitch when they never turned, and hand
+    # roll blurs a short pan: the room's level surfaces (floor, ceiling, the
+    # tops of furniture) settle it. Without normals to trust, each surface's
+    # orientation is fitted from the points around it.
+    level_normals, level_from = normals, "the cloud's normals"
+    if level_normals is None and len(pts) >= UP_FIT_SAMPLE_MIN:
+        sample = np.random.default_rng(4).choice(len(pts), min(UP_FIT_SAMPLE, len(pts)), replace=False)
+        level_normals, level_from = fitted_normals(tree, pts, sample), "surfaces fitted to the points"
+    refined = refine_up(up, level_normals) if level_normals is not None else None
+    correction = 0.0
+    if refined is None:
+        print("  too few level surfaces to check the cameras' up against")
+    elif angle_between(refined, up) > REFINE_MAX_DEGREES:
+        print(f"  the level surfaces lean {angle_between(refined, up):.0f} deg from the cameras' up, "
+              f"more than a camera solve is believed to be off: keeping the cameras'")
+    else:
+        correction = angle_between(refined, up)
+        up, up_source = refined, f"{up_source}, levelled on {level_from}"
+    if correction > WARN_DEGREES:
+        print(f"  warning: levelling on {level_from} moved up {correction:.1f} deg from the cameras' "
+              f"estimate: their pitch, when the clip never turned, or a solve that is not level")
+    print(f"up vector: {np.round(up, 3)} ({correction:.1f} deg from the cameras')")
 
     # world frame: up = +Z
     z = up
@@ -258,7 +311,7 @@ def main():
     y = np.cross(z, x)
     world = np.stack([x, y, z])
     P = pts @ world.T
-    N = cloud.normals.astype(np.float64) @ world.T if cloud.normals is not None else None
+    N = normals @ world.T if normals is not None else None
 
     extent = np.linalg.norm(np.percentile(P, 98, 0) - np.percentile(P, 2, 0))
     threshold = extent * 0.012
@@ -282,23 +335,8 @@ def main():
         print(f"leaving out {int(hanging.sum()):,} points on hanging and loose things "
               f"({', '.join(left_out)})")
 
-    if N is not None:
-        # Trust the cloud's normals only if they agree with the geometry. Each
-        # sampled point's normal is compared with the surface its neighbours
-        # span. (Checking against one dominant plane instead failed on a good
-        # Colab cloud: the plane landed across furniture and scored 0.65.)
-        from scipy.spatial import cKDTree
-
-        sample = np.random.default_rng(3).choice(len(P), min(3000, len(P)), replace=False)
-        _, neighbours = cKDTree(P).query(P[sample], k=24)
-        local = P[neighbours] - P[neighbours].mean(axis=1, keepdims=True)
-        surface = np.linalg.svd(local, full_matrices=False)[2][:, 2, :]
-        agreement = float(np.median(np.abs(np.einsum("ij,ij->i", surface, N[sample]))))
-        if agreement <= 0.8:
-            N = None
-        print(f"normal agreement with the local surface: {agreement:.2f} "
-              f"({'using' if N is not None else 'ignoring'} normals)")
-    shapes = {"up": up.tolist(), "world": world.tolist(), "planes": [], "boxes": []}
+    shapes = {"up": up.tolist(), "up_source": up_source, "up_correction_deg": round(correction, 2),
+              "world": world.tolist(), "planes": [], "boxes": []}
     rng = np.random.default_rng(7)
     units_per_metre = None
     if densify_meta.exists():

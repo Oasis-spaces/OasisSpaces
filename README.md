@@ -248,7 +248,11 @@ the agent's judgement:
    model runs object by object, fast on CUDA and about a second an object and
    frame on a Mac's GPU, hence the default.
 3. `pipeline/shapes.py` and `tools/classify_shapes.py` — planes and boxes.
-   Walls come from RANSAC; the floor and ceiling are the lowest upward-facing
+   The room's up comes from the cameras' level sideways axes, which camera
+   pitch cannot tilt (the mean image up when the camera never turned), then
+   is levelled on the cloud's floor, ceiling and furniture tops
+   (`pipeline/room_up.py`; `shapes.json` records `up_source` and
+   `up_correction_deg`). Walls come from RANSAC; the floor and ceiling are the lowest upward-facing
    and highest downward-facing height levels inside the walls, so a strip of
    floor is enough and a lower corridor floor seen through a door is ignored.
    A phone pitched down rarely films the ceiling; then the room is as tall as
@@ -891,6 +895,7 @@ pipeline/reconstruct.py   capture -> cloud.ply (wraps COLMAP + ffmpeg)
 pipeline/densify.py       MoGe-2 depth fused over COLMAP poses -> cloud-dense.ply
 pipeline/semantics.py     open-vocabulary object detection for keyframes (local)
 pipeline/shapes.py        planes and boxes from the dense cloud
+pipeline/room_up.py       the room's up: the cameras' level axes, levelled on the cloud
 pipeline/splat_seed.py    OpenSplat project seeded from the dense cloud
 pipeline/splat_export.py  compact .splat for the viewer, and its starting camera
 tools/splat_edit.py       remove objects from a splat, add furniture, fill missing surfaces

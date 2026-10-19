@@ -130,17 +130,14 @@ def units_from_height(cam2world: np.ndarray, points: np.ndarray, up: np.ndarray)
 
 
 def room_frame(cam2world: np.ndarray, points: np.ndarray):
-    """(up, right, forward). A handheld phone pitches and turns but does not
-    roll, so its image's sideways axis stays level: up is the direction most
-    at right angles to every frame's sideways axis, whatever the pitch
-    (averaging the image's up axis instead tilts it back whenever the camera
-    mostly looks down one way). The plan's axes follow the spread of the
-    points across the floor."""
-    sideways = cam2world[:, :3, 0]
-    values, vectors = np.linalg.eigh(sideways.T @ sideways)
-    up = vectors[:, 0]
-    if up @ -cam2world[:, :3, 1].mean(axis=0) < 0:        # the image's up points up, not down
-        up = -up
+    """(up, right, forward). Up is the one shapes.py starts from
+    (room_up.camera_up): the direction most at right angles to every frame's
+    sideways axis, whatever the pitch, or the mean image up when the camera
+    never turned and the sideways axes are all one. The plan's axes follow
+    the spread of the points across the floor."""
+    from room_up import camera_up
+
+    up, _ = camera_up(cam2world[:, :3, :3])
     flat = points - np.outer(points @ up, up)
     flat -= flat.mean(axis=0)
     _, _, vt = np.linalg.svd(flat[np.random.default_rng(1).choice(len(flat), min(len(flat), 50_000), replace=False)],

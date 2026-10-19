@@ -215,7 +215,7 @@ def start_views(space: Path, splat: Path | None = None, count: int = 6) -> list[
     else:
         from shapes import estimate_up
 
-        up = estimate_up(model)
+        up, _ = estimate_up(model)
     meta = space / "densify.json"
     metre = (json.loads(meta.read_text()).get("colmap_units_per_metre") if meta.exists()
              else None) or float(np.linalg.norm(np.percentile(blobs[0], 95, 0)

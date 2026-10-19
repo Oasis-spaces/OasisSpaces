@@ -36,6 +36,25 @@ def test_up_is_the_way_the_phone_was_held():
     assert abs(right @ up) < 1e-9 and abs(forward @ up) < 1e-9
 
 
+def test_up_stays_upright_when_the_camera_never_turned():
+    # A walk along the room looking one way, about 19 degrees down, the hand
+    # rolling a degree or so: the sideways axes are all one, and their scatter
+    # is roll, which would make the viewing direction look like up.
+    rng = np.random.default_rng(3)
+    poses = []
+    for x in np.linspace(0, 3, 12):
+        pose = camera([x, 0, 1.4], [0.0, 1, -0.35])
+        right, down, roll = pose[:3, 0].copy(), pose[:3, 1].copy(), np.radians(rng.normal(0, 1.0))
+        pose[:3, 0], pose[:3, 1] = np.cos(roll) * right + np.sin(roll) * down, np.cos(roll) * down - np.sin(roll) * right
+        poses.append(pose)
+    poses = np.stack(poses)
+    points = rng.uniform([-2, -1, 0], [2, 5, 2.5], (2000, 3))
+    up, _, _ = cm.room_frame(poses, points)
+    image_up = -poses[:, :3, 1].mean(axis=0)
+    assert np.allclose(up, image_up / np.linalg.norm(image_up), atol=1e-6)   # the cameras' only guess
+    assert up @ [0, 0, 1] > np.cos(np.radians(20))                           # upright, leaning by the pitch
+
+
 def test_the_floor_behind_a_bed_is_not_seen():
     eye = camera([0, 0, 1.5], [1, 0, -0.6])
     cells = np.array([[1.5, 0, 0.0],        # open floor in front
