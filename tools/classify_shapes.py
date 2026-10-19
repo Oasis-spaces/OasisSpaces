@@ -133,7 +133,8 @@ class RoomContext:
     # Where the height came from, for later stages (room_level's height_source):
     # "ceiling" (measured to a ceiling level), "wall tops" (as high as the
     # walls were seen to reach, a lower bound) or "prior" (the metric minimum
-    # or cap, or a guess with no walls to go by: assumed rather than seen).
+    # or cap, the floor put the minimum below a ceiling when no floor was
+    # seen, or a guess with no walls to go by: assumed rather than seen).
     height_kind: str = "wall tops"
     walls: list[dict] = field(default_factory=list)
     surfaces: list[dict] = field(default_factory=list)
@@ -692,7 +693,8 @@ def orientation_class(plane: dict) -> str:
 
 def classify_planes(planes: list[dict], units_per_metre: float | None = None
                     ) -> tuple[list[str], list[str], RoomContext]:
-    """Label every plane and derive the room context used for boxes."""
+    """Label every plane and derive the room context used for boxes. A
+    ceiling level too low to be the ceiling is marked build: false."""
     orient = [orientation_class(p) for p in planes]
     walls = [p for p, o in zip(planes, orient) if o == "vertical"]
     horiz = [(i, p) for i, (p, o) in enumerate(zip(planes, orient)) if o == "horizontal"]
@@ -769,25 +771,48 @@ def classify_planes(planes: list[dict], units_per_metre: float | None = None
     height_kind = "wall tops" if walls else "prior"
     ceiling = planes[level_of["ceiling"]]["center"][2] if "ceiling" in level_of else None
     lowest_ceiling = CEILING_MIN_METRES * units_per_metre if units_per_metre else 0.0
+    not_ceiling = None  # a ceiling level too near the floor: see the labels below
     if ceiling is not None and ceiling - floor_z > lowest_ceiling:
         room_height = ceiling - floor_z
         height_source = ("floor level to ceiling level" if floor_idx
                          else "wall-bottom estimate to ceiling level")
         height_kind = "ceiling"
+        low = ROOM_MIN_METRES * units_per_metre if units_per_metre else 0.0
+        if not floor_idx and room_height < low:
+            # The walls' bottoms only bound the floor from above: furniture
+            # and the frame's lower edge hide the lower walls (on synthetic
+            # level clips that saw the ceiling but no floor they ended
+            # 0.1-0.8 m above it). Under a measured ceiling the room is
+            # taken to be at least the minimum, so the floor at least that
+            # far down. A lower room gets its floor too low by the
+            # difference (0.1-0.2 m in synthetic 2.2-2.3 m rooms, where the
+            # walls' bottoms were 0.1-0.5 m too high).
+            floor_source = (f"{ROOM_MIN_METRES:.2f} m below the ceiling level (no floor plane "
+                            "detected; the walls' bottoms are higher)")
+            height_source = (f"ceiling level {room_height / units_per_metre:.2f} m above the walls' "
+                             f"bottoms, so {ROOM_MIN_METRES:.2f} m assumed (no floor seen)")
+            floor_z, room_height, height_kind = ceiling - low, low, "prior"
     else:
+        if ceiling is not None:
+            not_ceiling = level_of["ceiling"]
         if walls:
             # The walls stop at the ceiling, so the room is as tall as they
             # were seen to reach above the floor, not as tall as the median
             # wall. A plane's extent already leaves out its outer 1% of
-            # points (shapes.py oriented_rect); the second-highest top is
-            # taken so one stray tall plane (a building seen through a
-            # window) cannot raise the whole room.
+            # points (shapes.py oriented_rect). With three walls or more the
+            # second-highest top is taken, so one stray tall plane (a
+            # building seen through a window) cannot raise the whole room;
+            # with two, the lower one would undercut the median of the tops
+            # the height used to come from, so the higher is taken (the
+            # metric cap below still bounds a stray plane). Either way the
+            # top is at least the median of the tops.
             tops = sorted((w["center"][2] + plane_z_extent(w) for w in walls), reverse=True)
-            top = tops[1] if len(tops) > 1 else tops[0]
+            top = tops[1] if len(tops) > 2 else tops[0]
             if top - floor_z > room_height:
                 room_height = top - floor_z
-                height_source = (f"{'second-highest' if len(tops) > 1 else 'top'} of "
-                                 f"{len(tops)} wall tops above the floor")
+                height_source = ("the one wall top" if len(tops) == 1 else
+                                 f"{'higher' if len(tops) == 2 else 'second-highest'} of "
+                                 f"{len(tops)} wall tops") + " above the floor"
         if units_per_metre:
             low, high = ROOM_MIN_METRES * units_per_metre, ROOM_MAX_METRES * units_per_metre
             if not low <= room_height <= high:
@@ -818,6 +843,18 @@ def classify_planes(planes: list[dict], units_per_metre: float | None = None
         elif i in floor_idx:
             labels.append("floor")
             reasons.append(f"large horizontal at floor level z={z:.2f}")
+        elif i == not_ceiling:
+            # Turned down as the ceiling above, so not left to the height
+            # rule (with the assumed height it would call some of these the
+            # ceiling, others a surface Blender builds as a slab). Not built
+            # either way: shapes.py drops such a level when it has the floor
+            # to check against, and the ceiling is never built.
+            labels.append("surface")
+            plane["build"] = False
+            above = (f"{(z - floor_z) / units_per_metre:.2f} m" if units_per_metre
+                     else f"{z - floor_z:.2f}")
+            reasons.append(f"level only {above} above the floor: a cabinet or table "
+                           "underside, not the ceiling (not built)")
         elif z >= floor_z + CEILING_MIN_HEIGHT_FRAC * room_height:
             labels.append("ceiling")
             reasons.append(f"horizontal, {(z - floor_z) / room_height:.0%} of room height above floor")

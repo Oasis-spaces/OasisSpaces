@@ -64,6 +64,23 @@ def test_one_stray_tall_plane_does_not_raise_the_room():
     assert close(ctx.room_height, 2.20 * U), ctx.room_height / U
 
 
+def test_with_two_walls_the_higher_top_is_taken():
+    # The lower of two tops would undercut their median (here 2.00 m), which
+    # the height used to be measured to.
+    planes = [level(0.0, "floor"), wall("x", 0.0, 0.5, 1.8), wall("y", 0.0, 0.5, 2.2)]
+    _, _, ctx = classify_shapes.classify_planes(planes)
+    assert close(ctx.room_height, 2.20 * U), ctx.room_height / U
+    assert ctx.height_source.startswith("higher of 2 wall tops"), ctx.height_source
+    # With three, the second-highest, which is never below their median either.
+    planes.append(wall("x", D, 0.5, 2.0))
+    _, _, ctx = classify_shapes.classify_planes(planes)
+    assert close(ctx.room_height, 2.00 * U), ctx.room_height / U
+    # A stray plane as one of two: the metric cap bounds it.
+    planes = [level(0.0, "floor"), wall("x", 0.0, 0.5, 1.8), wall("x", -3.0, 1.0, 6.0, half=0.5)]
+    _, _, ctx = classify_shapes.classify_planes(planes, U)
+    assert close(ctx.room_height, 3.50 * U) and ctx.height_kind == "prior"
+
+
 def test_with_a_metric_scale_an_unseen_ceiling_is_kept_between_2_4_and_3_5_m():
     low = [level(0.0, "floor"), *walls_seen(tops=(1.75, 1.80, 2.10, 2.20))]
     _, _, ctx = classify_shapes.classify_planes(low, U)
@@ -94,11 +111,50 @@ def test_a_measured_ceiling_is_kept_even_below_the_assumed_minimum():
 
 
 def test_a_low_level_without_a_floor_is_a_cabinet_underside_not_the_ceiling():
-    planes = [level(1.60, "ceiling"),
-              *walls_seen(tops=(1.9, 2.0, 1.8, 1.85), bottoms=(0.3, 0.4, 0.35, 0.45))]
-    labels, _, ctx = classify_shapes.classify_planes(planes, U)
-    assert ctx.height_kind == "prior" and close(ctx.room_height, 2.40 * U)
-    assert labels[0] != "ceiling"
+    # 1.2 and 1.7 m above the walls' bottoms (0.375 m): with the 2.40 m room
+    # the height rule would call the first a surface, built as a slab, and
+    # the second the ceiling. Both are the same thing, left unbuilt.
+    for z in (1.575, 2.075):
+        planes = [level(z, "ceiling"),
+                  *walls_seen(tops=(1.9, 2.0, 1.8, 1.85), bottoms=(0.3, 0.4, 0.35, 0.45))]
+        labels, reasons, ctx = classify_shapes.classify_planes(planes, U)
+        assert ctx.height_kind == "prior" and close(ctx.room_height, 2.40 * U)
+        assert labels[0] == "surface" and planes[0].get("build") is False, (z, labels[0], reasons[0])
+        assert "not the ceiling" in reasons[0]
+        assert all(p.get("build", True) for p in planes[1:])
+
+
+def test_with_a_ceiling_but_no_floor_the_floor_is_at_least_2_4_m_below_it():
+    # The walls were seen down to 0.375 m; furniture hides their feet, so the
+    # floor is lower still, and the room at least the 2.40 m minimum.
+    walls = walls_seen(tops=(2.2, 2.3, 2.1, 2.25), bottoms=(0.3, 0.4, 0.35, 0.45))
+    labels, _, ctx = classify_shapes.classify_planes([level(2.60, "ceiling"), *walls], U)
+    assert close(ctx.floor_z, 0.20 * U), ctx.floor_z / U
+    assert close(ctx.room_height, 2.40 * U) and ctx.height_kind == "prior"
+    assert labels[0] == "ceiling" and "2.40 m below the ceiling" in ctx.floor_source
+    # A ceiling far enough above the walls' bottoms is left as measured.
+    labels, _, ctx = classify_shapes.classify_planes([level(2.90, "ceiling"), *walls], U)
+    assert close(ctx.floor_z, 0.375 * U) and close(ctx.room_height, 2.525 * U)
+    assert ctx.height_kind == "ceiling" and labels[0] == "ceiling"
+    # So is one over a floor level, even below 2.40 m (as above).
+    _, _, ctx = classify_shapes.classify_planes([level(0.0, "floor"), level(2.30, "ceiling"), *walls], U)
+    assert close(ctx.floor_z, 0.0) and close(ctx.room_height, 2.30 * U)
+
+
+def test_a_level_turned_down_as_the_ceiling_is_written_as_not_built():
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        (space / "shapes.json").write_text(json.dumps({
+            "planes": [level(2.075, "ceiling"),
+                       *walls_seen(tops=(1.9, 2.0, 1.8, 1.85), bottoms=(0.3, 0.4, 0.35, 0.45))],
+            "boxes": []}))
+        (space / "densify.json").write_text(json.dumps({"colmap_units_per_metre": U}))
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert classify_shapes.main([str(space)]) == 0
+        data = json.loads((space / "shapes.json").read_text())
+    underside = data["planes"][0]
+    assert underside["label"] == "surface" and underside["build"] is False, underside
+    assert data["room_level"]["height_source"] == "prior"
 
 
 def test_the_room_level_says_where_its_height_came_from_and_a_desk_seen_from_above_is_built():

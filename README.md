@@ -250,9 +250,12 @@ the agent's judgement:
    and highest downward-facing height levels inside the walls, so a strip of
    floor is enough and a lower corridor floor seen through a door is ignored.
    A phone pitched down rarely films the ceiling; then the room is as tall as
-   its walls were seen to reach (the second-highest wall top), kept between
-   2.40 and 3.5 m when densify measured the scale. `room_level.height_source`
-   in `shapes.json` says which: `ceiling`, `wall tops` or `prior`.
+   its walls were seen to reach (the second-highest wall top, or the higher
+   of two), kept between 2.40 and 3.5 m when densify measured the scale. A
+   level clip may film the ceiling but not the floor; then the floor goes at
+   least 2.40 m below the ceiling, since the walls' feet are hidden.
+   `room_level.height_source` in `shapes.json` says which: `ceiling`,
+   `wall tops` or `prior`.
    Detected furniture is excluded from plane fitting and becomes one box per
    object; the storage names are grouped first, because a cupboard filmed side-on comes out as
    slivers of each. Whatever is left is grouped geometrically as before. The
