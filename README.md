@@ -249,10 +249,13 @@ the agent's judgement:
    frame on a Mac's GPU, hence the default.
 3. `pipeline/shapes.py` and `tools/classify_shapes.py` — planes and boxes.
    The room's up comes from the cameras' level sideways axes, which camera
-   pitch cannot tilt (the mean image up when the camera never turned), then
-   is levelled on the cloud's floor, ceiling and furniture tops
-   (`pipeline/room_up.py`; `shapes.json` records `up_source` and
-   `up_correction_deg`). Walls come from RANSAC; the floor and ceiling are the lowest upward-facing
+   pitch cannot tilt (the mean image up when the camera never turned across
+   its image up; hand roll is not a turn), then is levelled on the cloud's
+   floor, ceiling and furniture tops. The levelling must land on a surface
+   (not between a floor and a sloped ceiling) and may move up at most 10
+   degrees after a wide turn, 30 otherwise (`pipeline/room_up.py`;
+   `shapes.json` records `up_source`, `up_correction_deg` and, when the
+   levelling was refused, `up_rejected_correction_deg`). Walls come from RANSAC; the floor and ceiling are the lowest upward-facing
    and highest downward-facing height levels inside the walls, so a strip of
    floor is enough and a lower corridor floor seen through a door is ignored.
    A phone pitched down rarely films the ceiling; then the room is as tall as

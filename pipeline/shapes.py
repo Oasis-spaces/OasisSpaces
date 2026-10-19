@@ -29,7 +29,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from densify import read_images_bin
 from pointcloud import load_ply, space_model_dir
-from room_up import REFINE_MAX_DEGREES, WARN_DEGREES, angle_between, camera_up, refine_up
+from room_up import WARN_DEGREES, angle_between, camera_up, max_correction, refine_up
 from semantics import room_vocabulary
 
 
@@ -96,7 +96,9 @@ def ransac_plane(points, threshold, iterations=400, rng=None, normals=None,
         count = int(inliers(normal, d).sum())
         if count > best_inliers:
             best_inliers, best = count, (normal, d)
-    if best is None:
+    if best_inliers < 3:
+        # No plane: a couple of stray points that face one cannot be refitted
+        # (what is left after the walls of a room with a sloped ceiling).
         return None, None, np.zeros(len(points), bool)
     normal, d = best
     mask = inliers(normal, d)
@@ -288,12 +290,16 @@ def main():
         sample = np.random.default_rng(4).choice(len(pts), min(UP_FIT_SAMPLE, len(pts)), replace=False)
         level_normals, level_from = fitted_normals(tree, pts, sample), "surfaces fitted to the points"
     refined = refine_up(up, level_normals) if level_normals is not None else None
-    correction = 0.0
+    correction, rejected = 0.0, None
     if refined is None:
-        print("  too few level surfaces to check the cameras' up against")
-    elif angle_between(refined, up) > REFINE_MAX_DEGREES:
-        print(f"  the level surfaces lean {angle_between(refined, up):.0f} deg from the cameras' up, "
-              f"more than a camera solve is believed to be off: keeping the cameras'")
+        print("  no level surface clear enough to check the cameras' up against")
+    elif angle_between(refined, up) > max_correction(up_source):
+        # Kept in shapes.json too: the cloud's most level surfaces contradict
+        # the up, which the structure review and later readers should see.
+        rejected = angle_between(refined, up)
+        print(f"  the level surfaces lean {rejected:.0f} deg from the cameras' up, more than the "
+              f"{max_correction(up_source):.0f} deg a solve found this way is believed to be off: "
+              f"keeping the cameras'")
     else:
         correction = angle_between(refined, up)
         up, up_source = refined, f"{up_source}, levelled on {level_from}"
@@ -336,6 +342,7 @@ def main():
               f"({', '.join(left_out)})")
 
     shapes = {"up": up.tolist(), "up_source": up_source, "up_correction_deg": round(correction, 2),
+              "up_rejected_correction_deg": None if rejected is None else round(rejected, 2),
               "world": world.tolist(), "planes": [], "boxes": []}
     rng = np.random.default_rng(7)
     units_per_metre = None
