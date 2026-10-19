@@ -201,6 +201,7 @@ are gitignored: large, generated, or personal footage.)
 - `placement.py` — a piece placed by its masks: candidate boxes' silhouettes through the real cameras against the outlines.
 - `room_score.py` — the measured room score (agreement, collision, walk, doorway).
 - `object_models.py` — per-object jobs (a frame and a cut-out) for image-to-3D models.
+- `lens.py` — the solved camera's lens (COLMAP's OPENCV distortion), for every stage that turns pixels into rays (`unproject`) or points into pixels (`project`); a solve whose polynomial folds inside the frame ends at the fold.
 - `pointcloud.py` — PLY I/O, downsampling, outlier removal.
 - `splat_seed.py`, `splat_export.py`, `splat_spirula.py` — OpenSplat project seeded from the dense cloud; compact `.splat` and starting view; Spirula Studio as a plug-in trainer.
 
@@ -212,7 +213,7 @@ are gitignored: large, generated, or personal footage.)
 - `mixed_scene.py`, `mesh_render.py`, `object_mesh.py` — the textured shell and movable pieces; GLB drawing; TRELLIS meshes on a GPU.
 - `evaluate_space.py`, `show_prompts.py` — scoring spaces; printing every question the pipeline asks Claude.
 - `colab_pipeline.py`, `claude_relay.py`, `paced_proxy.py` — the Colab driver, the Claude relay, the paced upload proxy for this network.
-- `tools/tests/` — twenty test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room score, room views, shot list, stage-1 gaps, structure review, surface fill, tracking.
+- `tools/tests/` — twenty-three test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room height, room score, room views, shot list, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
 - Gitignored but needed locally: `tools/opensplat` + `tools/default.metallib` (OpenSplat built for Metal, AGPL, patched), `tools/colab-cache/` (the OpenSplat binary built on Colab), `tools/spirula-studio/`.
 
 ### `apps/OasisCapture/` — the iPhone capture app

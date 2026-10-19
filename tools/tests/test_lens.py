@@ -26,6 +26,12 @@ DEGENERATE = {"model": OPENCV, "width": 1080, "height": 1920,
               "params": (894.1, 480.0, 540.0, 960.0, 0.0056, -0.0001, 0.04500, -0.00140)}
 FOLDING = {"model": OPENCV, "width": 2160, "height": 3840,          # k2 < 0: the polynomial turns back
            "params": (4341.0, 4198.4, 1080.0, 1920.0, 0.6271, -1.6139, 0.01728, -0.00291)}
+# Two sub-models of real clips (not the ones densify picks) whose polynomial folds inside
+# the frame: past the fold it turns rays back toward the middle, further out it mirrors them.
+FOLDS_INSIDE = {"model": OPENCV, "width": 3840, "height": 2160,
+                "params": (1533.18, 2106.66, 1920.0, 1080.0, 0.2486, -0.5357, 0.0809, 0.0344)}
+FOLDS_ASKEW = {"model": OPENCV, "width": 1080, "height": 1920,     # p1 -0.46: the fold is nearer on one side
+               "params": (2118.25, 1295.45, 540.0, 960.0, 1.0566, -0.1764, -0.4612, -0.0358)}
 
 
 def colmap_project(x, y, params):
@@ -36,6 +42,20 @@ def colmap_project(x, y, params):
     xd = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
     yd = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
     return fx * xd + cx, fy * yd + cy
+
+
+def folds(params, reach, directions=720, steps=4000):
+    """Along each direction, the first radius at which COLMAP's projection folds (the
+    determinant of its Jacobian, by central differences, reaches 0): (angles, radii)."""
+    angle = np.linspace(-np.pi, np.pi, directions, endpoint=False)[:, None]
+    r = np.linspace(0, reach, steps + 1)[None, 1:]
+    x, y, h = np.cos(angle) * r, np.sin(angle) * r, 1e-6
+    u, v = colmap_project(np.stack([x + h, x - h]), np.stack([y, y]), params)
+    ux, vx = (u[0] - u[1]) / (2 * h), (v[0] - v[1]) / (2 * h)
+    u, v = colmap_project(np.stack([x, x]), np.stack([y + h, y - h]), params)
+    uy, vy = (u[0] - u[1]) / (2 * h), (v[0] - v[1]) / (2 * h)
+    folded = ux * vy - uy * vx <= 0
+    return angle[:, 0], np.where(folded.any(1), r[0, np.argmax(folded, 1)], np.inf)
 
 
 def pixel_centres(cam, step):
@@ -83,11 +103,51 @@ def test_back_projected_points_lie_on_the_rays_their_pixels_see_through_the_lens
 
     img = Image.new("RGB", (SQUARE["width"], SQUARE["height"]))
     info = {"R": np.eye(3), "t": np.zeros(3)}
-    pts, _, _, (us, vs) = densify.back_project(info, SQUARE, img, lambda u, v: np.full(len(u), 3.0), 16, 10.0)
-    assert len(pts) == len(us) > 1000
+    pts, _, _, (us, vs), no_ray = densify.back_project(info, SQUARE, img, lambda u, v: np.full(len(u), 3.0), 16, 10.0)
+    assert len(pts) == len(us) > 1000 and no_ray == 0
     pu, pv = colmap_project(pts[:, 0] / pts[:, 2], pts[:, 1] / pts[:, 2], SQUARE["params"])
     # float32 points 3 m away: a thousandth of a pixel
     assert np.abs(pu - (us + 0.5)).max() < 1e-3 and np.abs(pv - (vs + 0.5)).max() < 1e-3
+
+
+def test_a_solve_whose_polynomial_folds_inside_the_frame_ends_at_the_fold():
+    for cam in (FOLDS_INSIDE, FOLDS_ASKEW):
+        l = lens.from_colmap(cam)
+        angle, fold = folds(cam["params"], 4.0)
+        # The frame reaches past the fold, so the view ends there: the nearest fold.
+        assert abs(l["fov_radius"] - fold.min()) < 0.01 * fold.min(), (l["fov_radius"], fold.min())
+        u, v = pixel_centres(cam, 8)
+        x, y = lens.unproject(l, u, v)
+        has = np.isfinite(x)
+        assert 0 < has.mean() < 1
+        # No pixel's ray lies past the fold in its own direction (the polynomial has roots
+        # there too, on rays it turns back or mirrors), and every ray projects back onto its pixel.
+        own_fold = np.interp(np.arctan2(y[has], x[has]), angle, fold, period=2 * np.pi)
+        assert (np.hypot(x[has], y[has]) < own_fold).all()
+        pu, pv = colmap_project(x[has], y[has], cam["params"])
+        assert np.abs(pu - u[has]).max() < 1e-6 and np.abs(pv - v[has]).max() < 1e-6
+        # Nothing projects onto a pixel whose ray is another one: the lens is one-to-one.
+        reach = 3 * l["fov_radius"]
+        gx, gy = (g.ravel() for g in np.meshgrid(np.linspace(-reach, reach, 601), np.linspace(-reach, reach, 601)))
+        qu, qv = lens.project(l, gx, gy)
+        inside = (qu >= 0) & (qv >= 0) & (qu < cam["width"]) & (qv < cam["height"])
+        bx, by = lens.unproject(l, qu[inside], qv[inside])
+        back = np.isfinite(bx)
+        assert inside.sum() > 1000 and back.mean() > 0.5
+        assert np.abs(bx[back] - gx[inside][back]).max() < 1e-6 and np.abs(by[back] - gy[inside][back]).max() < 1e-6
+
+
+def test_back_project_reports_the_share_of_the_frame_the_lens_has_no_ray_for():
+    from PIL import Image
+
+    cam = FOLDS_INSIDE
+    img = Image.new("RGB", (cam["width"], cam["height"]))
+    info = {"R": np.eye(3), "t": np.zeros(3)}
+    pts, _, _, (us, vs), no_ray = densify.back_project(info, cam, img, lambda u, v: np.full(len(u), 3.0), 16, 10.0)
+    gu, gv = np.meshgrid(np.arange(0, cam["width"], 16), np.arange(0, cam["height"], 16))
+    x, _ = lens.unproject(lens.from_colmap(cam), gu.ravel() + 0.5, gv.ravel() + 0.5)
+    assert 0.3 < no_ray < 0.6 and abs(no_ray - np.isnan(x).mean()) < 1e-12
+    assert len(pts) == len(us) == np.isfinite(x).sum()
 
 
 def test_a_mirror_seen_through_a_distorting_lens_takes_the_depth_of_its_wall():
@@ -115,6 +175,28 @@ def test_a_mirror_seen_through_a_distorting_lens_takes_the_depth_of_its_wall():
         depth, k, [det], {"mirror"}, (fx, fy, cx, cy), None, (k1, k2, p1, p2))
     assert records[0]["filled"] == mask.sum() and np.array_equal(filled, mask)
     assert np.abs(filled_depth[mask] - wall[mask]).max() < 0.002          # within 2 mm of the true wall
+
+
+def test_only_strip_pixels_with_a_ray_count_as_a_mirrors_surroundings():
+    cam = FOLDS_INSIDE
+    fx, fy, cx, cy, *distortion = cam["params"]
+    k = 0.1
+    rows, cols = round(cam["height"] * k), round(cam["width"] * k)
+    depth = np.full((rows, cols), 3.0)                         # a wall facing the camera, 3 m away
+    # A mirror just past the fold, on the left: most of the strip around it has no ray.
+    mask = np.zeros((rows, cols), bool)
+    mask[100:116, 72:84] = True
+    depth[mask] = 7.0
+    det = {"label": "mirror", "box": [72 / k, 100 / k, 83 / k, 115 / k], "mask": mask, "score": 0.9}
+    vv, uu = np.mgrid[:rows, :cols]
+    ring = mirrors.dilate(mask, 6) & ~mirrors.dilate(mask, 2)
+    x, _ = lens.unproject(lens.from_colmap(cam), (uu[ring] + 0.5) / k, (vv[ring] + 0.5) / k)
+    with_ray = int(np.isfinite(x).sum())
+    assert ring.sum() >= mirrors.MIN_RING_PIXELS > with_ray > 3      # enough strip, too little of it seen
+    _, _, filled, records = mirrors.fill_unreliable(depth, k, [det], {"mirror"}, (fx, fy, cx, cy), None,
+                                                    tuple(distortion))
+    assert records[0]["ring"] == with_ray and not filled.any()
+    assert records[0]["why"] == f"only {with_ray} pixels of surroundings"
 
 
 def test_a_silhouette_lands_where_the_lens_shows_the_box():

@@ -246,17 +246,20 @@ def release_model_memory(torch) -> None:
 
 def back_project(info, cam, img, z_at, stride, max_depth, n_at=None):
     """World-space points, colours, (with n_at) normals, and the frame pixels
-    they came from, for a pixel grid of one frame."""
+    they came from, for a pixel grid of one frame; and the share of that grid
+    the lens has no ray for."""
     W, H = img.size
     us, vs = np.meshgrid(np.arange(0, W, stride), np.arange(0, H, stride))
     us, vs = us.ravel(), vs.ravel()
-    z = z_at(us, vs)
-    ok = np.isfinite(z) & (z > 0.05) & (z < max_depth)
-    us, vs, z = us[ok], vs[ok], z[ok]
     # The frames are the raw ones, still bent by the lens stage 1 solved, so
     # each pixel's ray (through its centre) has that distortion taken out.
     x, y = lens.unproject(lens.from_colmap(cam), us + 0.5, vs + 0.5)
-    ok = np.isfinite(x)                   # a pixel no ray of the lens reaches
+    # A solve whose polynomial folds inside the frame has no ray past the
+    # fold (lens.py): those pixels are dropped, and counted so it shows.
+    has_ray = np.isfinite(x)
+    no_ray = float(1 - has_ray.mean()) if len(us) else 0.0
+    z = z_at(us, vs)
+    ok = has_ray & np.isfinite(z) & (z > 0.05) & (z < max_depth)
     us, vs, z, x, y = us[ok], vs[ok], z[ok], x[ok], y[ok]
     rays = np.column_stack([x, y, np.ones(len(us))])
     cam_pts = rays * z[:, None]
@@ -266,7 +269,7 @@ def back_project(info, cam, img, z_at, stride, max_depth, n_at=None):
     if n_at is not None:
         cam_normals = n_at(us, vs).astype(np.float64)
         normals = (info["R"].T @ cam_normals.T).T.astype(np.float32)
-    return world_pts.astype(np.float32), rgb.astype(np.uint8), normals, (us, vs)
+    return world_pts.astype(np.float32), rgb.astype(np.uint8), normals, (us, vs), no_ray
 
 
 def main():
@@ -351,6 +354,7 @@ def main():
 
     all_pts, all_cols, all_norms, all_labels = [], [], [], []
     dropped_unreliable, filled_on_planes, fills = 0, 0, {}
+    without_ray = []                     # per keyframe, the share of its pixels the lens has no ray for
     meta = {"model_dir": str(model_dir.resolve()), "depth_model": args.depth_model,
             "keyframes": len(keys)}
 
@@ -369,11 +373,12 @@ def main():
             # Depth Anything outputs relative INVERSE depth (bigger = closer)
             pred_inv = np.maximum(pred, 1e-6)
             a, b = fit_scale_shift(pred_inv[py, px], depth_true)
-            pts, cols, _, _ = back_project(
+            pts, cols, _, _, no_ray = back_project(
                 info, cam, img,
                 lambda us, vs: 1.0 / np.maximum(a * pred_inv[vs, us] + b, 1e-6),
                 args.stride, np.percentile(depth_true, 98) * 3,
             )
+            without_ray.append(no_ray)
             all_pts.append(pts)
             all_cols.append(cols)
             print(f"  [{i+1}/{len(keys)}] {info['name']}: "
@@ -551,12 +556,13 @@ def main():
                 return (np.minimum((vs * k).astype(int), rows - 1),
                         np.minimum((us * k).astype(int), cols - 1))
 
-            pts, rgb, nrm, (us, vs) = back_project(
+            pts, rgb, nrm, (us, vs), no_ray = back_project(
                 info, cam, img,
                 lambda us, vs: s * depth[pixel(us, vs)],
                 args.stride, f["cap"] if f["cap"] is not None else default_cap,
                 n_at=(lambda us, vs: normal[pixel(us, vs)]) if normal is not None else None,
             )
+            without_ray.append(no_ray)
             labels = None
             if label_index is not None:
                 labels = pixel_labels(us, vs, f["detections"], label_index)
@@ -587,6 +593,13 @@ def main():
         meta.update({"colmap_units_per_metre": s_med, "scale_spread": spread,
                      "scale_inconsistent": spread > 0.3,
                      "frames_on_median_scale": on_median})
+
+    meta["pixels_without_ray"] = round(float(np.mean(without_ray)), 4) if without_ray else 0.0
+    if meta["pixels_without_ray"] > 0:
+        print(f"Warning: the solved lens folds inside the frame, so {np.mean(without_ray):.2%} of the "
+              f"keyframes' pixels have no ray and were left out (worst frame {max(without_ray):.1%}). "
+              "The camera solve is suspect: check the COLMAP model (reconstruct.py), or pass "
+              "another with --model-dir.")
 
     if not all_pts:
         sys.exit("No keyframe could be densified.")

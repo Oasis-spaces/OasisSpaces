@@ -72,6 +72,32 @@ def test_a_frame_that_sees_none_of_the_points_has_no_depth_anywhere():
             assert np.isinf(buf).all()
 
 
+def test_points_are_projected_through_the_same_lens_as_the_other_stages():
+    import lens
+
+    info, _ = camera(1080, 1920)
+    # A wide phone lens with barrel distortion sees farther out than its pinhole would:
+    # the rays its corner pixels show are well past 1.1 times the pinhole's half-width.
+    wide = {"model": 4, "width": 1080, "height": 1920, "params": (FOCAL, FOCAL, 540.0, 960.0, -0.2, 0.03, 0.0, 0.0)}
+    corners_u, corners_v = np.array([0.5, 1079.5, 0.5, 1079.5]), np.array([0.5, 0.5, 1919.5, 1919.5])
+    x, y = lens.unproject(lens.from_colmap(wide), corners_u, corners_v)
+    assert (np.abs(x) > 1.1 * 540 / FOCAL).all()
+    u, v, z = sf.project(np.column_stack([2 * x, 2 * y, np.full(4, 2.0)]), info, wide)   # 2 m out on those rays
+    assert np.allclose(u, corners_u, atol=1e-6) and np.allclose(v, corners_v, atol=1e-6) and np.allclose(z, 2.0)
+    # A lens whose polynomial turns back keeps a point far outside the view outside the frame.
+    folding = {"model": 4, "width": 2160, "height": 3840,
+               "params": (4341.0, 4198.4, 1080.0, 1920.0, 0.6271, -1.6139, 0.01728, -0.00291)}
+    u, v, _ = sf.project(np.array([[2.0, 0.0, 2.0], [0.0, 3.0, 2.0]]), info, folding)
+    assert ((u < 0) | (u >= 2160) | (v < 0) | (v >= 3840)).all()
+    # Any point lands where lens.project, the projection the other stages use, puts it.
+    rng = np.random.default_rng(0)
+    points = np.column_stack([rng.uniform(-3, 3, 1000), rng.uniform(-3, 3, 1000), rng.uniform(0.5, 4, 1000)])
+    for cam in (wide, folding):
+        u, v, _ = sf.project(points, info, cam)
+        lu, lv = lens.project(lens.from_colmap(cam), points[:, 0] / points[:, 2], points[:, 1] / points[:, 2])
+        assert np.allclose(u, lu) and np.allclose(v, lv)
+
+
 def write_model(space, info, cam):
     """A COLMAP model of one frame: cameras.bin, images.bin and an empty points3D.bin."""
     model = space / "workspace" / "sparse" / "0"

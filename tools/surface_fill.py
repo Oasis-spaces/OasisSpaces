@@ -40,6 +40,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pipeline"))
 sys.path.insert(0, str(ROOT / "tools"))
+import lens  # noqa: E402
 
 LAMA_PATH = Path.home() / ".cache" / "oasisspaces" / "big-lama.pt"
 LAMA_WORK_PX = 512          # LaMa fills at most this many pixels across (see inpaint)
@@ -92,26 +93,15 @@ def floor_surface(room, height: float) -> Surface:
 
 # ------------------------------------------------------------------ photo
 def project(points_c: np.ndarray, info: dict, cam: dict):
-    """Camera-solve points -> (u, v) full-resolution pixels and depth, with
-    COLMAP's OPENCV lens distortion."""
+    """Camera-solve points -> (u, v) full-resolution pixels and depth, through
+    the solved lens (lens.project, the one model the other stages use). A
+    point outside the frame's view stays outside the frame, so the callers'
+    in-frame test on (u, v) is the whole out-of-view rule."""
     local = points_c @ info["R"].T + info["t"]
     z = local[:, 2]
-    x = local[:, 0] / np.maximum(z, 1e-9)
-    y = local[:, 1] / np.maximum(z, 1e-9)
-    p = cam["params"]
-    fx, fy, cx, cy = p[:4]
-    # The distortion polynomial folds points far outside the view back into
-    # the image, so only points within (a margin of) the field of view count.
-    outside = (np.abs(x) > 1.1 * cam["width"] / (2 * fx)) | (np.abs(y) > 1.1 * cam["height"] / (2 * fy))
-    x, y = np.where(outside, 1e6, x), np.where(outside, 1e6, y)
-    if cam["model"] == 4 and len(p) >= 8:
-        k1, k2, p1, p2 = p[4:8]
-        r2 = x * x + y * y
-        radial = 1 + k1 * r2 + k2 * r2 * r2
-        x, y = (x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x),
-                y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y)
-    u, v = fx * x + cx, fy * y + cy
-    return np.where(outside, -1.0, u), np.where(outside, -1.0, v), z
+    u, v = lens.project(lens.from_colmap(cam), local[:, 0] / np.maximum(z, 1e-9),
+                        local[:, 1] / np.maximum(z, 1e-9))
+    return u, v, z
 
 
 DEPTH_SHRINK = 16

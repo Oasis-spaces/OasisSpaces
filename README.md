@@ -182,8 +182,10 @@ the agent's judgement:
    frame is scaled to COLMAP's units and back-projected into
    `cloud-dense.ply`. Frames that see too few sparse points still fuse, using
    the median scale. `densify.json` records the model used and how many
-   COLMAP units make one metre. `--depth-model da2` uses the older Depth
-   Anything V2 path.
+   COLMAP units make one metre, and `pixels_without_ray` the share of the
+   keyframes' pixels the solved lens has no ray for: above zero only when the
+   solve's distortion folds inside the frame (`pipeline/lens.py`), which the
+   log warns about. `--depth-model da2` uses the older Depth Anything V2 path.
 
    It also runs `pipeline/semantics.py`: an open-vocabulary detector
    (GroundingDINO-tiny, local, no API) finds objects in each keyframe. What it

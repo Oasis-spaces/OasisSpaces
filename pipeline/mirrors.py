@@ -137,13 +137,15 @@ def fill_unreliable(depth: np.ndarray, k: float, detections: list[dict], unrelia
             record["why"] = "empty outline"
             continue
         ring = dilate(mask, r_out) & ~dilate(mask, r_in) & ~all_unreliable & (original > 0)
-        n_ring = int(ring.sum())
+        x, y = rays(uu[ring], vv[ring])
+        # Only the strip pixels the lens has a ray for count: past the fold
+        # of a solve whose polynomial folds inside the frame there is none.
+        on_lens = np.isfinite(x)
+        n_ring = int(on_lens.sum())
         record["ring"] = n_ring
         if n_ring < MIN_RING_PIXELS:
             record["why"] = f"only {n_ring} pixels of surroundings"
             continue
-        x, y = rays(uu[ring], vv[ring])
-        on_lens = np.isfinite(x)
         z = original[ring][on_lens]
         points = np.column_stack([x[on_lens] * z, y[on_lens] * z, z])
         fit = fit_plane(points)
