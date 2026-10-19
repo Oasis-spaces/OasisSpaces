@@ -123,8 +123,12 @@ def depth_buffer(dense_c: np.ndarray, info: dict, cam: dict, shrink: int = DEPTH
     from scipy.ndimage import minimum_filter
 
     u, v, z = project(dense_c, info, cam)
-    W, H = cam["width"] // shrink, cam["height"] // shrink
+    # Rounded up: a side that is not a multiple of the block, such as 1080,
+    # ends in a partial block, and its points need a cell of their own.
+    W, H = -(-cam["width"] // shrink), -(-cam["height"] // shrink)
     ok = (z > 0) & (u >= 0) & (v >= 0) & (u < cam["width"]) & (v < cam["height"])
+    if not ok.any():
+        return np.full((H, W), np.inf)   # nothing in view: no depth anywhere
     cell = (v[ok] / shrink).astype(int) * W + (u[ok] / shrink).astype(int)
     order = np.lexsort((z[ok], cell))
     first = np.r_[True, np.diff(cell[order]) != 0]
