@@ -58,6 +58,19 @@ def test_a_cell_behind_the_camera_is_not_seen():
     assert seen.tolist() == [0]
 
 
+def test_a_cell_the_lens_bends_into_the_picture_is_seen():
+    eye = camera([0, 0, 1.5], [1, 0, -0.6])
+    # the floor along the ray (0.66, 0.1, 1): a pinhole puts it at u = 650, past the
+    # 640-pixel edge; the solved barrel lens (k1 = -0.2) shows it at u = 621
+    ray = eye[:3, :3] @ np.array([0.66, 0.1, 1.0])
+    cell = eye[:3, 3] + ray * (-eye[2, 3] / ray[2])
+    nothing = np.zeros((0, 3)) + 99
+    assert cm.floor_coverage(cell[None], eye[None], K[None], (640, 480), 5.0, nothing, 0.08).tolist() == [0]
+    seen = cm.floor_coverage(cell[None], eye[None], K[None], (640, 480), 5.0, nothing, 0.08,
+                             np.array([[-0.2, 0.0, 0.0, 0.0]]))
+    assert seen.tolist() == [1]
+
+
 def test_the_scale_is_guessed_from_how_high_the_phone_was_held():
     rng = np.random.default_rng(4)
     units = 2.8                                                      # solve units per metre

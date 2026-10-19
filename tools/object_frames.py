@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
 from densify import read_cameras_bin, read_images_bin  # noqa: E402
+import lens  # noqa: E402
 from pointcloud import space_model_dir  # noqa: E402
 from semantics import room_vocabulary  # noqa: E402
 
@@ -47,6 +48,7 @@ def best_frames(space: Path, boxes: dict[int, dict], per_box: int = 2) -> dict[i
     model = space_model_dir(space)
     world = np.array(shapes["world"])
     cameras = read_cameras_bin(model / "cameras.bin")
+    lenses = {i: lens.from_colmap(cam) for i, cam in cameras.items()}
     detections = meta.get("detections", {})
     vocabulary = room_vocabulary(space)
     chosen = {}
@@ -57,13 +59,12 @@ def best_frames(space: Path, boxes: dict[int, dict], per_box: int = 2) -> dict[i
         scored = []
         for info in infos:
             cam = cameras[info["camera_id"]]
-            fx, fy, cx, cy = cam["params"][:4]
             W, H = cam["width"], cam["height"]
             local = corners @ info["R"].T + info["t"]
             if np.any(local[:, 2] <= 0.05 * np.abs(local).max()):
                 continue  # part of the box is behind the camera
-            us = fx * local[:, 0] / local[:, 2] + cx
-            vs = fy * local[:, 1] / local[:, 2] + cy
+            # Through the solved lens, as the raw frames show it.
+            us, vs = lens.project(lenses[info["camera_id"]], local[:, 0] / local[:, 2], local[:, 1] / local[:, 2])
             x0, x1, y0, y1 = us.min(), us.max(), vs.min(), vs.max()
             cut_w = max(0.0, min(x1, W) - max(x0, 0)) / max(x1 - x0, 1e-6)
             cut_h = max(0.0, min(y1, H) - max(y0, 0)) / max(y1 - y0, 1e-6)

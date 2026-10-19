@@ -48,13 +48,15 @@ MIN_MASK_SHARE = 0.005    # a mask smaller than this share of the frame is too s
 
 
 def project(points_c: np.ndarray, info: dict, cam: dict):
-    """Camera-solve points -> (u, v) pixels, keeping only what is in front."""
+    """Camera-solve points -> (u, v) pixels through the solved lens (the
+    frames are the raw, distorted ones), keeping only what is in front."""
+    import lens
+
     local = points_c @ info["R"].T + info["t"]
     z = local[:, 2]
     ahead = z > 1e-6
-    fx, fy, cx, cy = cam["params"][:4]
-    u = fx * local[:, 0] / np.where(ahead, z, 1) + cx
-    v = fy * local[:, 1] / np.where(ahead, z, 1) + cy
+    u, v = lens.project(lens.from_colmap(cam), local[:, 0] / np.where(ahead, z, 1),
+                        local[:, 1] / np.where(ahead, z, 1))
     return u, v, ahead
 
 

@@ -42,6 +42,7 @@ from semantics import (SEGMENTER_ID, Detector, Segmenter, planned_vocabulary,
 from tracking import (PROMPT_FRAMES, Tracker, merge_detections, prompt_frames, split_prompts,
                       tracked_names)
 from mirrors import fill_unreliable
+import lens
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
 MIN_ANCHORS = 12
@@ -246,14 +247,18 @@ def release_model_memory(torch) -> None:
 def back_project(info, cam, img, z_at, stride, max_depth, n_at=None):
     """World-space points, colours, (with n_at) normals, and the frame pixels
     they came from, for a pixel grid of one frame."""
-    fx, fy, cx, cy = cam["params"][:4]
     W, H = img.size
     us, vs = np.meshgrid(np.arange(0, W, stride), np.arange(0, H, stride))
     us, vs = us.ravel(), vs.ravel()
     z = z_at(us, vs)
     ok = np.isfinite(z) & (z > 0.05) & (z < max_depth)
     us, vs, z = us[ok], vs[ok], z[ok]
-    rays = np.column_stack([(us - cx) / fx, (vs - cy) / fy, np.ones(len(us))])
+    # The frames are the raw ones, still bent by the lens stage 1 solved, so
+    # each pixel's ray (through its centre) has that distortion taken out.
+    x, y = lens.unproject(lens.from_colmap(cam), us + 0.5, vs + 0.5)
+    ok = np.isfinite(x)                   # a pixel no ray of the lens reaches
+    us, vs, z, x, y = us[ok], vs[ok], z[ok], x[ok], y[ok]
+    rays = np.column_stack([x, y, np.ones(len(us))])
     cam_pts = rays * z[:, None]
     world_pts = (info["R"].T @ (cam_pts - info["t"]).T).T
     rgb = np.asarray(img.convert("RGB"))[vs, us]
@@ -527,8 +532,10 @@ def main():
             # the wardrobe it is a door of) instead of dropping it.
             filled_map = None
             if label_index is not None and not args.no_mirror_planes and f["detections"]:
+                camera = lens.from_colmap(cam)
                 depth, normal, filled_map, records = fill_unreliable(
-                    depth, k, f["detections"], set(vocabulary.unreliable), cam["params"][:4], normal)
+                    depth, k, f["detections"], set(vocabulary.unreliable),
+                    (camera["fx"], camera["fy"], camera["cx"], camera["cy"]), normal, camera["distortion"])
                 for r in records:
                     fills.setdefault(r["label"], []).append(r)
                 done = ", ".join(f"{r['label']} {r['filled']:,} px at {r['plane_depth_m']} m"

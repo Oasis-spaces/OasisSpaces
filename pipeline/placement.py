@@ -37,9 +37,13 @@ view then counts for what it shows.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lens  # noqa: E402
 
 GRID = 8                    # the scoring raster is the frame at 1/GRID
 NEAR = 0.05                 # solve units: surface points nearer than this are behind the lens
@@ -144,8 +148,8 @@ def silhouette(lo, hi, view: dict, shape: tuple[int, int]) -> np.ndarray:
     if ahead.sum() < 3:
         return np.zeros(shape, bool)
     Xc = Xc[ahead]
-    uv = np.stack([view["fx"] * Xc[:, 0] / Xc[:, 2] + view["cx"],
-                   view["fy"] * Xc[:, 1] / Xc[:, 2] + view["cy"]], 1) / GRID
+    # Through the solved lens: the masks are drawn on the raw, distorted frames.
+    uv = np.stack(lens.project(view, Xc[:, 0] / Xc[:, 2], Xc[:, 1] / Xc[:, 2]), 1) / GRID
     hull = convex_hull(uv)
     if len(hull) < 3:
         return np.zeros(shape, bool)
@@ -161,10 +165,8 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
 
 # ----------------------------------------------------------------- evidence
 def views_of(space: Path, names: list[str]) -> dict[str, dict]:
-    """Pose and lens of these frames: {name: {R, t, world, fx, fy, cx, cy, width, height}}."""
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    """Pose and lens of these frames: {name: {R, t, world, fx, fy, cx, cy,
+    distortion, width, height, fov_radius}} (lens.py)."""
     from densify import read_cameras_bin, read_images_bin
     from pointcloud import space_model_dir
 
@@ -179,10 +181,8 @@ def views_of(space: Path, names: list[str]) -> dict[str, dict]:
         if info is None:
             continue
         cam = cameras[info["camera_id"]]
-        fx, fy, cx, cy = cam["params"][:4]
         views[name] = {"R": np.array(info["R"], float), "t": np.array(info["t"], float).reshape(3),
-                       "world": world, "fx": fx, "fy": fy, "cx": cx, "cy": cy,
-                       "width": cam["width"], "height": cam["height"]}
+                       "world": world, **lens.from_colmap(cam)}
     return views
 
 

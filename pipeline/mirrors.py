@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from lens import NO_DISTORTION, undistort
+
 RING_IN = 0.004          # the strip starts this share of the longest side outside the outline ...
 RING_OUT = 0.016         # ... and ends here (the model smears depth across the outline's edge)
 MIN_RING_PIXELS = 60     # fewer than this and the plane is a guess
@@ -93,15 +95,25 @@ def mask_at(det: dict, shape: tuple[int, int], k: float) -> np.ndarray:
 
 
 def fill_unreliable(depth: np.ndarray, k: float, detections: list[dict], unreliable: set[str],
-                    intrinsics: tuple[float, float, float, float], normal: np.ndarray | None = None):
+                    intrinsics: tuple[float, float, float, float], normal: np.ndarray | None = None,
+                    distortion: tuple[float, float, float, float] = NO_DISTORTION):
     """Give each unreliable detection's outline the depth of the plane its
     surroundings lie in. `depth` is the working-size map (0 = invalid), `k`
     the scale from frame pixels to it, `intrinsics` the frame's fx, fy, cx,
-    cy. Returns (depth, normal, filled, records): copies with the outlines
-    filled, the mask of pixels filled, and one record per detection."""
+    cy and `distortion` its lens's k1, k2, p1, p2 (lens.py). Returns (depth,
+    normal, filled, records): copies with the outlines filled, the mask of
+    pixels filled, and one record per detection."""
     rows, cols = depth.shape
-    fx, fy, cx, cy = (v * k for v in intrinsics)
+    fx, fy, cx, cy = intrinsics
     long_side = max(rows, cols)
+
+    def rays(u, v):
+        """The rays (x, y, 1) of working-size pixels, through their centres
+        in the full frame and with the lens distortion taken out (in the
+        full frame's normalised coordinates, which the distortion is a
+        polynomial of, so it does not scale with k)."""
+        return undistort(((u + 0.5) / k - cx) / fx, ((v + 0.5) / k - cy) / fy, distortion)
+
     r_in, r_out = max(2, int(round(RING_IN * long_side))), max(6, int(round(RING_OUT * long_side)))
     targets = [d for d in detections if d["label"] in unreliable]
     if not targets:
@@ -130,9 +142,10 @@ def fill_unreliable(depth: np.ndarray, k: float, detections: list[dict], unrelia
         if n_ring < MIN_RING_PIXELS:
             record["why"] = f"only {n_ring} pixels of surroundings"
             continue
-        z = original[ring]
-        u, v = uu[ring].astype(np.float64), vv[ring].astype(np.float64)
-        points = np.column_stack([(u - cx) / fx * z, (v - cy) / fy * z, z])
+        x, y = rays(uu[ring], vv[ring])
+        on_lens = np.isfinite(x)
+        z = original[ring][on_lens]
+        points = np.column_stack([x[on_lens] * z, y[on_lens] * z, z])
         fit = fit_plane(points)
         if fit is None:
             record["why"] = "no plane"
@@ -148,9 +161,8 @@ def fill_unreliable(depth: np.ndarray, k: float, detections: list[dict], unrelia
             continue
         if plane_normal[2] > 0:            # face the camera
             plane_normal = -plane_normal
-        u, v = uu[mask].astype(np.float64), vv[mask].astype(np.float64)
-        rays = np.column_stack([(u - cx) / fx, (v - cy) / fy, np.ones(len(u))])
-        along = rays @ plane_normal
+        x, y = rays(uu[mask], vv[mask])
+        along = np.column_stack([x, y, np.ones(len(x))]) @ plane_normal
         with np.errstate(divide="ignore", invalid="ignore"):
             z_new = (centre @ plane_normal) / along
         ok = np.isfinite(z_new) & (z_new > 0.05) \

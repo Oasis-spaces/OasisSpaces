@@ -32,6 +32,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pipeline"))
+import lens  # noqa: E402
 
 CELL_M = 0.05              # the plan's resolution
 SEEN_RANGE_M = 5.0         # a floor cell counts as seen by a camera within this distance
@@ -67,7 +68,8 @@ def load_mapanything(space: Path):
     K = views["intrinsics"]
     width, height = (int(v) for v in views["frame_size"])
     points, colours = read_ply_points(folder / "points.ply")
-    return names, cam2world, K, (width, height), points, colours, 1.0, "its own metric depth", "MapAnything"
+    # MapAnything's intrinsics are pinhole ones, with no lens distortion.
+    return names, cam2world, K, None, (width, height), points, colours, 1.0, "its own metric depth", "MapAnything"
 
 
 def load_colmap(space: Path, dense: bool = True, units_override: float | None = None):
@@ -79,14 +81,15 @@ def load_colmap(space: Path, dense: bool = True, units_override: float | None = 
         raise SystemExit(f"no camera solve in {space / 'workspace'}")
     cameras = read_cameras_bin(model / "cameras.bin")
     infos = sorted(read_images_bin(model / "images.bin").values(), key=lambda v: v["name"])
-    cam2world, K = [], []
+    cam2world, K, distortion = [], [], []
     for info in infos:
         pose = np.eye(4)
         pose[:3, :3] = info["R"].T
         pose[:3, 3] = -info["R"].T @ info["t"]
         cam2world.append(pose)
-        fx, fy, cx, cy = cameras[info["camera_id"]]["params"][:4]
-        K.append(np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]]))
+        frame_lens = lens.from_colmap(cameras[info["camera_id"]])
+        K.append(np.array([[frame_lens["fx"], 0, frame_lens["cx"]], [0, frame_lens["fy"], frame_lens["cy"]], [0, 0, 1]]))
+        distortion.append(frame_lens["distortion"])
     camera = cameras[infos[0]["camera_id"]]
     cloud = space / "cloud-dense.ply"
     if dense and cloud.exists():
@@ -112,7 +115,7 @@ def load_colmap(space: Path, dense: bool = True, units_override: float | None = 
         note = "MapAnything's metric poses, fitted onto this solve" if units else None
     if units_override:
         units, note = units_override, "the scale given here"
-    return ([i["name"] for i in infos], np.stack(cam2world), np.stack(K),
+    return ([i["name"] for i in infos], np.stack(cam2world), np.stack(K), np.array(distortion),
             (camera["width"], camera["height"]), points, colours, units, note, "COLMAP")
 
 
@@ -167,24 +170,28 @@ OCCLUSION_GRID = 16        # the depth buffer that decides what blocks a view: f
 
 
 def floor_coverage(cells_xyz: np.ndarray, cam2world: np.ndarray, K: np.ndarray, size, reach: float,
-                   occluders: np.ndarray, margin: float) -> np.ndarray:
+                   occluders: np.ndarray, margin: float, distortion: np.ndarray | None = None) -> np.ndarray:
     """How many frames saw each floor cell: in front of the camera, inside its
     picture, within `reach`, and not behind anything measured. Each frame's
     view is blocked where the measured points stand nearer than the floor: a
     coarse depth buffer of them, spread one cell so gaps between points do not
-    let the floor under a bed show through."""
+    let the floor under a bed show through. `distortion` holds each frame's
+    lens distortion (k1, k2, p1, p2; lens.py), None for pinhole frames."""
     from scipy.ndimage import minimum_filter
 
     width, height = size
     gw, gh = -(-width // OCCLUSION_GRID), -(-height // OCCLUSION_GRID)
     seen = np.zeros(len(cells_xyz), np.int32)
-    for pose, k in zip(cam2world, K):
+    for i, (pose, k) in enumerate(zip(cam2world, K)):
+        frame_lens = {"fx": k[0, 0], "fy": k[1, 1], "cx": k[0, 2], "cy": k[1, 2], "width": width, "height": height,
+                      "distortion": tuple(distortion[i]) if distortion is not None else lens.NO_DISTORTION}
+        frame_lens["fov_radius"] = lens.fov_radius(frame_lens)
         R, centre = pose[:3, :3], pose[:3, 3]
         local = (occluders - centre) @ R                  # world -> camera: R^T (x - c), as rows
         z = local[:, 2]
         front = z > 0.1
-        u = (k[0, 0] * local[front, 0] / z[front] + k[0, 2]) // OCCLUSION_GRID
-        v = (k[1, 1] * local[front, 1] / z[front] + k[1, 2]) // OCCLUSION_GRID
+        u, v = lens.project(frame_lens, local[front, 0] / z[front], local[front, 1] / z[front])
+        u, v = u // OCCLUSION_GRID, v // OCCLUSION_GRID
         on = (u >= 0) & (u < gw) & (v >= 0) & (v < gh)
         depth = np.full((gh, gw), np.inf)
         np.minimum.at(depth, (v[on].astype(int), u[on].astype(int)), z[front][on])
@@ -192,8 +199,7 @@ def floor_coverage(cells_xyz: np.ndarray, cam2world: np.ndarray, K: np.ndarray, 
         local = (cells_xyz - centre) @ R
         z = local[:, 2]
         ahead = (z > 0.1) & (np.linalg.norm(cells_xyz - centre, axis=1) < reach)
-        u = k[0, 0] * local[:, 0] / np.where(ahead, z, 1) + k[0, 2]
-        v = k[1, 1] * local[:, 1] / np.where(ahead, z, 1) + k[1, 2]
+        u, v = lens.project(frame_lens, local[:, 0] / np.where(ahead, z, 1), local[:, 1] / np.where(ahead, z, 1))
         inside = ahead & (u >= 0) & (u < width) & (v >= 0) & (v < height)
         index = np.flatnonzero(inside)
         blocker = depth[(v[index] // OCCLUSION_GRID).astype(int), (u[index] // OCCLUSION_GRID).astype(int)]
@@ -206,7 +212,7 @@ def floor_coverage(cells_xyz: np.ndarray, cam2world: np.ndarray, K: np.ndarray, 
 def build(space: Path, source: str = "auto", log=print, points_from: str = "dense", out: Path | None = None,
           units: float | None = None) -> dict:
     use_ma = source == "mapanything" or (source == "auto" and (space / "workspace" / "mapanything" / "views.npz").exists())
-    names, cam2world, K, size, points, colours, units, note, where = (
+    names, cam2world, K, distortion, size, points, colours, units, note, where = (
         load_mapanything(space) if use_ma else load_colmap(space, dense=points_from == "dense", units_override=units))
     up, right, forward = room_frame(cam2world, points)
     guessed = units_from_height(cam2world, points, up)
@@ -259,7 +265,8 @@ def build(space: Path, source: str = "auto", log=print, points_from: str = "dens
     # What blocks a view: everything measured above the floor (the floor itself cannot hide the floor).
     raised = points[(heights > floor + 0.05 * m)]
     raised = raised[np.random.default_rng(2).choice(len(raised), min(len(raised), 200_000), replace=False)]
-    seen = floor_coverage(cells_xyz, cam2world, K, size, SEEN_RANGE_M * m, raised, 0.08 * m).reshape(rows, cols)
+    seen = floor_coverage(cells_xyz, cam2world, K, size, SEEN_RANGE_M * m, raised, 0.08 * m,
+                          distortion).reshape(rows, cols)
     inside = footprint
     well = inside & (seen >= WELL_SEEN)
     unseen = inside & (seen == 0)
