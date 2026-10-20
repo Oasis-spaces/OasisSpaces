@@ -214,7 +214,7 @@ are gitignored: large, generated, or personal footage.)
 - `mixed_scene.py`, `mesh_render.py`, `object_mesh.py` — the textured shell and movable pieces; GLB drawing; TRELLIS meshes on a GPU.
 - `evaluate_space.py`, `show_prompts.py` — scoring spaces; printing every question the pipeline asks Claude.
 - `colab_pipeline.py`, `claude_relay.py`, `paced_proxy.py` — the Colab driver, the Claude relay, the paced upload proxy for this network.
-- `tools/tests/` — twenty-four test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room height, room score, room up, room views, shot list, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
+- `tools/tests/` — twenty-five test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room height, room score, room up, room views, shot list, splat read, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
 - Gitignored but needed locally: `tools/opensplat` + `tools/default.metallib` (OpenSplat built for Metal, AGPL, patched), `tools/colab-cache/` (the OpenSplat binary built on Colab), `tools/spirula-studio/`.
 
 ### `apps/OasisCapture/` — the iPhone capture app

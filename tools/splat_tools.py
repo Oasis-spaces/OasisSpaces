@@ -115,6 +115,14 @@ def read_splat(path):
             )
         trailing = f.read()
     arr = np.frombuffer(payload, dtype=SPLAT_DTYPE).copy()
+    # A trainer can leave a few gaussians with NaN or infinite values (OpenSplat on
+    # the CPU left 23 of 136,257); nothing can place them, and one is enough to break
+    # a KD-tree, a histogram or a render downstream, so they are dropped here.
+    finite = np.isfinite(arr.view(np.float32).reshape(len(arr), -1)).all(axis=1)
+    if not finite.all():
+        print(f"{path.name}: dropped {int((~finite).sum())} gaussians with non-finite values",
+              file=sys.stderr)
+        arr = arr[finite]
     return arr, trailing
 
 

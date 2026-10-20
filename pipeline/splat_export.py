@@ -46,7 +46,15 @@ def read_splat_ply(path: Path) -> np.ndarray:
     missing = [name for name in NEEDED if name not in props]
     if missing:
         sys.exit(f"{path}: not a Gaussian splat (missing {', '.join(missing)})")
-    return np.frombuffer(raw[end:], dtype=np.dtype([(p, "<f4") for p in props]))
+    v = np.frombuffer(raw[end:], dtype=np.dtype([(p, "<f4") for p in props]))
+    # Gaussians a trainer left with NaN or infinite values are dropped, as
+    # tools/splat_tools.read_splat does: one breaks the start view's search.
+    finite = np.isfinite(v.view(np.float32).reshape(len(v), -1)).all(axis=1)
+    if not finite.all():
+        print(f"{path.name}: dropped {int((~finite).sum())} gaussians with non-finite values",
+              file=sys.stderr)
+        v = v[finite]
+    return v
 
 
 def ply_to_splat(src: Path, dst: Path) -> int:
