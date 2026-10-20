@@ -126,8 +126,9 @@ SPLAT_LABELS = {"quick": "quick ({steps} steps, 1/{downscale} resolution)",
 # once on thousands of scenes predicts the splat in one pass from 24 frames,
 # which is aligned to the solve and polished by a short OpenSplat run. It
 # needs an NVIDIA GPU and its own environment (the Colab install-anysplat
-# cell), and is off unless --anysplat on: it has not yet been judged against
-# the quick splat.
+# cell), and is off unless --anysplat on: on IMG_4182 its cameras missed the
+# solve by 0.33 m (median, 24 views) and its gaussians sat 8 cm from the dense
+# cloud, so it was refused before the polish (see README).
 # Stage 4 in steps that can each run on their own (a Colab session can die at
 # any time): every step keeps its results in the space, and the next one
 # picks them up. The long training also saves every LONG_CHECKPOINT_STEPS and
@@ -3015,8 +3016,8 @@ def main() -> int:
                              "about 45 minutes on an 8 GB Mac")
     parser.add_argument("--anysplat", choices=["on", "off"], default="off",
                         help="also predict a splat with AnySplat (one pass on an NVIDIA GPU, then a "
-                             "short polish) and let Claude judge it; off by default until it has been "
-                             "judged against the quick splat")
+                             "short polish) and let Claude judge it; off by default: on IMG_4182 its "
+                             "cameras missed the solve by 0.33 m and its splat was refused")
     parser.add_argument("--long-splat", choices=["on", "off"], default="off",
                         help="also train a long splat (30,000 steps at half resolution) for Claude "
                              "to choose from; off by default, as it scored worse on both test videos")

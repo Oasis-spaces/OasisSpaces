@@ -404,6 +404,14 @@ the agent's judgement:
    `tools/anysplat_infer.py` builds the network without downloading VGGT-1B's
    weights, which AnySplat's checkpoint replaces anyway. On GPUs older than
    Ampere (a T4) it runs attention in float16.
+   **Measured (Oct 2026, IMG_4182, the same network run on a CPU):** with
+   24 views, its cameras missed the solve by 0.31–0.33 m and 3° (median),
+   and its gaussians sat a median 8 cm from the dense cloud (75th percentile
+   18 cm; the trained quick splat: 1 cm), so the gate refused it. It guessed
+   the lens about 25% wider than the phone's, which bends its depth. Whole
+   portrait frames instead of the centre square (`--shape full`) did no
+   better (0.25 m, 10 cm), nor did 8 views (0.36 m). The CPU run takes 3–6
+   minutes for 24 views, against seconds on a GPU.
    **Licence:** the repository and weights are MIT, but the network is
    fine-tuned from VGGT (CC BY-NC 4.0) and some helper code is CroCo/DUSt3R's
    (CC BY-NC-SA 4.0). Treat it as a trial, not something to ship.

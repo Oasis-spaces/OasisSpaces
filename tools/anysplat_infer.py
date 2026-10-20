@@ -111,6 +111,21 @@ def half_attention_without_bf16(torch) -> bool:
     return True
 
 
+def float_heads_on_cpu(torch, model) -> None:
+    """AnySplat's autocast is CUDA's, so on a CPU (for checks; minutes, not
+    seconds) its bfloat16 VGGT trunk runs under the CPU's autocast instead,
+    and hands its tokens on as float, as the GPU run does."""
+    aggregator = model.encoder.aggregator
+    forward = aggregator.forward
+
+    def cpu_forward(*args, **kwargs):
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            tokens, start = forward(*args, **kwargs)
+        return [t.float() for t in tokens], start
+
+    aggregator.forward = cpu_forward
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("frames", nargs="+", type=Path)
@@ -132,10 +147,9 @@ def main() -> None:
     loaded = time.time()
     views = [load(f, args.shape) for f in args.frames]
     images = torch.stack([v[0] for v in views]).unsqueeze(0).to(device)
-    # AnySplat's autocast is CUDA's: without it on a CPU, the bfloat16 trunk
-    # hands bfloat16 to float heads, which then fail. CPU is for checks only.
-    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=device.type == "cpu"):
-        gaussians, pose = model.inference(images)
+    if device.type == "cpu":
+        float_heads_on_cpu(torch, model)
+    gaussians, pose = model.inference(images)
     if device.type == "cuda":
         torch.cuda.synchronize()
     predicted = time.time()
