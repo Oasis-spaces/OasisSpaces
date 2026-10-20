@@ -59,8 +59,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # Choosing the best splat of the video runs here after the fetch, where every
 # earlier splat of the video is; the scene does not wait for it, because it is
 # built from the space's own splat.ply, not from the published best.
-STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "train-spirula", "choose-training",
-         "fill", "scene"]
+STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "train-spirula", "train-anysplat",
+         "choose-training", "fill", "scene"]
+# Run only when asked for by name: long training takes an hour, and AnySplat
+# (a trial) installs its own PyTorch.
+ON_REQUEST = ("train-long", "train-anysplat")
 SPLAT_STEPS = STEPS[3:]
 # The notebook install cells each step needs. OpenSplat links OpenCV, which the
 # COLMAP cell installs, so training needs that cell too.
@@ -71,6 +74,7 @@ NEEDS = {
     "train-quick": ["install-colmap", "install-python", "install-opensplat"],
     "train-long": ["install-colmap", "install-python", "install-opensplat"],
     "train-spirula": ["install-python"],   # skipped on the VM: no Spirula there
+    "train-anysplat": ["install-colmap", "install-python", "install-opensplat", "install-anysplat"],
     "choose-training": ["install-python"],
     "fill": ["install-python"],
     "scene": ["install-python"],           # LaMa, as for fill
@@ -82,13 +86,16 @@ REMOTE_VIDEOS = "/content/videos"
 REMOTE_WORK = "/content/oasis-run"
 RELAY = "/content/claude-relay"
 PART_BYTES = 20 * 1024 * 1024
-INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat", "install-mapanything"]
+INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat", "install-mapanything",
+                 "install-anysplat"]
 # What the notebook's helper cell sets before running the agent.
 REMOTE_ENV = {
     "BLENDER": "/opt/blender/blender",
     "OPENSPLAT": "/content/OpenSplat/build/opensplat",
     "OASIS_RENDER_ENGINE": "CYCLES",
     "OASIS_CLAUDE_RELAY": RELAY,
+    "ANYSPLAT_DIR": "/content/AnySplat",
+    "ANYSPLAT_PYTHON": "/content/anysplat-env/bin/python",
 }
 # Kept on the VM only: COLMAP's database is rebuilt by reconstruct.py, and the
 # splat project is links plus a seed file rebuilt by splat_seed.py.
@@ -605,7 +612,7 @@ def main() -> None:
     parser.add_argument("--session", default="oasis", help="Colab CLI session name")
     parser.add_argument("--gpu", default="T4")
     parser.add_argument("--stages", nargs="+", choices=STEPS,
-                        default=[step for step in STEPS if step != "train-long"],
+                        default=[step for step in STEPS if step not in ON_REQUEST],
                         help="stages 1-3 and stage 4's steps to run, in order")
     parser.add_argument("--agent-args", default="", help="extra pipeline/agent.py arguments")
     parser.add_argument("--keep-session", action="store_true", help="do not stop the session at the end")
@@ -664,6 +671,8 @@ def main() -> None:
     extra = shlex.split(args.agent_args)
     if "train-long" in args.stages and "--long-splat" not in extra:
         extra += ["--long-splat", "on"]   # asked for by name, so train it
+    if "train-anysplat" in args.stages and "--anysplat" not in extra:
+        extra += ["--anysplat", "on"]
     done_steps: list[str] = []
     try:
         for step in args.stages:

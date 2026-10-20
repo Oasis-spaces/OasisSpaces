@@ -204,7 +204,7 @@ are gitignored: large, generated, or personal footage.)
 - `object_models.py` — per-object jobs (a frame and a cut-out) for image-to-3D models.
 - `lens.py` — the solved camera's lens (COLMAP's OPENCV distortion), for every stage that turns pixels into rays (`unproject`) or points into pixels (`project`); a solve whose polynomial folds inside the frame ends at the fold.
 - `pointcloud.py` — PLY I/O, downsampling, outlier removal.
-- `splat_seed.py`, `splat_export.py`, `splat_spirula.py` — OpenSplat project seeded from the dense cloud; compact `.splat` and starting view; Spirula Studio as a plug-in trainer.
+- `splat_seed.py`, `splat_export.py`, `splat_spirula.py`, `splat_anysplat.py` — OpenSplat project seeded from the dense cloud; compact `.splat` and starting view; Spirula Studio as a plug-in trainer; AnySplat's one-pass prediction, aligned to the solve and polished (a trial, `--anysplat on`).
 
 ### `tools/` — stage helpers and the editing tools
 - `classify_shapes.py`, `blender_room.py`, `blender_views.py`, `furniture_library.py`, `shapes_to_obj.py` — label and sanity-check boxes, finish the room, build it in Blender with parametric furniture, render it from the video's own cameras, export OBJ.
@@ -214,7 +214,8 @@ are gitignored: large, generated, or personal footage.)
 - `mixed_scene.py`, `mesh_render.py`, `object_mesh.py` — the textured shell and movable pieces; GLB drawing; TRELLIS meshes on a GPU.
 - `evaluate_space.py`, `show_prompts.py` — scoring spaces; printing every question the pipeline asks Claude.
 - `colab_pipeline.py`, `claude_relay.py`, `paced_proxy.py` — the Colab driver, the Claude relay, the paced upload proxy for this network.
-- `tools/tests/` — twenty-five test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room height, room score, room up, room views, shot list, splat read, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
+- `anysplat_infer.py` — AnySplat's prediction for a set of frames, run in AnySplat's own environment (PyTorch 2.2).
+- `tools/tests/` — twenty-six test suites (`python3 tools/tests/test_<name>.py`): AnySplat convert, advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room height, room score, room up, room views, shot list, splat read, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
 - Gitignored but needed locally: `tools/opensplat` + `tools/default.metallib` (OpenSplat built for Metal, AGPL, patched), `tools/colab-cache/` (the OpenSplat binary built on Colab), `tools/spirula-studio/`.
 
 ### `apps/OasisCapture/` — the iPhone capture app
@@ -240,7 +241,7 @@ are gitignored: large, generated, or personal footage.)
 - `editor/index.html` — a browser point-cloud editor.
 
 ### Colab, scripts, docs
-- `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything), clone, Claude relay, upload, the four stages, download.
+- `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything, AnySplat), clone, Claude relay, upload, the four stages, download.
 - `scripts/process_video.sh` — the whole chain without the agent; `scripts/make_sample.py` — a synthetic demo room.
 - `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed; `docs/audit-prompts-and-stack-2026-10.md` — every Claude question and every stage-1 option measured on 16 clips, with the field's state of the art per layer and the decisions it leaves open; `docs/on-device-plan-2026-10.md` — the open-source stack that moves reconstruction onto the phone, what was measured for it, and the licence asks. `docs/device-run-1.md` — the first run on the iPhone 13 and the Mac, command by command. `docs/test-videos.md` — where the test videos are.
 - `third_party/arkit-3dgs-scanner/` — the Apache-2.0 snapshot (commit d5d8e31) of Kuo Feng-Yuan's Swift + Metal splat trainer and camera-only pose refinement, kept verbatim; `OASIS-PROVENANCE.md` says why and what we owe.

@@ -385,12 +385,35 @@ the agent's judgement:
    (weight 0.1, a guess ten times its normal weight) also had floater
    suppression `mild`, a preset that adds depth- and colour-distortion
    regularisers, so its 0.707 and no votes say nothing about depth alone.
+   With `--anysplat on`, another candidate is **predicted** rather than
+   trained (`pipeline/splat_anysplat.py`, a trial). AnySplat, a network
+   trained once on thousands of scenes, takes 24 frames spread along the walk
+   and outputs a splat and every frame's camera in one pass, in seconds on a GPU.
+   Its cameras are matched to the solve's to carry the splat into the room's
+   frame. The rotation comes from the camera directions; scale and offset come
+   from the camera centres, refitted without the worst fifth. If its cameras
+   miss the solve's by more than 0.25 m or 10° (median), the prediction is
+   not used. Otherwise 2,000 OpenSplat steps polish it on the full frames, and
+   it joins the comparison as `splat-anysplat.ply`. The unpolished prediction
+   is kept as `splat-anysplat-ff.ply`, and `splat-anysplat.json` records
+   the fit.
+   It runs in its own environment: AnySplat pins PyTorch 2.2. Set
+   `ANYSPLAT_DIR` to a clone of InternRobotics/AnySplat and `ANYSPLAT_PYTHON`
+   to that environment's Python. On Colab, use the notebook's
+   `install-anysplat` cell, or `--stages train-anysplat` in the driver below.
+   `tools/anysplat_infer.py` builds the network without downloading VGGT-1B's
+   weights, which AnySplat's checkpoint replaces anyway. On GPUs older than
+   Ampere (a T4) it runs attention in float16.
+   **Licence:** the repository and weights are MIT, but the network is
+   fine-tuned from VGGT (CC BY-NC 4.0) and some helper code is CroCo/DUSt3R's
+   (CC BY-NC-SA 4.0). Treat it as a trial, not something to ship.
    `tools/compare_splats.py` judges any splat files of a space the same way.
    Stage 4 runs as steps that can each run on their own
    (`--stage splat --splat-steps ...`): `train-quick`, `train-long` (saved every
    10,000 steps as `splat-long_<step>.ply` and resumed from the newest save),
-   `choose-training`, `fill` and `choose-best`. A splat already trained from the
-   current dense cloud is reused (`--retrain` trains again), so a run cut short
+   `train-spirula`, `train-anysplat`, `choose-training`, `fill` and
+   `choose-best`. A splat already trained from the current dense cloud is
+   reused (`--retrain` trains again), so a run cut short
    carries on where it stopped. `pipeline/splat_export.py`
    then writes `splat.splat` beside `splat.ply`: the viewer's compact format,
    about 8x smaller. It also writes `splat.view.json`, the starting camera: of
@@ -421,6 +444,12 @@ on a Colab GPU through Google's Colab CLI (`colab`, signed in once):
 - **Mixed scene:** `scene` is the last step on the VM, cut from the space's chosen splat; being the agent's last step, it also brings Claude's capture advice.
 - **Best splat:** the choice runs here at the end, against every earlier splat of the video.
 - **OpenSplat:** the binary built on Colab is kept in `tools/colab-cache/` and reused.
+
+`train-long` and `train-anysplat` run only when named, e.g. `--stages
+train-anysplat choose-training` to try AnySplat on a space already processed
+here. Named, they turn on `--long-splat` and `--anysplat`, and the session also
+runs the `install-anysplat` cell. On a T4 AnySplat runs attention in float16;
+`--gpu L4` avoids that, if your Colab plan has one.
 
 If the session dies, run the command again with `--stages` from the step that
 did not finish, e.g. `--stages train-long choose-training fill scene`. A new

@@ -110,7 +110,8 @@ FILL_MIN_BLOBS = 500    # smaller fills are not worth a review (and are not kept
 # The long run (about 40 minutes on a Colab T4, 2.5 hours on an 8 GB Mac) is
 # off unless --long-splat on: on both test videos it scored worse than the
 # quick run at the views it did not train on.
-SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2), "spirula": (15000, 4)}   # steps, image downscale
+SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2), "spirula": (15000, 4),
+              "anysplat": (2000, 4)}   # steps, image downscale
 # Spirula Studio is a plug-in trainer (pipeline/splat_spirula.py): normal and
 # depth supervision, exposure correction, MCMC densification, on Apple Silicon
 # too. Off unless --spirula on: on the walkthrough its default recipe lost to
@@ -119,12 +120,20 @@ SPLAT_RUNS = {"quick": (10000, 4), "long": (30000, 2), "spirula": (15000, 4)}   
 # tested on its own (see README).
 SPLAT_LABELS = {"quick": "quick ({steps} steps, 1/{downscale} resolution)",
                 "long": "long ({steps} steps, 1/{downscale} resolution)",
-                "spirula": "Spirula ({steps} steps, 1/{downscale} resolution, normals + exposure)"}
+                "spirula": "Spirula ({steps} steps, 1/{downscale} resolution, normals + exposure)",
+                "anysplat": "AnySplat (predicted in one pass, then {steps} polish steps at 1/{downscale} resolution)"}
+# AnySplat is a plug-in too (pipeline/splat_anysplat.py): a network trained
+# once on thousands of scenes predicts the splat in one pass from 24 frames,
+# which is aligned to the solve and polished by a short OpenSplat run. It
+# needs an NVIDIA GPU and its own environment (the Colab install-anysplat
+# cell), and is off unless --anysplat on: it has not yet been judged against
+# the quick splat.
 # Stage 4 in steps that can each run on their own (a Colab session can die at
 # any time): every step keeps its results in the space, and the next one
 # picks them up. The long training also saves every LONG_CHECKPOINT_STEPS and
 # resumes from the newest save.
-SPLAT_STEPS = ["train-quick", "train-long", "train-spirula", "choose-training", "fill", "choose-best", "scene"]
+SPLAT_STEPS = ["train-quick", "train-long", "train-spirula", "train-anysplat", "choose-training", "fill",
+               "choose-best", "scene"]
 LONG_CHECKPOINT_STEPS = 10000
 # OpenSplat keeps every training image on the GPU as 32-bit floats; past this
 # it reads them from memory each step instead, so an 8 GB Mac is not swamped.
@@ -526,7 +535,7 @@ class Agent:
                  allow_retry: bool = True, use_claude: bool = True,
                  long_splat: bool | None = None, trained_elsewhere: bool = False,
                  retrain: bool = False, splat_steps: list[str] | None = None,
-                 spirula: bool | None = None):
+                 spirula: bool | None = None, anysplat: bool | None = None):
         self.source = source
         self.name = name
         self.fps = fps
@@ -538,6 +547,9 @@ class Agent:
         from splat_spirula import find_binary
         self.spirula_requested = bool(spirula)
         self.spirula = self.spirula_requested and find_binary() is not None
+        from splat_anysplat import find_install
+        self.anysplat_requested = bool(anysplat)
+        self.anysplat = self.anysplat_requested and find_install() is not None
         self.trained_elsewhere = trained_elsewhere
         self.retrain = retrain
         self.splat_steps = splat_steps or list(SPLAT_STEPS)
@@ -2100,7 +2112,7 @@ class Agent:
         """Stage 4, one step after another (SPLAT_STEPS): only the steps in
         self.splat_steps run, each picking up what the earlier ones left."""
         steps = {"train-quick": self.train_quick, "train-long": self.train_long,
-                 "train-spirula": self.train_spirula,
+                 "train-spirula": self.train_spirula, "train-anysplat": self.train_anysplat,
                  "choose-training": self.pick_training, "fill": self.fill_step,
                  "choose-best": self.best_step, "scene": self.scene_step}
         for name in SPLAT_STEPS:
@@ -2214,6 +2226,37 @@ class Agent:
         self.decide("splat", "accept" if ok else "warn",
                     "trained the Spirula splat" if ok else
                     "the Spirula training failed; the other splats stay (see the log)")
+        return True
+
+    def train_anysplat(self) -> bool:
+        """AnySplat's one-pass splat, aligned to the solve and polished
+        (pipeline/splat_anysplat.py); a failure, or cameras that disagree
+        with the solve, leaves the other splats to carry on."""
+        from splat_anysplat import DEFAULTS
+
+        if self.trained_elsewhere or not self.anysplat:
+            self.decide("splat", "skip", "no AnySplat splat here"
+                        + ("" if self.trained_elsewhere else
+                           " (--anysplat on to make it)" if not self.anysplat_requested else
+                           " (AnySplat is not installed: set ANYSPLAT_DIR and ANYSPLAT_PYTHON;"
+                           " see pipeline/splat_anysplat.py)"))
+            return True
+        if not self.retrain and self.trained_splat("anysplat"):
+            self.decide("splat", "reuse", "splat-anysplat.ply is already made from this dense cloud")
+            return True
+        if not self.seed():
+            return False
+        steps, downscale = SPLAT_RUNS["anysplat"]
+        ok, _ = self.run([sys.executable, str(ROOT / "pipeline/splat_anysplat.py"), str(self.space),
+                          "--views", str(DEFAULTS["views"]), "--polish-steps", str(steps),
+                          "--downscale", str(downscale)],
+                         "splat", f"AnySplat: {DEFAULTS['views']} views, then {steps} polish steps "
+                                  f"at 1/{downscale} resolution")
+        ok = ok and (self.space / "splat-anysplat.ply").exists()
+        self.decide("splat", "accept" if ok else "warn",
+                    "made the AnySplat splat" if ok else
+                    "AnySplat failed or its cameras disagreed with the solve; the other splats stay "
+                    "(see splat-anysplat.json and the log)")
         return True
 
     def pick_training(self) -> bool:
@@ -2970,6 +3013,10 @@ def main() -> int:
                         help="also train with Spirula Studio and let Claude judge it; off by "
                              "default, as it lost to the quick splat on the walkthrough and adds "
                              "about 45 minutes on an 8 GB Mac")
+    parser.add_argument("--anysplat", choices=["on", "off"], default="off",
+                        help="also predict a splat with AnySplat (one pass on an NVIDIA GPU, then a "
+                             "short polish) and let Claude judge it; off by default until it has been "
+                             "judged against the quick splat")
     parser.add_argument("--long-splat", choices=["on", "off"], default="off",
                         help="also train a long splat (30,000 steps at half resolution) for Claude "
                              "to choose from; off by default, as it scored worse on both test videos")
@@ -2983,7 +3030,7 @@ def main() -> int:
                   long_splat=args.long_splat == "on",
                   trained_elsewhere=args.trained_elsewhere, retrain=args.retrain,
                   splat_steps=args.splat_steps,
-                  spirula=args.spirula == "on")
+                  spirula=args.spirula == "on", anysplat=args.anysplat == "on")
     if args.stage:
         stages = [args.stage]
     else:
