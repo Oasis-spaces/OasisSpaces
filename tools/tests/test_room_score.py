@@ -444,6 +444,41 @@ def test_boxes_stand_for_a_name_by_detection_kind_or_by_type():
     assert [i for i, _ in rs.boxes_of(shapes, "bed", VOCAB)] == [2]
 
 
+BACK_WALL = {"kind": "wall", "center": [0.0, 16.0, 11.7], "normal": [0.0, -1.0, 0.0],
+             "axis_a": [1.0, 0.0, 0.0], "half_a": 25.0, "axis_b": [0.0, 0.0, 1.0], "half_b": 11.7}
+
+
+def test_a_door_leaf_the_detector_only_called_a_wardrobe_is_part_of_the_wall():
+    """IMG_4138: the door was detected as a wardrobe and never as a door, so no
+    doorway term saw it, and Claude's drop of the 0.12 m "wardrobe" was undone
+    because it lowered the score."""
+    leaf = dict(CUPBOARD, min=[8.0, 15.2, 0.0], max=[14.0, 16.0, 17.0])       # 0.09 m deep, in the wall's plane
+    table = {"bed": evidence_from(BED, ((0.0, -20.0, 12.0), (8.0, -18.0, 12.0), (-8.0, -18.0, 12.0))),
+             "almirah": evidence_from(leaf, ((11.0, -6.0, 12.0), (6.0, -8.0, 12.0), (14.0, -7.0, 12.0)))}
+    evidence_for = lambda label: table.get(label, {"frames": {}, "unseen": {}})
+    shapes = dict(room(), planes=[dict(BACK_WALL)])
+    kept = dict(shapes, boxes=[dict(BED), leaf])
+    dropped = dict(shapes, boxes=[dict(BED), dict(leaf, build=False)])
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        space = Path(tmp)
+        unscaled_kept = rs.room_score(space, kept, evidence_for, VOCAB)
+        unscaled_dropped = rs.room_score(space, dropped, evidence_for, VOCAB)
+        (space / "densify.json").write_text(json.dumps({"colmap_units_per_metre": UNITS}))
+        with_leaf = rs.room_score(space, kept, evidence_for, VOCAB)
+        without = rs.room_score(space, dropped, evidence_for, VOCAB)
+        # a real cupboard against the same wall, and a thin slab out in the room, are not the wall's
+        deep = rs.in_walls(dict(shapes, boxes=[dict(BED), dict(CUPBOARD, min=[8.0, 11.0, 0.0], max=[14.0, 16.0, 17.0])]), UNITS, VOCAB)
+        loose = rs.in_walls(dict(shapes, boxes=[dict(BED), dict(leaf, min=[8.0, 5.2, 0.0], max=[14.0, 6.0, 17.0])]), UNITS, VOCAB)
+    # without the scale nothing changes: the slab earns its name and dropping it costs, as before
+    assert unscaled_kept["pieces"]["almirah"]["agreement"] > 0.9
+    assert rs.compare(unscaled_kept, unscaled_dropped) == "worse"
+    # with it, the slab earns nothing and stands in the doorway, so the drop is kept
+    assert with_leaf["pieces"]["almirah"]["box"] is None and with_leaf["doorways"]["B1"] == 1.0
+    assert rs.compare(with_leaf, without) == "better"
+    assert deep == {} and loose == {}
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

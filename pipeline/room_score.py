@@ -20,7 +20,11 @@ and a pass that lowers the score is rolled back, whatever the judge said.
   doorway    The largest share of a built piece's silhouette, through the
              frames' cameras, that lies inside a fixture's outline (a door, a
              window): a "wardrobe" standing where the frames show the door
-             (the phone's detector once named the pan's door a wardrobe).
+             (the phone's detector once named the pan's door a wardrobe). A
+             piece no thicker than a door leaf lying in a built wall's plane
+             counts in full, outline or not, and earns its name no agreement:
+             the detector can name a door a wardrobe without ever calling it
+             a door.
   missing    The share of the measured wall support that the built room
              drops. A wall's support is read off the dense cloud in place:
              its body stands along its run and reaches wall height (a
@@ -70,6 +74,8 @@ DOORWAY_SHARE = 0.5       # a piece counts as standing in a fixture when this mu
 DOORWAY_SHARE_ONE = 0.6   # ... or this much in a single frame (a door is often seen in one keyframe only)
 THIN_M = 0.2              # a piece thinner than this in such an outline is the door itself, not a wardrobe
                           # the detector sometimes calls a door: it counts in full, not by the vote share
+IN_WALL_M = 0.15          # ... and a piece that thin lying this close to a built wall's plane along its
+                          # whole footprint is part of that wall (a door leaf, a panel), outline or not
 EPS = 0.02                # scores closer than this are the same room
 
 # Wall support, measured on the dense cloud in the shapes frame. Metres where
@@ -169,6 +175,41 @@ def in_doorways(shapes: dict, evidence_for, vocabulary) -> dict[str, float]:
     return found
 
 
+def units_per_metre(space: Path) -> float | None:
+    try:
+        return json.loads((Path(space) / "densify.json").read_text()).get("colmap_units_per_metre")
+    except (OSError, ValueError):
+        return None
+
+
+def in_walls(shapes: dict, units: float | None, vocabulary) -> dict[str, float]:
+    """Built pieces that are part of a wall: no more than THIN_M deep, with
+    their whole footprint within IN_WALL_M of a built wall's plane and inside
+    its run. No bed, seat, table or wardrobe is that thin; a door leaf is, and
+    the detector can name one a wardrobe without ever calling it a door, which
+    leaves the doorway terms nothing to see (IMG_4138: a 0.12 m "wardrobe" in
+    the door's wall, so dropping it lowered the score). Such a piece earns its
+    name no agreement and stands in a doorway in full. Keyed by box id; needs
+    the metric scale."""
+    if not units:
+        return {}
+    walls = [p for p in shapes.get("planes") or [] if p.get("kind") == "wall" and p.get("build", True)]
+    found = {}
+    for i, b in built_pieces(shapes, vocabulary):
+        lo, hi = np.array(b["min"], float), np.array(b["max"], float)
+        if min(hi[0] - lo[0], hi[1] - lo[1]) / units > THIN_M:
+            continue
+        corners = np.array([[x, y] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])])
+        for w in walls:
+            c, n, a = (np.array(w[k], float)[:2] for k in ("center", "normal", "axis_a"))
+            off = np.abs((corners - c) @ n) / units
+            along = np.abs(((lo[:2] + hi[:2]) / 2 - c) @ a)
+            if off.max() <= IN_WALL_M and along <= w["half_a"]:
+                found[f"B{i}"] = 1.0
+                break
+    return found
+
+
 def doorways_by_votes(space: Path, shapes: dict, vocabulary) -> dict[str, float]:
     """With tracks (tracking.py): a built piece filling the outline of a
     tracked object that the detector named a door or window at least
@@ -188,11 +229,7 @@ def doorways_by_votes(space: Path, shapes: dict, vocabulary) -> dict[str, float]
         return {}
     frames = sorted({f for t, _ in suspects for f in t["frames"]})
     views = placement.views_of(space, placement.spaced(frames))
-    units = None
-    try:
-        units = json.loads((Path(space) / "densify.json").read_text()).get("colmap_units_per_metre")
-    except (OSError, ValueError):
-        pass
+    units = units_per_metre(space)
     found = {}
     for t, vote_share in suspects:
         for i, b in built_pieces(shapes, vocabulary):
@@ -414,12 +451,13 @@ def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None, walls=N
     """The score of `shapes` (a shapes.json in memory), with its parts."""
     space = Path(space)
     vocabulary = vocabulary or room_vocabulary(space)
+    slabs = in_walls(shapes, units_per_metre(space), vocabulary)
     pieces = {}
     for label in vocabulary.with_role("furniture", "storage"):
         evidence = evidence_for(label)
         if len(evidence["frames"]) < placement.MIN_FRAMES:
             continue
-        candidates = boxes_of(shapes, label, vocabulary)
+        candidates = [(i, b) for i, b in boxes_of(shapes, label, vocabulary) if f"B{i}" not in slabs]
         best, best_id = 0.0, None
         for i, b in candidates:
             total, _ = placement.score(np.array(b["min"], float), np.array(b["max"], float), evidence)
@@ -447,7 +485,7 @@ def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None, walls=N
     walk = inside / len(cameras) if cameras else 0.0
 
     doorways = in_doorways(shapes, evidence_for, vocabulary)
-    for box_id, share in doorways_by_votes(space, shapes, vocabulary).items():
+    for box_id, share in list(doorways_by_votes(space, shapes, vocabulary).items()) + list(slabs.items()):
         doorways[box_id] = max(doorways.get(box_id, 0.0), share)
     doorway = max(doorways.values(), default=0.0)
 
