@@ -2551,7 +2551,9 @@ class Agent:
                      if kept_pieces else "kept no fill: no surface was clearly better")
                     + ("" if verdicts else
                        " (not reviewed by Claude)" if not self.use_claude else
-                       f" (Claude could not be reached: {self.advisor.reason}; unreviewed fills are not kept)"),
+                       f" (Claude could not be reached: {self.advisor.reason}; unreviewed fills are not kept)"
+                       if self.advisor.reason else
+                       " (Claude's review gave no readable verdict; unreviewed fills are not kept)"),
                     {"fill_surfaces_kept": [p["surface"] for p in kept_pieces]})
 
     def review_surface(self, n: int, piece: dict, original, room) -> dict | None:
