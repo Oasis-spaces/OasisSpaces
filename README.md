@@ -503,6 +503,22 @@ floor, Q and E turn it, M swaps scan and model, H hides it, "Put back" returns
 it to where it was filmed, "Save layout" downloads the arrangement. Walls face
 inwards only, so from above you look into the room.
 
+- **Colours:** the swatch beside the selected piece gives it any colour. Each
+  splat, and each plain part of its clean model, takes the colour at its own
+  brightness relative to the piece's average, so shading and shadowed sides
+  stay; a photographed side (a texture) can only be multiplied, so it is
+  tinted towards the colour. "Own colour" puts the scan's colours back.
+- **Any object:** "Add object…" (or a `.glb` dropped on the room) adds a model
+  as a piece like the others: it stands on the floor where the view is aimed,
+  at its own size in metres (glTF's unit; a model tens of units across is read
+  as centimetres), and can be selected, dragged, turned, hidden, coloured, and
+  given an exact height in centimetres (it scales evenly). A `.gltf` must have
+  its buffers and images embedded.
+- **Layouts:** "Save layout" writes where every piece is, how it shows, its
+  colour and size, and the added objects themselves (as `data:` URLs), so the
+  one file brings the room back: "Load layout…", a dropped `.json`, or
+  `?layout=<url>` beside `?scene=` (how the apps can open a saved room).
+
 - **In a browser:** `python3 -m http.server 8734`, then
   `http://localhost:8734/scene-viewer/index.html?scene=../spaces/<name>/scene/scene.json`.
 - **In Splat Viewer (Mac):** the home page lists every room with a scene
@@ -521,7 +537,10 @@ guess; furniture standing close to a wall can print onto the wall's texture
 (Claude's review paints such walls plain); the clean models are simple
 furniture, not reconstructions (a generated model per object, such as SAM 3D
 Objects on a GPU, would drop into `models/` the same way).
-Tests: `python3 tools/tests/test_mixed_scene.py`, and `swift test` in `apps/OasisLink`.
+Tests: `python3 tools/tests/test_mixed_scene.py`; `python3 tools/tests/test_scene_viewer.py`
+drives the viewer in headless Chromium on a small made-up scene (adding objects,
+colours on screen, saving and reopening a layout; skipped without node's
+`playwright` package); and `swift test` in `apps/OasisLink`.
 
 ## Oasis Capture (iPhone app)
 

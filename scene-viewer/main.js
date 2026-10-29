@@ -1,9 +1,12 @@
 // The mixed-scene viewer: the room's shell is a textured mesh (shell.glb), each
 // piece of furniture is its own splat (pieces/*.splat), both drawn together by
 // three.js and Spark. Pieces are selected by their measured boxes, dragged
-// across the floor, turned about the vertical, hidden and put back. Everything
-// is in metres, y up, the room's centre on the floor at the origin (see
-// tools/mixed_scene.py, which writes scene.json).
+// across the floor, turned about the vertical, hidden and put back, and given a
+// colour of their own. Any GLB can be added to the room as a piece like the
+// others, and a saved layout (where everything is, its colour, the added
+// objects themselves) opens again with "Load layout" or ?layout=<url>.
+// Everything is in metres, y up, the room's centre on the floor at the origin
+// (see tools/mixed_scene.py, which writes scene.json).
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -13,6 +16,14 @@ import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 const params = new URLSearchParams(location.search);
 const sceneURL = new URL(params.get("scene") || "../spaces/walkthrough-full/scene/scene.json", location.href);
 const status = document.getElementById("status");
+const toast = document.getElementById("toast");
+let toastTimer = 0;
+function say(text) {
+  toast.textContent = text;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 4000);
+}
 
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -41,7 +52,9 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 scene.environmentIntensity = 0.35;
 
-const pieces = new Map();   // id -> {info, group, proxy, row, home: {position, rotation}}
+// id -> {info, group, proxy, row, size, splat, model, showing, home: {position, rotation},
+//        tint: "#rrggbb" or null, glb: an added object's file as a data: URL}
+const pieces = new Map();
 let manifest = null;
 let selected = null;
 const outline = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xff9f0a }));
@@ -80,17 +93,27 @@ async function load() {
   }
   viewFromAbove(false);
   status.classList.add("done");
+  if (params.get("layout")) {
+    const url = new URL(params.get("layout"), location.href);
+    await applyLayout(await (await fetch(url)).json()).catch((error) => say(`Could not open the layout: ${error.message}`));
+  }
 }
 
-function addPiece(info) {
+// `object`, for a piece added from a GLB, is that object (its feet at the origin);
+// pieces of the scan have a splat and may have a clean model beside it.
+function addPiece(info, object = null) {
   const group = new THREE.Group();
   group.position.fromArray(info.anchor);
-  const splat = new SplatMesh({ url: new URL(info.file, sceneURL).href });
-  group.add(splat);
+  const splat = info.file ? new SplatMesh({ url: new URL(info.file, sceneURL).href }) : null;
+  if (splat) group.add(splat);
   // The clean stand-in, beside the scan: one of the two shows.
   const model = new THREE.Group();
-  if (info.model) {
-    new GLTFLoader().loadAsync(new URL(info.model, sceneURL).href).then((gltf) => {
+  let modelReady = Promise.resolve();
+  if (object) {
+    model.add(object);
+    group.add(model);
+  } else if (info.model) {
+    modelReady = new GLTFLoader().loadAsync(new URL(info.model, sceneURL).href).then((gltf) => {
       // A photographed side (a wardrobe's doors, a table's top) holds the room's own light,
       // like the shell: drawn as it is, while the plain parts of the model take the lights.
       gltf.scene.traverse((node) => {
@@ -104,8 +127,8 @@ function addPiece(info) {
     });
     group.add(model);
   }
-  const showing = info.show === "model" && info.model ? "model" : "scan";
-  splat.visible = showing === "scan";
+  const showing = object || (info.show === "model" && info.model) ? "model" : "scan";
+  if (splat) splat.visible = showing === "scan";
   model.visible = showing === "model";
   const min = new THREE.Vector3().fromArray(info.box.min), max = new THREE.Vector3().fromArray(info.box.max);
   const size = max.clone().sub(min);
@@ -121,14 +144,186 @@ function addPiece(info) {
 
   const row = document.createElement("label");
   row.className = "row";
-  row.innerHTML = `<input type="checkbox" checked><span class="name"></span><span class="count"></span>`;
+  row.innerHTML = `<input type="checkbox" checked><span class="swatch"></span><span class="name"></span><span class="count"></span>`;
   row.querySelector(".name").textContent = info.label;
-  row.querySelector(".count").textContent = info.movable ? (showing === "model" ? "model" : "scan") : "";
+  row.querySelector(".count").textContent = info.imported ? "added" : info.movable ? showing : "";
   const box = row.querySelector("input");
   box.addEventListener("change", () => { group.visible = box.checked; if (!box.checked && selected === info.id) select(null); });
   row.addEventListener("click", (event) => { if (event.target !== box && info.movable && group.visible) { event.preventDefault(); select(info.id); } });
-  document.getElementById(info.movable ? "furniture" : "fixed").append(row);
-  pieces.set(info.id, { info, group, proxy, row, size, splat, model, showing });
+  document.getElementById(info.imported ? "added" : info.movable ? "furniture" : "fixed").append(row);
+  const piece = { info, group, proxy, row, size, splat, model, showing, modelReady, tint: null };
+  pieces.set(info.id, piece);
+  return piece;
+}
+
+// ------------------------------------------------------------ added objects
+let added = 0;
+async function addObject(data, name, at = null) {
+  const gltf = await new GLTFLoader().parseAsync(data, "");
+  const object = gltf.scene;
+  let bounds = new THREE.Box3().setFromObject(object);
+  if (bounds.isEmpty()) throw new Error("it has no meshes");
+  // glTF is in metres; a model tens of metres across was made in centimetres.
+  const across = Math.max(...bounds.getSize(new THREE.Vector3()).toArray());
+  if (across > 20) {
+    object.scale.multiplyScalar(0.01);
+    bounds = new THREE.Box3().setFromObject(object);
+    say(`${name} was ${across.toFixed(0)} units across: read as centimetres`);
+  }
+  const centre = bounds.getCenter(new THREE.Vector3());
+  object.position.sub(new THREE.Vector3(centre.x, bounds.min.y, centre.z));   // its feet at the origin
+  bounds = new THREE.Box3().setFromObject(object);
+  // On the floor where the view is aimed, inside the room.
+  const r = manifest.room, target = at ?? controls.target;
+  const anchor = [THREE.MathUtils.clamp(target.x, -r.width / 2, r.width / 2), 0,
+                  THREE.MathUtils.clamp(target.z, -r.depth / 2, r.depth / 2)];
+  let id;
+  do { id = `added-${++added}`; } while (pieces.has(id));
+  const info = { id, label: name.replace(/\.(glb|gltf)$/i, "").replace(/[-_]+/g, " "), movable: true, imported: true,
+                 anchor, box: { min: bounds.min.toArray(), max: bounds.max.toArray() } };
+  const piece = addPiece(info, object);
+  piece.glb = await dataURL(data, "model/gltf-binary");
+  piece.home = { position: piece.group.position.clone(), rotation: 0 };
+  return piece;
+}
+
+function dataURL(data, type) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(new Blob([data], { type }));
+  });
+}
+
+async function addFiles(files) {
+  for (const file of files) {
+    try {
+      if (/\.json$/i.test(file.name)) await applyLayout(JSON.parse(await file.text()));
+      else if (/\.(glb|gltf)$/i.test(file.name)) select((await addObject(await file.arrayBuffer(), file.name)).info.id);
+      else say(`${file.name}: only .glb and .gltf objects, or a saved layout (.json)`);
+    } catch (error) {
+      say(`Could not add ${file.name}: ${error.message}`);
+      console.error(error);
+    }
+  }
+}
+
+// ------------------------------------------------------------------ colours
+// A piece's colour keeps its light and shade: each splat and each plain part
+// of its model takes the chosen colour at its own brightness relative to the
+// piece's average, so a bed's shadowed side stays darker than its top. A
+// photographed side (a texture) can only be multiplied, so it is tinted
+// towards the colour instead. Its own colours are kept to go back to.
+const luma = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+
+function materialsOf(root) {
+  const found = new Set();
+  root.traverse((node) => {
+    if (!node.isMesh) return;
+    for (const material of [node.material].flat()) if (material?.color) found.add(material);
+  });
+  return [...found];
+}
+
+const averages = new WeakMap();   // texture -> its average colour, linear
+function textureAverage(map) {
+  if (averages.has(map)) return averages.get(map);
+  let colour = new THREE.Color(1, 1, 1);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 8;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(map.image, 0, 0, 8, 8);
+    const px = context.getImageData(0, 0, 8, 8).data;
+    let r = 0, g = 0, b = 0;
+    for (let i = 0; i < px.length; i += 4) { r += px[i]; g += px[i + 1]; b += px[i + 2]; }
+    colour = new THREE.Color().setRGB(r / 64 / 255, g / 64 / 255, b / 64 / 255, THREE.SRGBColorSpace);
+  } catch { /* an image that cannot be drawn counts as white */ }
+  averages.set(map, colour);
+  return colour;
+}
+
+// The piece's own colours, read once: the model's materials (linear, as three.js
+// multiplies them) and the splat's colours (as stored), with their averages.
+async function ownColours(piece) {
+  if (piece.own) return piece.own;
+  await piece.modelReady;
+  const materials = materialsOf(piece.model);
+  let sum = 0;
+  for (const material of materials) {
+    material.userData.originalColor ??= material.color.clone();
+    const colour = material.userData.originalColor.clone();
+    if (material.map) colour.multiply(textureAverage(material.map));
+    sum += luma(colour);
+  }
+  const own = { materials, modelLuma: materials.length ? sum / materials.length : 0, splat: null, splatLuma: 0 };
+  const packed = piece.splat && (await piece.splat.initialized, piece.splat.packedSplats);
+  if (packed?.numSplats) {
+    const rgb = new Float32Array(packed.numSplats * 3);
+    let lumaSum = 0, weight = 0;
+    packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
+      rgb[3 * i] = color.r; rgb[3 * i + 1] = color.g; rgb[3 * i + 2] = color.b;
+      lumaSum += luma(color) * opacity; weight += opacity;
+    });
+    own.splat = rgb;
+    own.splatLuma = weight ? lumaSum / weight : 0;
+  }
+  piece.own = own;
+  return own;
+}
+
+async function setTint(id, hex) {
+  const piece = pieces.get(id);
+  if (!piece) return;
+  piece.tint = hex || null;
+  if (!hex && !piece.own) return;                  // never coloured: it still has its own colours
+  const own = await ownColours(piece);
+  if (piece.tint !== (hex || null)) return;          // changed again while the splat loaded
+  if (own.splat) {
+    const packed = piece.splat.packedSplats;
+    const target = hex ? new THREE.Color().setRGB(...srgb(hex)) : null;
+    const k = target ? 1 / Math.max(own.splatLuma, 0.02) : 0;
+    const colour = new THREE.Color();
+    packed.forEachSplat((i, center, scales, quaternion, opacity) => {
+      const r = own.splat[3 * i], g = own.splat[3 * i + 1], b = own.splat[3 * i + 2];
+      if (target) {
+        const level = (0.2126 * r + 0.7152 * g + 0.0722 * b) * k;
+        colour.setRGB(Math.min(1, target.r * level), Math.min(1, target.g * level), Math.min(1, target.b * level));
+      } else {
+        colour.setRGB(r, g, b);
+      }
+      packed.setSplat(i, center, scales, quaternion, opacity, colour);
+    });
+    packed.needsUpdate = true;
+    piece.splat.updateVersion();
+  }
+  const target = hex ? new THREE.Color(hex) : null;
+  for (const material of own.materials) {
+    const original = material.userData.originalColor;
+    material.color.copy(original);
+    if (!target) continue;
+    if (material.map) {
+      // Multiplied towards the colour, as far as the photograph's own colours allow.
+      const mean = textureAverage(material.map);
+      const k = (t, m) => THREE.MathUtils.clamp(t / Math.max(m, 0.02), 0, 4);
+      material.color.setRGB(k(target.r, mean.r), k(target.g, mean.g), k(target.b, mean.b));
+    } else {
+      material.color.copy(target).multiplyScalar(luma(original) / Math.max(own.modelLuma, 0.02));
+    }
+  }
+  piece.row.querySelector(".swatch").style.background = hex || "";
+  if (selected === id) showTint(piece);
+}
+
+// A hex colour's sRGB components, 0..1: the space a splat's colours are stored in.
+function srgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+}
+
+function showTint(piece) {
+  document.getElementById("tint").value = piece.tint || "#c8b49a";
+  document.getElementById("untint").hidden = !piece.tint;
 }
 
 // ---------------------------------------------------------------- selection
@@ -141,16 +336,20 @@ function select(id) {
   document.getElementById("sel-title").textContent = piece.info.label;
   const carried = [...pieces.values()].filter((p) => p.info.on === id).map((p) => p.info.label);
   const on = piece.info.on && pieces.get(piece.info.on);
+  const size = piece.size.clone().multiplyScalar(piece.group.scale.x);
   document.getElementById("sel-size").textContent =
-    `${piece.size.x.toFixed(2)} × ${piece.size.z.toFixed(2)} × ${piece.size.y.toFixed(2)} m`
+    `${size.x.toFixed(2)} × ${size.z.toFixed(2)} × ${size.y.toFixed(2)} m`
     + (on ? ` · on the ${on.info.label.toLowerCase()}` : "")
     + (carried.length ? ` · carries the ${carried.join(", ").toLowerCase()}` : "");
   document.getElementById("sel-size").title =
     piece.info.onWhy || (carried.length ? "these move and hide with it" : "");
   const swap = document.getElementById("swap");
-  swap.hidden = !piece.info.model;
+  swap.hidden = !piece.info.model || !piece.splat;
   swap.textContent = piece.showing === "scan" ? "Show clean model" : "Show the scan";
   swap.title = piece.info.why || "";
+  showTint(piece);
+  document.getElementById("height-wrap").hidden = !piece.info.imported;
+  document.getElementById("height").value = Math.round(size.y * 100);
   bar.hidden = false;
   outline.geometry.dispose();
   outline.geometry = new THREE.EdgesGeometry(piece.proxy.geometry);
@@ -225,7 +424,7 @@ renderer.domElement.addEventListener("pointermove", (event) => {
 
 function showAs(id, what) {
   const piece = pieces.get(id);
-  if (!piece || !piece.info.model) return;
+  if (!piece || !piece.info.model || !piece.splat) return;
   piece.showing = what;
   piece.splat.visible = what === "scan";
   piece.model.visible = what === "model";
@@ -264,19 +463,83 @@ document.getElementById("reset").onclick = () => {
     piece.row.querySelector("input").checked = true;
   }
 };
+// The layout: where every movable piece is, how it shows, its colour; the
+// added objects go in whole (their GLB as a data: URL), so the file alone
+// brings the room back.
+function currentLayout() {
+  const movable = [...pieces.values()].filter((p) => p.info.movable);
+  return {
+    space: manifest.space,
+    added: movable.filter((p) => p.info.imported).map((p) => ({ id: p.info.id, label: p.info.label, glb: p.glb })),
+    pieces: movable.map((p) => {
+      const position = p.group.getWorldPosition(new THREE.Vector3());
+      const entry = { id: p.info.id, label: p.info.label, hidden: !p.group.visible, show: p.showing,
+                      position: position.toArray().map((v) => +v.toFixed(3)),
+                      turnDegrees: +THREE.MathUtils.radToDeg(p.group.rotation.y).toFixed(1) };
+      if (p.tint) entry.color = p.tint;
+      if (p.group.scale.x !== 1) entry.scale = +p.group.scale.x.toFixed(4);
+      return entry;
+    }),
+  };
+}
+
+async function applyLayout(layout) {
+  if (layout.space && layout.space !== manifest.space) say(`This layout was saved for ${layout.space}; applying it by piece`);
+  for (const item of layout.added ?? []) {
+    if (pieces.has(item.id)) continue;
+    const data = await (await fetch(item.glb)).arrayBuffer();
+    const piece = await addObject(data, item.label);
+    if (piece.info.id !== item.id) {                // keep the saved id, so its entry below finds it
+      pieces.delete(piece.info.id);
+      piece.info.id = item.id;
+      piece.proxy.userData.piece = item.id;
+      pieces.set(item.id, piece);
+    }
+  }
+  // Pieces standing on the floor first: what stands on them is placed in their new frame.
+  const entries = [...(layout.pieces ?? [])].sort((a, b) => !!pieces.get(a.id)?.info.on - !!pieces.get(b.id)?.info.on);
+  let missing = 0;
+  for (const entry of entries) {
+    const piece = pieces.get(entry.id);
+    if (!piece) { missing += 1; continue; }
+    if (entry.scale) piece.group.scale.setScalar(entry.scale);
+    piece.group.rotation.y = THREE.MathUtils.degToRad(entry.turnDegrees ?? 0);
+    if (entry.position) {
+      piece.group.parent.updateWorldMatrix(true, false);
+      piece.group.position.copy(piece.group.parent.worldToLocal(new THREE.Vector3(...entry.position)));
+    }
+    piece.group.updateMatrixWorld(true);
+    show(entry.id, !entry.hidden);
+    if (entry.show) showAs(entry.id, entry.show);
+    await setTint(entry.id, entry.color ?? null);
+  }
+  if (selected) select(selected);
+  say(`Layout opened${missing ? `; ${missing} piece(s) it names are not in this scene` : ""}`);
+}
+
 document.getElementById("export").onclick = () => {
-  const layout = { space: manifest.space, pieces: [...pieces.values()].filter((p) => p.info.movable).map((p) => {
-    const position = p.group.getWorldPosition(new THREE.Vector3());
-    return { id: p.info.id, label: p.info.label, hidden: !p.group.visible, show: p.showing,
-             position: position.toArray().map((v) => +v.toFixed(3)),
-             turnDegrees: +THREE.MathUtils.radToDeg(p.group.rotation.y).toFixed(1) };
-  }) };
   const link = document.createElement("a");
-  link.href = URL.createObjectURL(new Blob([JSON.stringify(layout, null, 1)], { type: "application/json" }));
+  link.href = URL.createObjectURL(new Blob([JSON.stringify(currentLayout(), null, 1)], { type: "application/json" }));
   link.download = `${manifest.space}-layout.json`;
   link.click();
 };
+const picker = document.getElementById("picker");
+document.getElementById("add").onclick = () => { picker.accept = ".glb,.gltf"; picker.click(); };
+document.getElementById("load").onclick = () => { picker.accept = ".json"; picker.click(); };
+picker.onchange = () => { addFiles([...picker.files]); picker.value = ""; };
+window.addEventListener("dragover", (event) => event.preventDefault());
+window.addEventListener("drop", (event) => { event.preventDefault(); addFiles([...event.dataTransfer.files]); });
+document.getElementById("tint").oninput = (event) => selected && setTint(selected, event.target.value);
+document.getElementById("untint").onclick = () => selected && setTint(selected, null);
+document.getElementById("height").onchange = (event) => {
+  const piece = selected && pieces.get(selected);
+  const metres = Number(event.target.value) / 100;
+  if (!piece?.info.imported || !(metres > 0)) return;
+  piece.group.scale.setScalar(metres / piece.size.y);
+  select(selected);
+};
 window.addEventListener("keydown", (event) => {
+  if (event.target.closest?.("input")) return;     // typing a height or a colour
   if (event.key === "q" || event.key === "Q") turn(15);
   if (event.key === "e" || event.key === "E") turn(-15);
   if (event.key === "h" || event.key === "H" || event.key === "Delete" || event.key === "Backspace") hideSelected();
@@ -335,5 +598,7 @@ renderer.setAnimationLoop(() => {
   renderer.render(scene, camera);
 });
 
-window.oasisScene = { pieces, scene, camera };   // for checks from outside (the apps, tests)
+// For checks from outside (the apps, tools/tests/test_scene_viewer.py).
+window.oasisScene = { pieces, scene, camera, select, addObject, setTint, currentLayout, applyLayout,
+                      ready: () => status.classList.contains("done") };
 load().catch((error) => { status.textContent = `Could not load the scene: ${error.message}`; console.error(error); });

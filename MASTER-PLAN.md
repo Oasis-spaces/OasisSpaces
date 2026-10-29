@@ -133,9 +133,9 @@ Against "editable: deletable, colours, textures, dimensions, any object added":
 | Delete a piece | Yes — Splat Viewer (⌫), `splat_edit.py remove`, scene viewer (hide); the floor and wall behind are filled | Fill quality behind large pieces on sparse walls |
 | Move / turn | Yes — Splat Viewer handles, scene viewer drag/turn, saved layouts | — |
 | Resize (dimensions) | Splat Viewer: corner, height handles, exact cm in the inspector (Gaussians scaled); models: cuboid parts scale | Resizing a *scanned* piece without stretching its texture: regenerate a model at the new size (TRELLIS job exists: `tools/object_mesh.py`, GPU) |
-| Colours | Walls repainted from swatches or any colour (only the wall's own paint changes); library pieces recoloured | Per-piece recolour of scanned pieces and models in the scene viewer and the phone |
+| Colours | Walls repainted from swatches or any colour (only the wall's own paint changes); library pieces recoloured; scene viewer: any piece, scanned or model, any colour at its own shading, saved with the layout | The same in the Mac app's editor and the phone |
 | Textures | Shell textures come from the frames (LaMa continues them); not user-editable | A texture picker for walls/floor (tile, wood, paint) applied to the shell's materials; UV-mapped shell |
-| Add any 3D object | Library furniture only (sofa, bed, table, chair, desk, wardrobe, box, as blobs or cuboid models) | Import any GLB/USDZ into the scene viewer and the apps, placed on the floor, scaled in metres, saved with the layout; a catalogue of generated models |
+| Add any 3D object | Library furniture (sofa, bed, table, chair, desk, wardrobe, box, as blobs or cuboid models); scene viewer: any GLB, on the floor, in metres, height in cm, saved inside the layout, layouts reopen | USDZ; a native import in the Mac app's editor; a catalogue of generated models |
 | Clean furniture models | Cuboid models in the scan's colours; TRELLIS meshes on a GPU | Run the model job in the Colab flow by default; amodal completion (FIRE3D or Lucida-style) once released |
 | Correct rooms every time | Measured score, rollback, repairs; passes on the pan | A wall score (do the cameras' walls meet the floor where the frames say?); ground truth from a tape measure of both rooms; SAM 3 when access is granted; scale anchors from known sizes (doors ~2.0 m) |
 | Tracking in every run | Colab only | Fit the walkthrough inside a session (fewer tracked names or a paid runtime), or a Mac path that batches objects |
@@ -186,7 +186,7 @@ are gitignored: large, generated, or personal footage.)
 - `mixed_scene.py`, `mesh_render.py`, `object_mesh.py` — the textured shell and movable pieces; GLB drawing; TRELLIS meshes on a GPU.
 - `evaluate_space.py`, `show_prompts.py` — scoring spaces; printing every question the pipeline asks Claude.
 - `colab_pipeline.py`, `claude_relay.py`, `paced_proxy.py` — the Colab driver, the Claude relay, the paced upload proxy for this network.
-- `tools/tests/` — twelve test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture map, mirrors, mixed scene, phone objects, placement, pose priors, room score, room views, stage-1 gaps, structure review, tracking.
+- `tools/tests/` — thirteen test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture map, mirrors, mixed scene, phone objects, placement, pose priors, room score, room views, scene viewer (headless Chromium, `scene_viewer_check.mjs`), stage-1 gaps, structure review, tracking.
 - Gitignored but needed locally: `tools/opensplat` + `tools/default.metallib` (OpenSplat built for Metal, AGPL, patched), `tools/colab-cache/` (the OpenSplat binary built on Colab), `tools/spirula-studio/`.
 
 ### `apps/OasisCapture/` — the iPhone capture app
@@ -207,7 +207,7 @@ are gitignored: large, generated, or personal footage.)
 - `main.py`, `requirements.txt`, `tests/test_relay.py`, `README.md`. Service `oasis-relay` on Render, Supabase project `oasis-spaces` (jobs table, `oasis` bucket).
 
 ### Viewers and the browser editor
-- `scene-viewer/` — the mixed-scene viewer (three.js 0.180 + Spark, vendored in `vendor/`): select, drag, turn, hide, swap scan/model, save a layout; served by the Mac app and the phone app too.
+- `scene-viewer/` — the mixed-scene viewer (three.js 0.180 + Spark, vendored in `vendor/`): select, drag, turn, hide, swap scan/model, colour any piece, add any GLB, save and reopen a layout; served by the Mac app and the phone app too.
 - `splat-viewer/` — a WebGL splat viewer (MIT, with `convert.py`).
 - `editor/index.html` — a browser point-cloud editor.
 
