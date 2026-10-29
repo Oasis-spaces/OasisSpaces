@@ -33,6 +33,33 @@ async function open(url) {
 await open(page_url);
 check(await page.evaluate(() => window.oasisScene.pieces.size) === 3, "the scene's three pieces load");
 
+// ------------------------------------------------------------- generated models
+const generated = await page.evaluate(() => {
+  const { pieces } = window.oasisScene;
+  const bed = pieces.get("B0");
+  bed.group.updateMatrixWorld(true);
+  const box = new bed.group.position.constructor();
+  const bounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+  bed.generated.traverse((node) => {
+    if (!node.isMesh) return;
+    const position = node.geometry.attributes.position;
+    for (let i = 0; i < position.count; i++) {
+      box.fromBufferAttribute(position, i).applyMatrix4(node.matrixWorld);
+      box.toArray().forEach((v, k) => { bounds.min[k] = Math.min(bounds.min[k], v); bounds.max[k] = Math.max(bounds.max[k], v); });
+    }
+  });
+  const order = [];
+  window.oasisScene.select("B0");
+  for (let i = 0; i < 3; i++) { document.getElementById("swap").click(); order.push(bed.showing); }
+  return { bounds, looks: Object.keys(bed.looks), order, visible: bed.generated.visible };
+});
+check(generated.looks.join() === "scan,model,generated", "the bed has a scan, a clean model and a generated model");
+check(generated.bounds.min.every((v, k) => near(v, [0.5 - 0.7, 0, 0.2 - 1.0][k])) &&
+      generated.bounds.max.every((v, k) => near(v, [0.5 + 0.7, 0.5, 0.2 + 1.0][k])),
+      `the generated model, turned and scaled as recorded, fills the bed's box (${JSON.stringify(generated.bounds)})`);
+check(generated.order.join() === "model,generated,scan", `the swap button goes through all three (${generated.order})`);
+await page.evaluate(() => window.oasisScene.select(null));
+
 // ------------------------------------------------------------- colours
 // The colour on screen where the bed is: the screenshot read back in the page.
 async function bedPixel() {

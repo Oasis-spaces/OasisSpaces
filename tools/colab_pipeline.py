@@ -25,8 +25,9 @@ taught (Sep 2026), done the same way every time:
 Stage 4 runs as its steps, each its own job, fetched before the next:
 train-quick, train-long (saved every 10,000 steps and resumed from the newest
 save), choose-training, fill, scene (the mixed scene, built from the chosen
-training; being the agent's last step, it also brings Claude's capture
-advice); choose-best then runs here. A session installs
+training; it also brings Claude's capture advice), models (a TRELLIS model of
+every piece, kept in the scene only where it matches the frames as well as the
+plain box does: pipeline/model_fit.py); choose-best then runs here. A session installs
 only what its steps need, and the OpenSplat binary built on Colab is kept in
 tools/colab-cache/ and reused by later sessions with the same PyTorch and GPU.
 
@@ -60,7 +61,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # earlier splat of the video is; the scene does not wait for it, because it is
 # built from the space's own splat.ply, not from the published best.
 STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "train-spirula", "choose-training",
-         "fill", "scene"]
+         "fill", "scene", "models"]
 SPLAT_STEPS = STEPS[3:]
 # The notebook install cells each step needs. OpenSplat links OpenCV, which the
 # COLMAP cell installs, so training needs that cell too.
@@ -74,6 +75,7 @@ NEEDS = {
     "choose-training": ["install-python"],
     "fill": ["install-python"],
     "scene": ["install-python"],           # LaMa, as for fill
+    "models": ["install-python", "install-trellis"],
 }
 CACHE = ROOT / "tools" / "colab-cache"   # the OpenSplat binary built on Colab, reused
 OPENSPLAT_BIN = "/content/OpenSplat/build/opensplat"
@@ -82,13 +84,16 @@ REMOTE_VIDEOS = "/content/videos"
 REMOTE_WORK = "/content/oasis-run"
 RELAY = "/content/claude-relay"
 PART_BYTES = 20 * 1024 * 1024
-INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat", "install-mapanything"]
+INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat", "install-mapanything",
+                 "install-trellis"]
 # What the notebook's helper cell sets before running the agent.
 REMOTE_ENV = {
     "BLENDER": "/opt/blender/blender",
     "OPENSPLAT": "/content/OpenSplat/build/opensplat",
     "OASIS_RENDER_ENGINE": "CYCLES",
     "OASIS_CLAUDE_RELAY": RELAY,
+    "TRELLIS": "/content/TRELLIS",
+    "TRELLIS_DEPS": "/opt/trellis-deps",
 }
 # Kept on the VM only: COLMAP's database is rebuilt by reconstruct.py, and the
 # splat project is links plus a seed file rebuilt by splat_seed.py.
@@ -427,7 +432,8 @@ def wait_installs(vm: Colab, needed: list[str]) -> None:
 # step. A step that only reads them (fill and scene read splat.ply) gets them.
 REMADE_BY = {"choose-training": ("splat.ply", "splat.splat"),
              "fill": ("splat-filled.ply", "splat-filled.splat"),
-             "scene": ("scene/",)}
+             "scene": ("scene/",),
+             "models": ("object-models/", "scene/generated/")}
 
 
 def remade_by(stages: list[str]) -> tuple[str, ...]:

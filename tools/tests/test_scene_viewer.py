@@ -71,6 +71,10 @@ def make_scene(folder: Path) -> None:
     # The bed: 1.4 x 0.5 x 2.0 m, its anchor on the floor at its middle.
     splat(scene / "pieces" / "B0.splat", [-0.7, 0, -1.0], [0.7, 0.5, 1.0], (180, 60, 50))
     cuboid_glb(scene / "models" / "B0.glb", [-0.7, 0, -1.0], [0.7, 0.5, 1.0], (180, 60, 50))
+    # A generated model of it, as model_fit.py records one: in its own frame it is 1.0 x 0.25 x 0.7
+    # around (10.5, 0, 10.35), so at scale 2 turned 90 degrees it fills the bed's 1.4 x 0.5 x 2.0 box.
+    (scene / "generated").mkdir()
+    cuboid_glb(scene / "generated" / "B0.glb", [10.0, 0, 10.0], [11.0, 0.25, 10.7], (90, 70, 160))
     # A pillow on it, carried by it.
     splat(scene / "pieces" / "B1.splat", [-0.3, 0, -0.15], [0.3, 0.15, 0.15], (240, 240, 235), count=500, seed=1)
     splat(scene / "pieces" / "rest.splat", [-1.8, 0, -1.4], [-1.5, 1.0, -1.2], (90, 90, 90), count=500, seed=2)
@@ -79,7 +83,9 @@ def make_scene(folder: Path) -> None:
         "room": {"width": 4.0, "depth": 3.0, "height": 2.5}, "shell": "shell.glb",
         "pieces": [
             {"id": "B0", "file": "pieces/B0.splat", "label": "bed", "movable": True, "model": "models/B0.glb",
-             "show": "scan", "anchor": [0.5, 0, 0.2], "box": {"min": [-0.7, 0, -1.0], "max": [0.7, 0.5, 1.0]}},
+             "show": "scan", "anchor": [0.5, 0, 0.2], "box": {"min": [-0.7, 0, -1.0], "max": [0.7, 0.5, 1.0]},
+             "generated": {"file": "generated/B0.glb", "origin": [10.5, 0, 10.35], "scale": 2.0, "turnDegrees": 90.0,
+                           "offset": [0, 0, 0], "fit": {"iou": 0.81, "boxIou": 0.77, "views": 4}}},
             {"id": "B1", "file": "pieces/B1.splat", "label": "pillow", "movable": True, "on": "B0",
              "anchor": [0.5, 0.5, -0.5], "box": {"min": [-0.3, 0, -0.15], "max": [0.3, 0.15, 0.15]}},
             {"id": "rest", "file": "pieces/rest.splat", "label": "everything else", "movable": False,

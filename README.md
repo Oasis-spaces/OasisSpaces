@@ -356,7 +356,7 @@ the agent's judgement:
    Stage 4 runs as steps that can each run on their own
    (`--stage splat --splat-steps ...`): `train-quick`, `train-long` (saved every
    10,000 steps as `splat-long_<step>.ply` and resumed from the newest save),
-   `choose-training`, `fill` and `choose-best`. A splat already trained from the
+   `choose-training`, `fill`, `choose-best`, `scene` and `models`. A splat already trained from the
    current dense cloud is reused (`--retrain` trains again), so a run cut short
    carries on where it stopped. `pipeline/splat_export.py`
    then writes `splat.splat` beside `splat.ply`: the viewer's compact format,
@@ -385,7 +385,7 @@ on a Colab GPU through Google's Colab CLI (`colab`, signed in once):
 - **Installs:** the notebook's install cells run on the VM, only those the requested steps need.
 - **Claude:** checks are answered here through `tools/claude_relay.py`.
 - **Stages:** stages 1–3 and stage 4's steps each run as their own job, and the space's new files come back to `spaces/<space>` after each one (every 10 minutes during training).
-- **Mixed scene:** `scene` is the last step on the VM, cut from the space's chosen splat; being the agent's last step, it also brings Claude's capture advice.
+- **Mixed scene:** `scene` is cut from the space's chosen splat and brings Claude's capture advice; `models` then gives its pieces generated models (TRELLIS, its own install cell; see the mixed scene below).
 - **Best splat:** the choice runs here at the end, against every earlier splat of the video.
 - **OpenSplat:** the binary built on Colab is kept in `tools/colab-cache/` and reused.
 
@@ -535,9 +535,30 @@ Known limits: a piece only has the sides that were filmed, its lighting and
 shadows are baked in; a texture continued behind furniture is a plausible
 guess; furniture standing close to a wall can print onto the wall's texture
 (Claude's review paints such walls plain); the clean models are simple
-furniture, not reconstructions (a generated model per object, such as SAM 3D
-Objects on a GPU, would drop into `models/` the same way).
-Tests: `python3 tools/tests/test_mixed_scene.py`; `python3 tools/tests/test_scene_viewer.py`
+furniture, not reconstructions (the generated models below are the step
+towards those).
+
+**Generated models** (stage 4's `models` step, on a CUDA GPU: Colab). Each
+movable piece's best frames, from as many sides as the video walked, and its
+mask in each (cut from the scene's own piece) go to TRELLIS
+(`pipeline/object_models.py`, then `tools/object_mesh.py`; MIT code and
+weights, ungated), which makes a textured mesh of the object. What comes back
+is upright but at no particular size or facing, and on the walkthrough's
+cluttered, oblique pieces it was once a flat slab with clutter fused in, so
+nothing is taken on sight: `pipeline/model_fit.py` sizes it to the piece's
+measured height, turns it in 15° steps (then finer, with a little scale and
+shift) to the turn whose silhouettes through the job's real cameras best match
+the masks, and keeps it only when it agrees at least 0.5 (mean IoU) and no
+worse than the plain box model by more than 0.03. Kept ones go into
+`scene/generated/<id>.glb` with their placement in `scene.json`; a piece
+Claude asked to show as its clean model shows the generated one; the viewer's
+swap button (M) goes scan, clean model, generated model. Every fit, kept or
+not, is in `object-models/fits.json`, and the step's decision lists them.
+Without CUDA the step fits models a GPU made earlier, and skips otherwise.
+On its own: `python3 pipeline/model_fit.py spaces/<name>`.
+Tests: `python3 tools/tests/test_mixed_scene.py`; `python3 tools/tests/test_model_fit.py`
+(a chair found turned and sized from four masks alone, a flat slab losing to the
+box); `python3 tools/tests/test_scene_viewer.py`
 drives the viewer in headless Chromium on a small made-up scene (adding objects,
 colours on screen, saving and reopening a layout; skipped without node's
 `playwright` package); and `swift test` in `apps/OasisLink`.

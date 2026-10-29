@@ -136,7 +136,7 @@ Against "editable: deletable, colours, textures, dimensions, any object added":
 | Colours | Walls repainted from swatches or any colour (only the wall's own paint changes); library pieces recoloured; scene viewer: any piece, scanned or model, any colour at its own shading, saved with the layout | The same in the Mac app's editor and the phone |
 | Textures | Shell textures come from the frames (LaMa continues them); not user-editable | A texture picker for walls/floor (tile, wood, paint) applied to the shell's materials; UV-mapped shell |
 | Add any 3D object | Library furniture (sofa, bed, table, chair, desk, wardrobe, box, as blobs or cuboid models); scene viewer: any GLB, on the floor, in metres, height in cm, saved inside the layout, layouts reopen | USDZ; a native import in the Mac app's editor; a catalogue of generated models |
-| Clean furniture models | Cuboid models in the scan's colours; TRELLIS meshes on a GPU | Run the model job in the Colab flow by default; amodal completion (FIRE3D or Lucida-style) once released |
+| Clean furniture models | Cuboid models in the scan's colours; stage 4's `models` step runs TRELLIS in the Colab flow by default and keeps a mesh only where its silhouettes match the frames as well as the box's (`pipeline/model_fit.py`) | A first real run on Colab (the install cell and the fit are tested only off the GPU); amodal completion (FIRE3D or Lucida-style) once released |
 | Correct rooms every time | Measured score, rollback, repairs; passes on the pan | A wall score (do the cameras' walls meet the floor where the frames say?); ground truth from a tape measure of both rooms; SAM 3 when access is granted; scale anchors from known sizes (doors ~2.0 m) |
 | Tracking in every run | Colab only | Fit the walkthrough inside a session (fewer tracked names or a paid runtime), or a Mac path that batches objects |
 | Phone on both platforms | iPhone (iOS 18) | Android with ARCore feeding the same `capture-rules.json` and the same models exported for TFLite/NNAPI |
@@ -175,6 +175,7 @@ are gitignored: large, generated, or personal footage.)
 - `placement.py` — a piece placed by its masks: candidate boxes' silhouettes through the real cameras against the outlines.
 - `room_score.py` — the measured room score (agreement, collision, walk, doorway).
 - `object_models.py` — per-object jobs (a frame and a cut-out) for image-to-3D models.
+- `model_fit.py` — a generated model turned and sized to its piece by silhouettes through the real cameras, kept only when it agrees with the frames as well as the box does; written into the scene.
 - `pointcloud.py` — PLY I/O, downsampling, outlier removal.
 - `splat_seed.py`, `splat_export.py`, `splat_spirula.py` — OpenSplat project seeded from the dense cloud; compact `.splat` and starting view; Spirula Studio as a plug-in trainer.
 
@@ -186,7 +187,7 @@ are gitignored: large, generated, or personal footage.)
 - `mixed_scene.py`, `mesh_render.py`, `object_mesh.py` — the textured shell and movable pieces; GLB drawing; TRELLIS meshes on a GPU.
 - `evaluate_space.py`, `show_prompts.py` — scoring spaces; printing every question the pipeline asks Claude.
 - `colab_pipeline.py`, `claude_relay.py`, `paced_proxy.py` — the Colab driver, the Claude relay, the paced upload proxy for this network.
-- `tools/tests/` — thirteen test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture map, mirrors, mixed scene, phone objects, placement, pose priors, room score, room views, scene viewer (headless Chromium, `scene_viewer_check.mjs`), stage-1 gaps, structure review, tracking.
+- `tools/tests/` — fourteen test suites (`python3 tools/tests/test_<name>.py`): advisor parse, capture map, mirrors, mixed scene, model fit, phone objects, placement, pose priors, room score, room views, scene viewer (headless Chromium, `scene_viewer_check.mjs`), stage-1 gaps, structure review, tracking.
 - Gitignored but needed locally: `tools/opensplat` + `tools/default.metallib` (OpenSplat built for Metal, AGPL, patched), `tools/colab-cache/` (the OpenSplat binary built on Colab), `tools/spirula-studio/`.
 
 ### `apps/OasisCapture/` — the iPhone capture app
@@ -212,7 +213,7 @@ are gitignored: large, generated, or personal footage.)
 - `editor/index.html` — a browser point-cloud editor.
 
 ### Colab, scripts, docs
-- `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything), clone, Claude relay, upload, the four stages, download.
+- `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything, TRELLIS), clone, Claude relay, upload, the four stages, download.
 - `scripts/process_video.sh` — the whole chain without the agent; `scripts/make_sample.py` — a synthetic demo room.
 - `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed.
 - `splats/<video>/best.splat` — the published best splat of each test video.

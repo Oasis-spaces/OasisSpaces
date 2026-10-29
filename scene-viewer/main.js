@@ -52,8 +52,8 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 scene.environmentIntensity = 0.35;
 
-// id -> {info, group, proxy, row, size, splat, model, showing, home: {position, rotation},
-//        tint: "#rrggbb" or null, glb: an added object's file as a data: URL}
+// id -> {info, group, proxy, row, size, splat, model, generated, looks, showing,
+//        home: {position, rotation}, tint: "#rrggbb" or null, glb: an added object's file as a data: URL}
 const pieces = new Map();
 let manifest = null;
 let selected = null;
@@ -106,14 +106,15 @@ function addPiece(info, object = null) {
   group.position.fromArray(info.anchor);
   const splat = info.file ? new SplatMesh({ url: new URL(info.file, sceneURL).href }) : null;
   if (splat) group.add(splat);
-  // The clean stand-in, beside the scan: one of the two shows.
+  // The clean stand-in beside the scan, and a generated model where one fitted
+  // (pipeline/model_fit.py): one of them shows at a time.
   const model = new THREE.Group();
-  let modelReady = Promise.resolve();
+  const loads = [];
   if (object) {
     model.add(object);
     group.add(model);
   } else if (info.model) {
-    modelReady = new GLTFLoader().loadAsync(new URL(info.model, sceneURL).href).then((gltf) => {
+    loads.push(new GLTFLoader().loadAsync(new URL(info.model, sceneURL).href).then((gltf) => {
       // A photographed side (a wardrobe's doors, a table's top) holds the room's own light,
       // like the shell: drawn as it is, while the plain parts of the model take the lights.
       gltf.scene.traverse((node) => {
@@ -124,12 +125,28 @@ function addPiece(info, object = null) {
         }
       });
       model.add(gltf.scene);
-    });
+    }));
     group.add(model);
   }
-  const showing = object || (info.show === "model" && info.model) ? "model" : "scan";
-  if (splat) splat.visible = showing === "scan";
-  model.visible = showing === "model";
+  let generated = null;
+  if (info.generated) {
+    // offset + turn(scale * (vertex - origin)), in the piece's frame: as model_fit.py placed it.
+    const g = info.generated;
+    generated = new THREE.Group();
+    generated.position.fromArray(g.offset);
+    generated.rotation.y = THREE.MathUtils.degToRad(g.turnDegrees);
+    generated.scale.setScalar(g.scale);
+    loads.push(new GLTFLoader().loadAsync(new URL(g.file, sceneURL).href).then((gltf) => {
+      gltf.scene.position.set(-g.origin[0], -g.origin[1], -g.origin[2]);
+      generated.add(gltf.scene);
+    }));
+    group.add(generated);
+  }
+  const modelReady = Promise.all(loads);
+  const looks = Object.fromEntries(Object.entries({ scan: splat, model: object || info.model ? model : null, generated })
+    .filter(([, look]) => look));
+  const showing = looks[info.show] ? info.show : object ? "model" : "scan";
+  for (const [kind, look] of Object.entries(looks)) look.visible = kind === showing;
   const min = new THREE.Vector3().fromArray(info.box.min), max = new THREE.Vector3().fromArray(info.box.max);
   const size = max.clone().sub(min);
   let proxy = null;
@@ -151,7 +168,7 @@ function addPiece(info, object = null) {
   box.addEventListener("change", () => { group.visible = box.checked; if (!box.checked && selected === info.id) select(null); });
   row.addEventListener("click", (event) => { if (event.target !== box && info.movable && group.visible) { event.preventDefault(); select(info.id); } });
   document.getElementById(info.imported ? "added" : info.movable ? "furniture" : "fixed").append(row);
-  const piece = { info, group, proxy, row, size, splat, model, showing, modelReady, tint: null };
+  const piece = { info, group, proxy, row, size, splat, model, generated, looks, showing, modelReady, tint: null };
   pieces.set(info.id, piece);
   return piece;
 }
@@ -243,20 +260,23 @@ function textureAverage(map) {
   return colour;
 }
 
-// The piece's own colours, read once: the model's materials (linear, as three.js
+// The piece's own colours, read once: each model's materials (linear, as three.js
 // multiplies them) and the splat's colours (as stored), with their averages.
 async function ownColours(piece) {
   if (piece.own) return piece.own;
   await piece.modelReady;
-  const materials = materialsOf(piece.model);
-  let sum = 0;
-  for (const material of materials) {
-    material.userData.originalColor ??= material.color.clone();
-    const colour = material.userData.originalColor.clone();
-    if (material.map) colour.multiply(textureAverage(material.map));
-    sum += luma(colour);
-  }
-  const own = { materials, modelLuma: materials.length ? sum / materials.length : 0, splat: null, splatLuma: 0 };
+  const models = [piece.model, piece.generated].filter(Boolean).map((root) => {
+    const materials = materialsOf(root);
+    let sum = 0;
+    for (const material of materials) {
+      material.userData.originalColor ??= material.color.clone();
+      const colour = material.userData.originalColor.clone();
+      if (material.map) colour.multiply(textureAverage(material.map));
+      sum += luma(colour);
+    }
+    return { materials, luma: materials.length ? sum / materials.length : 0 };
+  });
+  const own = { models, splat: null, splatLuma: 0 };
   const packed = piece.splat && (await piece.splat.initialized, piece.splat.packedSplats);
   if (packed?.numSplats) {
     const rgb = new Float32Array(packed.numSplats * 3);
@@ -298,17 +318,19 @@ async function setTint(id, hex) {
     piece.splat.updateVersion();
   }
   const target = hex ? new THREE.Color(hex) : null;
-  for (const material of own.materials) {
-    const original = material.userData.originalColor;
-    material.color.copy(original);
-    if (!target) continue;
-    if (material.map) {
-      // Multiplied towards the colour, as far as the photograph's own colours allow.
-      const mean = textureAverage(material.map);
-      const k = (t, m) => THREE.MathUtils.clamp(t / Math.max(m, 0.02), 0, 4);
-      material.color.setRGB(k(target.r, mean.r), k(target.g, mean.g), k(target.b, mean.b));
-    } else {
-      material.color.copy(target).multiplyScalar(luma(original) / Math.max(own.modelLuma, 0.02));
+  for (const { materials, luma: average } of own.models) {
+    for (const material of materials) {
+      const original = material.userData.originalColor;
+      material.color.copy(original);
+      if (!target) continue;
+      if (material.map) {
+        // Multiplied towards the colour, as far as the photograph's own colours allow.
+        const mean = textureAverage(material.map);
+        const k = (t, m) => THREE.MathUtils.clamp(t / Math.max(m, 0.02), 0, 4);
+        material.color.setRGB(k(target.r, mean.r), k(target.g, mean.g), k(target.b, mean.b));
+      } else {
+        material.color.copy(target).multiplyScalar(luma(original) / Math.max(average, 0.02));
+      }
     }
   }
   piece.row.querySelector(".swatch").style.background = hex || "";
@@ -344,9 +366,11 @@ function select(id) {
   document.getElementById("sel-size").title =
     piece.info.onWhy || (carried.length ? "these move and hide with it" : "");
   const swap = document.getElementById("swap");
-  swap.hidden = !piece.info.model || !piece.splat;
-  swap.textContent = piece.showing === "scan" ? "Show clean model" : "Show the scan";
-  swap.title = piece.info.why || "";
+  swap.hidden = Object.keys(piece.looks).length < 2;
+  swap.textContent = SHOW[nextLook(piece)];
+  swap.title = [piece.info.why, piece.info.generated &&
+    `generated model: agrees ${piece.info.generated.fit.iou.toFixed(2)} with the video's frames, the plain model ${piece.info.generated.fit.boxIou.toFixed(2)}`]
+    .filter(Boolean).join(" · ");
   showTint(piece);
   document.getElementById("height-wrap").hidden = !piece.info.imported;
   document.getElementById("height").value = Math.round(size.y * 100);
@@ -422,14 +446,18 @@ renderer.domElement.addEventListener("pointermove", (event) => {
   piece.group.position.copy(target);
 });
 
+const SHOW = { scan: "Show the scan", model: "Show clean model", generated: "Show generated model" };
+function nextLook(piece) {
+  const kinds = Object.keys(piece.looks);
+  return kinds[(kinds.indexOf(piece.showing) + 1) % kinds.length];
+}
 function showAs(id, what) {
   const piece = pieces.get(id);
-  if (!piece || !piece.info.model || !piece.splat) return;
+  if (!piece || !piece.looks[what] || piece.info.imported) return;
   piece.showing = what;
-  piece.splat.visible = what === "scan";
-  piece.model.visible = what === "model";
+  for (const [kind, look] of Object.entries(piece.looks)) look.visible = kind === what;
   piece.row.querySelector(".count").textContent = what;
-  if (selected === id) document.getElementById("swap").textContent = what === "scan" ? "Show clean model" : "Show the scan";
+  if (selected === id) document.getElementById("swap").textContent = SHOW[nextLook(piece)];
 }
 
 function turn(degrees) {
@@ -451,8 +479,10 @@ function putBack(id) {
 document.getElementById("turn-left").onclick = () => turn(15);
 document.getElementById("turn-right").onclick = () => turn(-15);
 document.getElementById("hide").onclick = hideSelected;
-document.getElementById("swap").onclick = () => selected && showAs(selected, pieces.get(selected).showing === "scan" ? "model" : "scan");
-document.getElementById("all-models").onclick = () => { for (const p of pieces.values()) showAs(p.info.id, "model"); };
+document.getElementById("swap").onclick = () => selected && showAs(selected, nextLook(pieces.get(selected)));
+document.getElementById("all-models").onclick = () => {
+  for (const p of pieces.values()) showAs(p.info.id, p.looks.generated ? "generated" : "model");
+};
 document.getElementById("all-scans").onclick = () => { for (const p of pieces.values()) showAs(p.info.id, "scan"); };
 document.getElementById("menu").onclick = () => document.getElementById("panel").classList.toggle("open");
 document.getElementById("put-back").onclick = () => selected && putBack(selected);
@@ -543,7 +573,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "q" || event.key === "Q") turn(15);
   if (event.key === "e" || event.key === "E") turn(-15);
   if (event.key === "h" || event.key === "H" || event.key === "Delete" || event.key === "Backspace") hideSelected();
-  if (event.key === "m" || event.key === "M") selected && showAs(selected, pieces.get(selected).showing === "scan" ? "model" : "scan");
+  if (event.key === "m" || event.key === "M") selected && showAs(selected, nextLook(pieces.get(selected)));
   if (event.key === "Escape") select(null);
 });
 
