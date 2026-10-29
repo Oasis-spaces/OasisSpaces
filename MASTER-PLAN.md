@@ -137,7 +137,7 @@ Against "editable: deletable, colours, textures, dimensions, any object added":
 | Textures | Shell textures come from the frames (LaMa continues them); not user-editable | A texture picker for walls/floor (tile, wood, paint) applied to the shell's materials; UV-mapped shell |
 | Add any 3D object | Library furniture (sofa, bed, table, chair, desk, wardrobe, box, as blobs or cuboid models); scene viewer: any GLB, on the floor, in metres, height in cm, saved inside the layout, layouts reopen | USDZ; a native import in the Mac app's editor; a catalogue of generated models |
 | Clean furniture models | Cuboid models in the scan's colours; stage 4's `models` step runs TRELLIS in the Colab flow by default and keeps a mesh only where its silhouettes match the frames as well as the box's (`pipeline/model_fit.py`) | A first real run on Colab (the install cell and the fit are tested only off the GPU); amodal completion (FIRE3D or Lucida-style) once released |
-| Correct rooms every time | Measured score, rollback, repairs; passes on the pan | A wall score (do the cameras' walls meet the floor where the frames say?); ground truth from a tape measure of both rooms; SAM 3 when access is granted; scale anchors from known sizes (doors ~2.0 m) |
+| Correct rooms every time | Measured score, rollback, repairs; passes on the pan; SAM 3 wired in as the tracker (`--tracker auto`, SAM 2.1 when its gated weights do not load) | A wall score (do the cameras' walls meet the floor where the frames say?); ground truth from a tape measure of both rooms; SAM 3's first run on both rooms once access is granted, compared with SAM 2.1's labels; scale anchors from known sizes (doors ~2.0 m) |
 | Tracking in every run | Colab only | Fit the walkthrough inside a session (fewer tracked names or a paid runtime), or a Mac path that batches objects |
 | Phone on both platforms | iPhone (iOS 18) | Android with ARCore feeding the same `capture-rules.json` and the same models exported for TFLite/NNAPI |
 | Accounts and sharing | Supabase project, relay jobs table, a test user | Sign-in in the apps everywhere, scenes stored per account, links to share a room |
@@ -169,7 +169,7 @@ are gitignored: large, generated, or personal footage.)
 - `densify.py` — MoGe-2 metric depth fused over the poses; names and outlines per keyframe; tracking and mirror planes; writes `cloud-dense.ply` and `densify.json`.
 - `depth_maps.py` — MoGe-2 depth for every registered frame in the solve's units (for the phone's tools).
 - `semantics.py` — the object vocabulary and roles, GroundingDINO detector, SAM 2.1 outlines, pixel labels.
-- `tracking.py` — objects carried through the video with SAM 2.1's video model; votes, merges, doorish tracks.
+- `tracking.py` — objects carried through the video: SAM 3 finding and tracking the room's names (gated), or SAM 2.1's video model tracking GroundingDINO's finds; votes, merges, doorish tracks.
 - `mirrors.py` — the plane of a mirror's surroundings written into its outline.
 - `shapes.py` — planes and boxes from the labelled dense cloud (`shapes.json`).
 - `placement.py` — a piece placed by its masks: candidate boxes' silhouettes through the real cameras against the outlines.
@@ -232,7 +232,7 @@ pip3 install --break-system-packages --no-deps \
 - OpenSplat built locally for Metal into `tools/opensplat` with `tools/default.metallib` (the README's OpenSplat note; AGPL, kept out of git).
 - Blender on the path or `BLENDER=/path/to/blender` (the room build and the render check).
 - LaMa's `big-lama.pt` in `~/.cache/oasisspaces/` (downloaded on first use; the notebook fetches it on Colab).
-- Model weights download on first run from Hugging Face: MoGe-2 (`Ruicheng/moge-2-vitl-normal`), GroundingDINO-tiny, SAM 2.1 hiera-tiny. SAM 3 needs an access request on Hugging Face and a login (`huggingface-cli login`); it is not wired in yet.
+- Model weights download on first run from Hugging Face: MoGe-2 (`Ruicheng/moge-2-vitl-normal`), GroundingDINO-tiny, SAM 2.1 hiera-tiny. SAM 3 (`facebook/sam3`, the tracker densify prefers) needs an access request on Hugging Face and a login (`hf auth login`; the Colab driver copies it to the VM); without it densify tracks with SAM 2.1. TRELLIS (`microsoft/TRELLIS-image-large`, ungated) is fetched by the notebook's install-trellis cell.
 - **Claude:** the `claude` CLI signed in (Claude Code) — the agent's default backend, model `claude-opus-5`; or `ANTHROPIC_API_KEY` for the API backend. Without either the pipeline runs with its deterministic rules only.
 - Run one agent stage at a time on an 8 GB Mac: `python3 pipeline/agent.py videos/<video>.MOV --name <space> --stage reconstruct|densify|shapes|splat`.
 

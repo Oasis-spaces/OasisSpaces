@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import signal
 import subprocess
@@ -525,6 +526,31 @@ print(json.dumps(changed))
     return count
 
 
+def hugging_face_token() -> str | None:
+    """This Mac's Hugging Face login (HF_TOKEN, or what `hf auth login` saved)."""
+    if os.environ.get("HF_TOKEN"):
+        return os.environ["HF_TOKEN"].strip()
+    home = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
+    path = Path(os.environ.get("HF_TOKEN_PATH") or home / "token")
+    return path.read_text().strip() if path.is_file() and path.read_text().strip() else None
+
+
+def share_hugging_face_login(vm: Colab) -> None:
+    """SAM 3's weights are gated (facebook/sam3: request access, then log in):
+    the VM gets this Mac's login in its own token file, never on a command line,
+    which the driver's logs would show. Without one densify tracks with SAM 2.1."""
+    token = hugging_face_token()
+    if not token:
+        log("Hugging Face: not logged in here (hf auth login), so densify tracks with SAM 2.1, not SAM 3")
+        return
+    vm.python("import os\n"
+              "path = os.path.expanduser('~/.cache/huggingface/token')\n"
+              "os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+              f"open(path, 'w').write({token!r})\n"
+              "os.chmod(path, 0o600)\n", timeout=120)
+    log("Hugging Face: this Mac's login is on the VM (SAM 3 tracks when facebook/sam3 access is granted)")
+
+
 def remote_env() -> str:
     exports = [f"export {k}={shlex.quote(v)}" for k, v in REMOTE_ENV.items()]
     # OpenSplat links against Colab's PyTorch libraries.
@@ -661,6 +687,8 @@ def main() -> None:
         except RuntimeError as exc:
             log(f"  could not keep the OpenSplat binary ({exc})")
 
+    if "densify" in args.stages:
+        share_hugging_face_login(vm)
     relay_log = ROOT / "spaces" / f"{args.name}-relay.log"
     relay_log.parent.mkdir(parents=True, exist_ok=True)
     relay = subprocess.Popen([sys.executable, str(ROOT / "tools" / "claude_relay.py"),

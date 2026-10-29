@@ -33,6 +33,15 @@ The model runs object by object, which is fast on CUDA and slow on this Mac's
 GPU (about a second per object and frame), so densify runs it by default
 only on CUDA (--track on forces it elsewhere).
 
+SAM 3 (facebook/sam3, gated: an access request on Hugging Face and a login)
+does all of this in one model: given the room's names as text, it finds every
+object of each name in every frame and keeps one identity per object through
+the video (Promptable Concept Segmentation), where GroundingDINO only names
+~20 frames and is the source of the systematic mislabels (a door called a
+wardrobe two times in three). Sam3Tracker gives the same Tracks: one object,
+the name its frames voted for, an outline per frame. densify.py --tracker
+auto uses it when its weights can be loaded, and SAM 2.1 otherwise.
+
 Usage:
     python3 pipeline/tracking.py spaces/<name> [--sheet out.png] [--update-densify]
 """
@@ -51,6 +60,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from semantics import SEGMENTER_ID, default_device  # noqa: E402
 
 MASK_SIZE = 256           # the model's own mask raster, kept as the stored one
+SAM3_ID = "facebook/sam3"   # gated on Hugging Face: request access, then log in
+SAM3_WORK = 1008          # SAM 3's own input size: frames go to it at this longest side
 # The names worth carrying through the video: the pieces, the surfaces and the
 # openings a room model is made of. Clothes, bags and brushes are labelled per
 # keyframe as before; tracking costs frames x objects, and a walkthrough with
@@ -127,11 +138,12 @@ class Tracks:
     """What the tracker found: objects with a name each and an outline per frame."""
 
     def __init__(self, frames: list[str], size: tuple[int, int], tracks: list[dict],
-                 masks: dict[str, np.ndarray]):
+                 masks: dict[str, np.ndarray], model: str = SEGMENTER_ID):
         self.frames = frames                    # every frame name, in time order
         self.width, self.height = size
         self.tracks = tracks                    # [{id, label, votes, seed, frames: {name: {box, score}}}]
         self._masks = masks                     # "t<id>/<frame>" -> packed MASK_SIZE x MASK_SIZE bits
+        self.model = model                      # the video model that made them
 
     @staticmethod
     def key(track_id: int, frame: str) -> str:
@@ -200,13 +212,13 @@ class Tracks:
             labels[t["label"]] = labels.get(t["label"], 0) + 1
         return {"objects": len(self.tracks), "labels": labels, "frames": len(self.frames),
                 "frames_with_objects": sum(1 for f in self.frames if any(f in t["frames"] for t in self.tracks)),
-                "model": SEGMENTER_ID + " (video)"}
+                "model": self.model + " (video)"}
 
     def save(self, folder: Path) -> None:
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
         record = {"frames": self.frames, "width": self.width, "height": self.height,
-                  "mask_size": MASK_SIZE, "model": SEGMENTER_ID,
+                  "mask_size": MASK_SIZE, "model": self.model,
                   "tracks": [{**t, "frames": {n: {"box": [round(v, 1) for v in s["box"]], "score": s["score"]}
                                               for n, s in t["frames"].items()}} for t in self.tracks]}
         (folder / "tracks.json").write_text(json.dumps(record, indent=1) + "\n")
@@ -220,7 +232,8 @@ class Tracks:
         record = json.loads((folder / "tracks.json").read_text())
         with np.load(folder / "masks.npz") as stored:
             masks = {k: stored[k] for k in stored.files}
-        return cls(record["frames"], (record["width"], record["height"]), record["tracks"], masks)
+        return cls(record["frames"], (record["width"], record["height"]), record["tracks"], masks,
+                   record.get("model", SEGMENTER_ID))
 
 
 # ------------------------------------------------------------------ the tracker
@@ -363,7 +376,8 @@ class Tracker:
         return tracks
 
     @staticmethod
-    def finish(objects: dict, masks: dict, frames: list[str], width: int, height: int, log=print) -> Tracks:
+    def finish(objects: dict, masks: dict, frames: list[str], width: int, height: int, log=print,
+               model: str = SEGMENTER_ID) -> Tracks:
         """Merge objects tracing one thing; name each by its votes."""
         def unpack(obj_id, f):
             return np.unpackbits(masks[Tracks.key(obj_id, frames[f])])[:MASK_SIZE * MASK_SIZE].astype(bool)
@@ -407,7 +421,132 @@ class Tracker:
             tracks.append({"id": obj_id, "label": label, "votes": o["votes"], "seed": frames[o["seed"]],
                            "frames": {frames[f]: {"box": box, "score": score}
                                       for f, (box, score) in sorted(o["frames"].items())}})
-        return Tracks(frames, (width, height), tracks, masks)
+        return Tracks(frames, (width, height), tracks, masks, model)
+
+
+class Sam3Tracker:
+    """SAM 3's video model: the room's names as text prompts; every object of
+    each name found, outlined and carried through the video by the one model.
+
+    Each frame's outputs (an object's prompt, score, box and mask) become the
+    same records the SAM 2.1 tracker keeps, and Tracker.finish merges and names
+    them the same way. An object's name is the prompt it was found under; one
+    thing found under two names (a door as "door" and as "wardrobe") is two
+    objects tracing one outline, merged with both names' votes, so
+    Tracks.doorish still sees a door that lost the vote."""
+
+    def __init__(self, device: str | None = None):
+        import torch
+        from transformers import Sam3VideoModel, Sam3VideoProcessor
+
+        self.torch = torch
+        self.device = device or default_device()
+        # SAM 3 is trained in bfloat16; a T4 has none, and float16 overflows, so float32 there.
+        self.dtype = (torch.bfloat16 if self.device == "cuda" and torch.cuda.is_bf16_supported()
+                      else torch.float32)
+        self.processor = Sam3VideoProcessor.from_pretrained(SAM3_ID)
+        self.model = Sam3VideoModel.from_pretrained(SAM3_ID, dtype=self.dtype).to(self.device).eval()
+
+    def run(self, image_dir: Path, frames: list[str], names: list[str], log=print) -> Tracks:
+        """Find and track every object named in `names` through `frames`."""
+        from PIL import Image
+
+        image_dir = Path(image_dir)
+        width, height = Image.open(image_dir / frames[0]).size
+        scale = min(1.0, SAM3_WORK / max(width, height))
+        size = (round(width * scale), round(height * scale))
+        video = [Image.open(image_dir / f).convert("RGB").resize(size, Image.BILINEAR) for f in frames]
+        session = self.processor.init_video_session(video=video, inference_device=self.device,
+                                                    processing_device="cpu", video_storage_device="cpu",
+                                                    dtype=self.dtype)
+        self.processor.add_text_prompt(inference_session=session, text=list(names))
+        started = time.time()
+
+        def outputs():
+            with self.torch.no_grad():
+                for out in self.model.propagate_in_video_iterator(inference_session=session):
+                    result = self.processor.postprocess_outputs(session, out)
+                    if out.frame_idx and out.frame_idx % 25 == 0:
+                        rate = (time.time() - started) / out.frame_idx
+                        log(f"  {frames[out.frame_idx]}: {len(result['object_ids'])} objects, {rate:.1f} s a frame, "
+                            f"about {rate * (len(frames) - out.frame_idx) / 60:.0f} min to go")
+                    yield out.frame_idx, result
+
+        tracks = sam3_tracks(outputs(), frames, (width, height), scale, log)
+        log(f"  tracked {len(tracks.tracks)} objects through {len(frames)} frames "
+            f"in {(time.time() - started) / 60:.1f} min")
+        return tracks
+
+
+def as_numpy(value) -> np.ndarray:
+    """A tensor or a list as a numpy array (bfloat16 has no numpy type)."""
+    if hasattr(value, "detach"):
+        value = value.detach().float().cpu() if value.is_floating_point() else value.detach().cpu()
+        return value.numpy()
+    return np.asarray(value)
+
+
+def sam3_tracks(outputs, frames: list[str], size: tuple[int, int], scale: float, log=print) -> Tracks:
+    """SAM 3's processed outputs, (frame index, {object_ids, scores, boxes, masks,
+    prompt_to_obj_ids}) per frame at `scale` of the frames' size, as Tracks.
+
+    Votes: every frame an object shows in adds its score under its prompt,
+    weighted so that a whole video adds up like the detector's PROMPT_FRAMES
+    frames do, which keeps Tracks.doorish's vote thresholds meaning the same."""
+    from PIL import Image
+
+    width, height = size
+    weight = min(1.0, PROMPT_FRAMES / max(len(frames), 1))
+    objects: dict[int, dict] = {}
+    masks: dict[str, np.ndarray] = {}
+    for f, result in outputs:
+        prompt_of = {int(i): name for name, ids in result["prompt_to_obj_ids"].items()
+                     for i in as_numpy(ids).ravel()}
+        ids, scores = as_numpy(result["object_ids"]).ravel(), as_numpy(result["scores"]).ravel()
+        boxes, outlines = as_numpy(result["boxes"]).reshape(-1, 4), as_numpy(result["masks"])
+        for obj_id, score, box, mask in zip(ids, scores, boxes, outlines):
+            obj_id, mask = int(obj_id), np.asarray(mask) > 0
+            label = prompt_of.get(obj_id)
+            if label is None or mask.sum() < MIN_AREA_SHARE * mask.size:
+                continue
+            seen = objects.setdefault(obj_id, {"votes": {}, "seed": f, "frames": {}})
+            seen["seed"] = min(seen["seed"], f)
+            seen["votes"][label] = round(seen["votes"].get(label, 0.0) + float(score) * weight, 3)
+            seen["frames"][f] = ([float(v) / scale for v in box], round(float(score), 3))
+            square = Image.fromarray(mask.astype(np.uint8) * 255).resize((MASK_SIZE, MASK_SIZE), Image.NEAREST)
+            masks[Tracks.key(obj_id, frames[f])] = np.packbits(np.asarray(square) > 0)
+    return Tracker.finish(objects, masks, frames, width, height, log, model=SAM3_ID)
+
+
+TRACKERS = ("auto", "sam3", "sam2")
+
+
+def track(image_dir: Path, frames: list[str], prompts: dict[str, list[dict]], vocabulary,
+          choice: str = "auto", device: str | None = None, log=print) -> tuple[Tracks, dict]:
+    """The room's names (tracked_names) carried through `frames`; returns the
+    tracks and the detections of the names that are not tracked ({frame: dets}),
+    which keep their per-keyframe detections. `choice`: "sam3" finds and tracks
+    by name in one model; "sam2" tracks the detector's `prompts`; "auto" is SAM 3
+    when its weights load (access granted, logged in) and SAM 2.1 otherwise."""
+    tracked = tracked_names(vocabulary)
+    to_track, rest = split_prompts(prompts, tracked)
+    if choice in ("auto", "sam3"):
+        names = [n for n in vocabulary.names if n in tracked]
+        try:
+            tracker = Sam3Tracker(device)
+        except Exception as exc:     # gated and not granted, not logged in, or an older transformers
+            if choice == "sam3":
+                raise
+            log(f"SAM 3 not available ({str(exc).strip().splitlines()[0][:160]}); tracking with SAM 2.1")
+        else:
+            log(f"Object tracking: {SAM3_ID} (video) on {tracker.device} ({tracker.dtype}), "
+                f"{len(frames)} frames; finding and tracking " + ", ".join(names))
+            return tracker.run(image_dir, frames, names, log), rest
+    tracker = Tracker(device=device)
+    log(f"Object tracking: {SEGMENTER_ID} (video) on {tracker.device} ({tracker.dtype}), "
+        f"{len(prompts)} prompt frames of {len(frames)}; tracking "
+        + (", ".join(sorted({d["label"] for dets in to_track.values() for d in dets})) or "nothing"))
+    return tracker.run(image_dir, frames, to_track, log), rest
 
 
 # ------------------------------------------------------------------ for the eye
@@ -462,6 +601,9 @@ def main() -> None:
                         help="rewrite densify.json's detections from the tracks (the cloud's own "
                              "point labels stay as densified)")
     parser.add_argument("--prompt-frames", type=int, default=PROMPT_FRAMES)
+    parser.add_argument("--tracker", choices=TRACKERS, default="auto",
+                        help="sam3: find and track by name with SAM 3 (gated); sam2: track the "
+                             "detector's finds with SAM 2.1; auto: SAM 3 when it loads")
     args = parser.parse_args()
     from PIL import Image
 
@@ -483,11 +625,7 @@ def main() -> None:
         prompts[name] = detector.detect(Image.open(image_dir / name))
         print(f"  {name}: " + (", ".join(sorted({d['label'] for d in prompts[name]})) or "nothing"))
     del detector
-    to_track, rest = split_prompts(prompts, tracked_names(vocabulary))
-    tracker = Tracker()
-    print(f"Tracking with {SEGMENTER_ID} (video) on {tracker.device}, {tracker.dtype}: "
-          + ", ".join(sorted({d['label'] for dets in to_track.values() for d in dets})))
-    tracks = tracker.run(image_dir, frames, to_track)
+    tracks, rest = track(image_dir, frames, prompts, vocabulary, args.tracker)
     tracks.save(space / "workspace" / "tracks")
     for t in tracks.tracks:
         votes = ", ".join(f"{k} {v:.1f}" for k, v in sorted(t["votes"].items(), key=lambda kv: -kv[1]))

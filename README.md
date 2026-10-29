@@ -222,12 +222,23 @@ the agent's judgement:
    names did not finish inside a Colab session. The keyframes' points are labelled by those outlines;
    `workspace/tracks/` keeps every object's outline per frame, which the
    placement search below scores against instead of a dozen keyframes; and
-   `densify.json`'s `detections` list every frame each object shows in. Meta's
-   SAM 3 would do the detecting and tracking in one model, but its weights
-   are handed out on request only, so the tracker takes GroundingDINO's
-   detections; swapping the detector is the one change when they come. The
+   `densify.json`'s `detections` list every frame each object shows in. The
    model runs object by object, fast on CUDA and about a second an object and
    frame on a Mac's GPU, hence the default.
+   **SAM 3** (`--tracker auto|sam3|sam2`, default auto) does the detecting and
+   the tracking in one model: given the room's names as text it finds every
+   object of each name in every frame and keeps one identity per object, so
+   the names no longer rest on GroundingDINO's twenty frames, the source of
+   the door-as-wardrobe mislabels. `auto` uses it when its weights load and
+   SAM 2.1 otherwise (said in the log); `sam3` never falls back to SAM 2.1 (if SAM 3
+   will not load, densify goes on without tracking and logs why).
+   Its weights are gated: request access at huggingface.co/facebook/sam3, then
+   `hf auth login` (the Colab driver copies this Mac's login to the VM; in the
+   notebook, an `HF_TOKEN` secret). Its tracks are the same records (names by
+   per-frame votes, weighted to count like the detector's twenty frames, so a
+   door found as "door" and "wardrobe" is still merged and still a door), and
+   `densify.json` says which model made them. GroundingDINO still names the
+   untracked things (clothes, bags) per keyframe. Not yet run on the test rooms.
 3. `pipeline/shapes.py` and `tools/classify_shapes.py` — planes and boxes.
    Walls come from RANSAC; the floor and ceiling are the lowest upward-facing
    and highest downward-facing height levels inside the walls, so a strip of
