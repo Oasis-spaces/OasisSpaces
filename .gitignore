@@ -31,3 +31,4 @@ runs/
 
 # Spirula Studio release (plug-in trainer for stage 4; GPL-3.0, run as a separate program)
 tools/spirula-studio/
+benchmark/
