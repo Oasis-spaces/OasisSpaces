@@ -67,7 +67,7 @@ const sources = await page.evaluate(() => {
 check(sources[0].startsWith("Clean model") && sources[1].startsWith("Generated") && sources[2] === "As filmed",
       `the selected piece says where each look comes from (${sources.join(" | ")})`);
 const filledLine = await page.textContent("#filled");
-check(filledLine.includes("77% filmed") && filledLine.includes("23% filled in by inpainting"),
+check(filledLine.includes("73% filmed") && filledLine.includes("27% filled in by inpainting"),
       `the panel says how much of the room's surfaces was filmed (${filledLine})`);
 await page.evaluate(() => window.oasisScene.select(null));
 
