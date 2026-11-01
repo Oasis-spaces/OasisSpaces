@@ -531,6 +531,60 @@ def quad(surface, frame: Frame):
     return positions, np.tile(normal.astype(np.float32), (4, 1)), uvs, indices
 
 
+def inside_polygons(polygons, xy: np.ndarray) -> np.ndarray:
+    """Even-odd test of many points against an outline's polygons."""
+    hit = np.zeros(len(xy), bool)
+    x, y = xy[:, 0], xy[:, 1]
+    for poly in polygons:
+        P = np.asarray(poly, float)
+        for (x0, y0), (x1, y1) in zip(P, np.roll(P, -1, axis=0)):
+            if y0 == y1:
+                continue
+            crosses = ((y0 > y) != (y1 > y)) & (x < x0 + (y - y0) * (x1 - x0) / (y1 - y0))
+            hit ^= crosses
+    return hit
+
+
+def surface_inside(surface, polygons) -> np.ndarray:
+    """(rows, cols) mask of a floor or ceiling's texels inside the outline."""
+    return inside_polygons(polygons, surface.points()[:, :2]).reshape(surface.rows, surface.cols)
+
+
+def outline_mesh(surface, frame: Frame, polygons):
+    """A floor or ceiling cut to the room's outline: the outline's corners split
+    its box into a grid of rectangles, and those inside are kept. Texture
+    coordinates are those of the full rectangle (see quad), so the same image
+    fits."""
+    width, height = surface.cols * surface.cell, surface.rows * surface.cell
+    to_uv = lambda xy: np.column_stack([(xy - surface.origin[:2]) @ surface.u[:2] / width,   # noqa: E731
+                                        (xy - surface.origin[:2]) @ surface.v[:2] / height])
+    corners = np.vstack([np.asarray(p, float) for p in polygons])
+    us = np.unique(np.clip(np.r_[to_uv(corners)[:, 0], 0, 1], 0, 1).round(6))
+    vs = np.unique(np.clip(np.r_[to_uv(corners)[:, 1], 0, 1], 0, 1).round(6))
+    to_xy = lambda uv: (surface.origin[:2] + uv[:, :1] * width * surface.u[:2]       # noqa: E731
+                        + uv[:, 1:] * height * surface.v[:2])
+    positions, uvs, indices = [], [], []
+    normal = frame.direction(surface.normal)
+    for u0, u1 in zip(us[:-1], us[1:]):
+        for v0, v1 in zip(vs[:-1], vs[1:]):
+            mid = to_xy(np.array([[(u0 + u1) / 2, (v0 + v1) / 2]]))
+            if not inside_polygons(polygons, mid)[0]:
+                continue
+            uv = np.array([[u0, v0], [u1, v0], [u0, v1], [u1, v1]])
+            xyz = np.column_stack([to_xy(uv), np.full(4, surface.origin[2])])
+            p = frame.scene_to_viewer(xyz).astype(np.float32)
+            facing = np.cross(p[1] - p[0], p[2] - p[0]) @ normal
+            k = len(positions) * 4
+            indices += [k, k + 1, k + 2, k + 2, k + 1, k + 3] if facing > 0 else [k, k + 2, k + 1, k + 2, k + 3, k + 1]
+            positions.append(p)
+            uvs.append(uv.astype(np.float32))
+    if not positions:
+        return quad(surface, frame)
+    positions = np.vstack(positions)
+    return (positions, np.tile(normal.astype(np.float32), (len(positions), 1)), np.vstack(uvs),
+            np.array(indices, np.uint16))
+
+
 def write_glb(path: Path, meshes: list) -> None:
     """A binary glTF 2.0 file: one textured quad per surface, the images inside."""
     blob = bytearray()
@@ -990,13 +1044,20 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     (out / "provenance").mkdir(parents=True, exist_ok=True)
     for old in (out / "provenance").glob("*.png"):
         old.unlink()
+    # The room's outline (pipeline/room_outline.py): the floor and ceiling are cut to it,
+    # and only what lies inside counts towards their area and how much of them was filmed.
+    outline = (room.shapes.get("outline") or {}).get("polygons")
     for surface, known, (photo, _s, _t), final in zip(surfaces, knowns, photos, finished):
         use = surface_use.get(surface.name, "keep")
         codes = provenance_map(known, use)
         provenance_png(codes).save(out / "provenance" / f"{surface.name}.png")
+        within = (surface_inside(surface, outline) if outline and surface.name in ("floor", "ceiling")
+                  else np.ones(codes.shape, bool))
+        if not within.any():
+            within = np.ones(codes.shape, bool)
         surface_list.append({"name": surface.name, "use": use, "mask": f"provenance/{surface.name}.png",
-                             "areaM2": round(float(surface.rows * surface.cols * (surface.cell / m) ** 2), 2),
-                             **{k: round(float((codes == c).mean()), 3)
+                             "areaM2": round(float(within.sum() * (surface.cell / m) ** 2), 2),
+                             **{k: round(float((codes[within] == c).mean()), 3)
                                 for k, c in (("observed", OBSERVED), ("inferred", INFERRED), ("generated", GENERATED))}})
         flat = np.median(photo[known], axis=0) if known.mean() > 0.05 else (paint if paint is not None else np.array([200.0] * 3))
         if use == "plain":
@@ -1014,7 +1075,9 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         Image.fromarray(image).save(jpeg, "JPEG", quality=92)
         (out / "textures" / f"{surface.name}.jpg").write_bytes(jpeg.getvalue())
         kind = "wall" if surface.name.startswith("wall") else surface.name
-        meshes.append({"name": surface.name, "quad": quad(surface, frame), "jpeg": jpeg.getvalue(),
+        cut = outline if surface.name in ("floor", "ceiling") else None
+        meshes.append({"name": surface.name, "quad": outline_mesh(surface, frame, cut) if cut else quad(surface, frame),
+                       "jpeg": jpeg.getvalue(),
                        "roughness": ROUGHNESS[kind]})
     write_glb(out / "shell.glb", meshes)
     log(f"wrote shell.glb: {len(meshes)} surfaces, {(out / 'shell.glb').stat().st_size / 1e6:.1f} MB")

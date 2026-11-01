@@ -36,6 +36,7 @@ from pathlib import Path
 from statistics import median
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pipeline"))
+from room_outline import inside as inside_outline  # noqa: E402
 from semantics import Vocabulary, room_vocabulary  # noqa: E402
 
 # --------------------------------------------------------------------------
@@ -178,6 +179,41 @@ def outside_room(box: dict, room: dict) -> bool:
     dv = (x - room["center"][0]) * room["axis_v"][0] + (y - room["center"][1]) * room["axis_v"][1]
     margin = OUTSIDE_ROOM_MARGIN_FRAC * max(room["half_u"], room["half_v"])
     return abs(du) > room["half_u"] + margin or abs(dv) > room["half_v"] + margin
+
+
+# shapes.json may carry the room's outline from above (pipeline/room_outline.py):
+# the floor actually seen, cut at doors, any shape. A wall or a piece of
+# furniture with no part this close to it stands in a space seen through a door.
+OUTLINE_MARGIN_METRES = 0.30
+OUTLINE_MARGIN_FRAC = 0.06      # of the outline's larger side, without a metric scale
+
+
+def outline_margin(outline: dict, units_per_metre: float | None) -> float:
+    if units_per_metre:
+        return OUTLINE_MARGIN_METRES * units_per_metre
+    xs = [p[0] for poly in outline["polygons"] for p in poly]
+    ys = [p[1] for poly in outline["polygons"] for p in poly]
+    return OUTLINE_MARGIN_FRAC * max(max(xs) - min(xs), max(ys) - min(ys))
+
+
+def near_outline(outline: dict, x: float, y: float, margin: float) -> bool:
+    return any(inside_outline(outline["polygons"], x + dx, y + dy)
+               for dx, dy in ((0, 0), (margin, 0), (-margin, 0), (0, margin), (0, -margin)))
+
+
+def wall_near_outline(plane: dict, outline: dict, margin: float) -> bool:
+    """Whether any stretch of a wall touches the outline (a wall shared with the
+    next room only half lies along this one)."""
+    c, a = plane["center"], plane["axis_a"]
+    return any(near_outline(outline, c[0] + t * plane["half_a"] * a[0], c[1] + t * plane["half_a"] * a[1], margin)
+               for t in (-0.9, -0.5, 0.0, 0.5, 0.9))
+
+
+def box_outside(box: dict, room: dict | None, outline: dict | None, margin: float) -> bool:
+    if outline:
+        x, y, _ = box_center(box)
+        return not near_outline(outline, x, y, margin)
+    return bool(room) and outside_room(box, room)
 
 
 def fit_plane_to_room(plane: dict, room: dict) -> None:
@@ -555,6 +591,61 @@ def close_room(walls: list[dict], boxes: list[dict], room: dict, size) -> list[s
     return notes
 
 
+# Along the outline, a stretch no measured wall covers gets an inferred wall,
+# except a gap in the middle of a side no wider than a door: a doorway, which
+# is where the outline was cut from the next space.
+DOOR_MAX_METRES = 1.30
+DOOR_MAX_FRAC = 0.25            # of the room's width, without a metric scale
+MIN_GAP_METRES = 0.30
+MIN_GAP_FRAC = 0.06
+
+
+def close_outline(walls: list[dict], room: dict, outline: dict, size, units_per_metre=None) -> list[str]:
+    """Give every side of the room's outline a wall: a stretch no measured wall
+    covers (the camera never faced it, or the room turns a corner the
+    rectangle could not) gets an inferred wall on the outline, marked as a guess."""
+    width = 2 * min(room["half_u"], room["half_v"])
+    tol = WALL_ON_SIDE_FRAC * width
+    door_max = DOOR_MAX_METRES * units_per_metre if units_per_metre else DOOR_MAX_FRAC * width
+    min_gap = MIN_GAP_METRES * units_per_metre if units_per_metre else MIN_GAP_FRAC * width
+    notes, added = [], []
+    for poly in outline["polygons"]:
+        for i in range(len(poly)):
+            p0, p1 = poly[i], poly[(i + 1) % len(poly)]
+            a0, a1 = to_room(room, p0), to_room(room, p1)
+            if abs(a1[0] - a0[0]) >= abs(a1[1] - a0[1]):
+                along, offset, (lo, hi) = "u", (a0[1] + a1[1]) / 2, sorted((a0[0], a1[0]))
+            else:
+                along, offset, (lo, hi) = "v", (a0[0] + a1[0]) / 2, sorted((a0[1], a1[1]))
+            covered = sorted((max(lo, w["lo"]), min(hi, w["hi"])) for w in walls + added
+                             if w["along"] == along and abs(w["offset"] - offset) <= tol
+                             and w["hi"] > lo and w["lo"] < hi)
+            gaps, at = [], lo
+            for c0, c1 in covered:
+                if c0 > at:
+                    gaps.append((at, c0))
+                at = max(at, c1)
+            if at < hi:
+                gaps.append((at, hi))
+            dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+            length = math.hypot(dx, dy) or 1.0
+            inward = [-dy / length, dx / length, 0.0]          # the outline runs anticlockwise
+            for g0, g1 in gaps:
+                if g1 - g0 < min_gap:
+                    continue
+                if g0 > lo + tol and g1 < hi - tol and g1 - g0 <= door_max:
+                    continue                                    # a doorway
+                plane = {"kind": "wall", "label": "wall", "source": "inferred", "points": 0,
+                         "color": INFERRED_WALL_COLOR, "build": True,
+                         "reason": "inferred: no wall was seen along this side of the room's outline",
+                         "normal": inward}
+                added.append({"plane": plane, "along": along, "offset": offset, "lo": g0, "hi": g1})
+                notes.append(f"added an inferred wall along the outline ({size(g1 - g0)} long), "
+                             "where no wall was seen")
+    walls.extend(added)
+    return notes
+
+
 # A bed's head end within this distance of a wall (or of a wardrobe in front
 # of one) is taken to touch it: the headboard and pillows hide that stretch.
 HEAD_SNAP_METRES = 0.60
@@ -664,7 +755,9 @@ def finish_room(data: dict, units_per_metre: float | None = None,
     notes += contain_furniture(walls, furniture, room, size)
     join_corners(walls, room)
     before = len(walls)
-    notes += close_room(walls, furniture, room, size)
+    outline = data.get("outline")
+    notes += (close_outline(walls, room, outline, size, units_per_metre) if outline
+              else close_room(walls, furniture, room, size))
     join_corners(walls, room)
     place_walls(walls, room, floor_z, height)
     planes.extend(w["plane"] for w in walls[before:])
@@ -674,6 +767,8 @@ def finish_room(data: dict, units_per_metre: float | None = None,
     for plane in planes:
         if plane.get("label") in ("floor", "ceiling"):
             fit_plane_to_room(plane, final)
+            if outline:
+                plane["outline"] = outline["polygons"]
     data["room"] = final
     notes += orient_furniture(furniture, final, size, units_per_metre)
     notes.append(f"room {size(2 * final['half_u'])} x {size(2 * final['half_v'])}, "
@@ -1065,6 +1160,17 @@ def main(argv: list[str] | None = None) -> int:
     plane_labels, plane_reasons, ctx = classify_planes(planes, units_per_metre)
     for plane, label in zip(planes, plane_labels):
         plane["label"] = label
+    outline = data.get("outline")
+    margin = outline_margin(outline, units_per_metre) if outline else 0.0
+    if outline:
+        for i, (plane, label) in enumerate(zip(planes, plane_labels)):
+            if label == "wall" and plane.get("build", True) and not wall_near_outline(plane, outline, margin):
+                plane["build"] = False
+                plane["reason"] = "outside the room's outline: a wall of a space seen through a door"
+                print(f"left out W{i}: it stands outside the room's outline, in a space seen through a door")
+        if ctx.room:
+            ctx.room = room_footprint([p for p, lab in zip(planes, plane_labels)
+                                       if lab == "wall" and p.get("build", True)]) or ctx.room
     if ctx.room:
         squared = square_up_room(planes, plane_labels, ctx, data.get("cameras"))
         # Re-measure the footprint from the squared walls so the floor meets
@@ -1082,7 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
     box_results = []
     for box in boxes:
         label, why, metrics = classify_box(box, ctx)
-        if ctx.room and outside_room(box, ctx.room):
+        if box_outside(box, ctx.room, outline, margin):
             box_results.append(("clutter", "outside the room the walls enclose: part of "
                                 "a neighbouring space seen through a door", metrics))
             continue

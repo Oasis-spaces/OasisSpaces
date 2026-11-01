@@ -29,6 +29,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 from densify import read_images_bin
 from pointcloud import load_ply, space_model_dir
+import room_outline
 from room_up import WARN_DEGREES, angle_between, camera_up, max_correction, refine_up
 from semantics import room_vocabulary
 
@@ -561,6 +562,24 @@ def main():
             members = leftover[groups == group]
             if len(members) >= len(P) * 0.005:
                 add_box(members, "geometry")
+
+    # The room's outline from above, any shape (pipeline/room_outline.py): what
+    # the floor, ceiling and walls seen say, cut at doors to the spaces the phone
+    # stood in. The scene is turned to the walls, so it is found along x and y.
+    if "floor" in levels and shapes.get("cameras"):
+        unit = units_per_metre or ((levels["ceiling"] - levels["floor"]) / 2.6 if "ceiling" in levels else None)
+        if unit:
+            height = levels["ceiling"] - levels["floor"] if "ceiling" in levels else 2.5 * unit
+            found_outline = room_outline.outline(P, levels["floor"], height, shapes["cameras"], unit=unit, angle=0.0)
+            if found_outline:
+                shapes["outline"] = {"polygons": found_outline["polygons"],
+                                     "area": round(found_outline["area"], 4),
+                                     "parts": found_outline["parts"],
+                                     "droppedArea": round(found_outline["dropped_area"], 4)}
+                corners = sum(len(p) for p in found_outline["polygons"])
+                print(f"room outline: {found_outline['area'] / unit ** 2:.1f} m² in "
+                      f"{len(found_outline['polygons'])} polygon(s), {corners} corners; "
+                      f"{found_outline['dropped_area'] / unit ** 2:.1f} m² seen through doors left out")
 
     out = space / "shapes.json"
     out.write_text(json.dumps(shapes, indent=1))
