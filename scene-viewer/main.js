@@ -5,6 +5,9 @@
 // colour of their own. Any GLB can be added to the room as a piece like the
 // others, and a saved layout (where everything is, its colour, the added
 // objects themselves) opens again with "Load layout" or ?layout=<url>.
+// What was filmed and what was filled in stays visible: each look of a piece says
+// where it came from, and "Show filled areas" tints the shell where nothing was
+// filmed (amber: plain paint continued; magenta: invented by the inpainting model).
 // Everything is in metres, y up, the room's centre on the floor at the origin
 // (see tools/mixed_scene.py, which writes scene.json).
 import * as THREE from "three";
@@ -70,10 +73,12 @@ async function load() {
     `${manifest.room.width.toFixed(2)} × ${manifest.room.depth.toFixed(2)} m, ${manifest.room.height.toFixed(2)} m high`;
   document.title = `${manifest.space} · Oasis scene`;
   if (manifest.summary) document.getElementById("summary").textContent = manifest.summary;
+  describeSurfaces();
 
   const shell = await new GLTFLoader().loadAsync(new URL(manifest.shell, sceneURL).href);
   shell.scene.traverse((node) => {
     if (node.isMesh) {
+      shellMeshes.set(node.name, node);
       const map = node.material.map;
       map.anisotropy = renderer.capabilities.getMaxAnisotropy();
       node.material = new THREE.MeshBasicMaterial({ map, side: THREE.FrontSide });
@@ -171,6 +176,49 @@ function addPiece(info, object = null) {
   const piece = { info, group, proxy, row, size, splat, model, generated, looks, showing, modelReady, tint: null };
   pieces.set(info.id, piece);
   return piece;
+}
+
+// --------------------------------------------------------------- provenance
+// Where each look of a piece comes from, as the Knowledge Book labels content.
+const LOOK_SOURCE = {
+  observed: ["As filmed", "The scan: what the video's frames measured"],
+  inferred: ["Clean model · from the measured box", "Built to the size and colours the scan measured"],
+  generated: ["Generated · not a measurement", "Made by an image-to-3D model from the frames; its size is fitted, not measured"],
+  added: ["Added object", "Brought in from a file, not from the scan"],
+};
+const shellMeshes = new Map();   // surface name -> its mesh in shell.glb
+let filledShown = false;
+function lookSource(piece) {
+  if (piece.info.imported) return "added";
+  return (piece.info.provenance || {})[piece.showing] || { scan: "observed", model: "inferred", generated: "generated" }[piece.showing];
+}
+function describeSurfaces() {
+  const list = manifest.surfaces || [];
+  const line = document.getElementById("filled");
+  const button = document.getElementById("show-filled");
+  if (!list.length) { line.hidden = true; button.hidden = true; return; }
+  const area = list.reduce((n, x) => n + (x.areaM2 || 1), 0);
+  const share = (k) => Math.round(100 * list.reduce((n, x) => n + (x[k] || 0) * (x.areaM2 || 1), 0) / area);
+  line.textContent = `Walls, floor and ceiling: ${share("observed")}% filmed, ${share("inferred")}% plain paint continued, ${share("generated")}% filled in by inpainting`;
+}
+async function showFilled(on) {
+  filledShown = on;
+  for (const surface of manifest.surfaces || []) {
+    const mesh = shellMeshes.get(surface.name);
+    if (!mesh || !surface.mask) continue;
+    if (!mesh.userData.overlay) {
+      const map = await new THREE.TextureLoader().loadAsync(new URL(surface.mask, sceneURL).href);
+      map.flipY = false;                                  // glTF's texture convention, like the shell's own
+      map.colorSpace = THREE.SRGBColorSpace;
+      const overlay = new THREE.Mesh(mesh.geometry, new THREE.MeshBasicMaterial({ map, transparent: true, depthWrite: false,
+        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+      overlay.renderOrder = 1;
+      mesh.add(overlay);
+      mesh.userData.overlay = overlay;
+    }
+    mesh.userData.overlay.visible = on;
+  }
+  document.getElementById("show-filled").textContent = on ? "Hide filled areas" : "Show filled areas";
 }
 
 // ------------------------------------------------------------ added objects
@@ -368,6 +416,7 @@ function select(id) {
   const swap = document.getElementById("swap");
   swap.hidden = Object.keys(piece.looks).length < 2;
   swap.textContent = SHOW[nextLook(piece)];
+  showSource(piece);
   swap.title = [piece.info.why, piece.info.generated &&
     `generated model: agrees ${piece.info.generated.fit.iou.toFixed(2)} with the video's frames, the plain model ${piece.info.generated.fit.boxIou.toFixed(2)}`]
     .filter(Boolean).join(" · ");
@@ -447,6 +496,12 @@ renderer.domElement.addEventListener("pointermove", (event) => {
 });
 
 const SHOW = { scan: "Show the scan", model: "Show clean model", generated: "Show generated model" };
+function showSource(piece) {
+  const chip = document.getElementById("sel-source");
+  const kind = lookSource(piece);
+  const [text, title] = LOOK_SOURCE[kind] || ["", ""];
+  chip.textContent = text; chip.title = title; chip.dataset.kind = kind || "";
+}
 function nextLook(piece) {
   const kinds = Object.keys(piece.looks);
   return kinds[(kinds.indexOf(piece.showing) + 1) % kinds.length];
@@ -457,7 +512,7 @@ function showAs(id, what) {
   piece.showing = what;
   for (const [kind, look] of Object.entries(piece.looks)) look.visible = kind === what;
   piece.row.querySelector(".count").textContent = what;
-  if (selected === id) document.getElementById("swap").textContent = SHOW[nextLook(piece)];
+  if (selected === id) { document.getElementById("swap").textContent = SHOW[nextLook(piece)]; showSource(piece); }
 }
 
 function turn(degrees) {
@@ -559,6 +614,7 @@ document.getElementById("load").onclick = () => { picker.accept = ".json"; picke
 picker.onchange = () => { addFiles([...picker.files]); picker.value = ""; };
 window.addEventListener("dragover", (event) => event.preventDefault());
 window.addEventListener("drop", (event) => { event.preventDefault(); addFiles([...event.dataTransfer.files]); });
+document.getElementById("show-filled").onclick = () => showFilled(!filledShown);
 document.getElementById("tint").oninput = (event) => selected && setTint(selected, event.target.value);
 document.getElementById("untint").onclick = () => selected && setTint(selected, null);
 document.getElementById("height").onchange = (event) => {
@@ -629,6 +685,6 @@ renderer.setAnimationLoop(() => {
 });
 
 // For checks from outside (the apps, tools/tests/test_scene_viewer.py).
-window.oasisScene = { pieces, scene, camera, select, addObject, setTint, currentLayout, applyLayout,
+window.oasisScene = { pieces, scene, camera, select, addObject, setTint, currentLayout, applyLayout, showFilled, shellMeshes,
                       ready: () => status.classList.contains("done") };
 load().catch((error) => { status.textContent = `Could not load the scene: ${error.message}`; console.error(error); });

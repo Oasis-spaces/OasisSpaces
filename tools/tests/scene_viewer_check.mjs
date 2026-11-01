@@ -58,7 +58,45 @@ check(generated.bounds.min.every((v, k) => near(v, [0.5 - 0.7, 0, 0.2 - 1.0][k])
       generated.bounds.max.every((v, k) => near(v, [0.5 + 0.7, 0.5, 0.2 + 1.0][k])),
       `the generated model, turned and scaled as recorded, fills the bed's box (${JSON.stringify(generated.bounds)})`);
 check(generated.order.join() === "model,generated,scan", `the swap button goes through all three (${generated.order})`);
+const sources = await page.evaluate(() => {
+  const out = [];
+  window.oasisScene.select("B0");
+  for (let i = 0; i < 3; i++) { document.getElementById("swap").click(); out.push(document.getElementById("sel-source").textContent); }
+  return out;
+});
+check(sources[0].startsWith("Clean model") && sources[1].startsWith("Generated") && sources[2] === "As filmed",
+      `the selected piece says where each look comes from (${sources.join(" | ")})`);
+const filledLine = await page.textContent("#filled");
+check(filledLine.includes("77% filmed") && filledLine.includes("23% filled in by inpainting"),
+      `the panel says how much of the room's surfaces was filmed (${filledLine})`);
 await page.evaluate(() => window.oasisScene.select(null));
+
+// ------------------------------------------------------------- filled areas
+// The floor's right half (+x) was invented: tinted magenta when filled areas show, its left half untouched.
+async function floorPixels() {
+  const at = await page.evaluate(() => {
+    const { camera } = window.oasisScene;
+    const project = (x, z) => { const v = camera.position.clone().set(x, 0.001, z).project(camera); return [Math.round((v.x + 1) / 2 * innerWidth), Math.round((1 - v.y) / 2 * innerHeight)]; };
+    return [project(1.6, 1.2), project(-1.6, 1.2)];
+  });
+  await page.waitForTimeout(500);
+  const shot = (await page.screenshot()).toString("base64");
+  return page.evaluate(async ([data, pts]) => {
+    const image = new Image(); image.src = `data:image/png;base64,${data}`; await image.decode();
+    const canvas = document.createElement("canvas"); canvas.width = image.width; canvas.height = image.height;
+    const context = canvas.getContext("2d"); context.drawImage(image, 0, 0);
+    return pts.map(([x, y]) => Array.from(context.getImageData(x, y, 1, 1).data.slice(0, 3)));
+  }, [shot, at]);
+}
+const plainFloor = await floorPixels();
+await page.click("#show-filled");
+await page.waitForFunction(() => [...window.oasisScene.shellMeshes.values()].some((m) => m.userData.overlay && m.userData.overlay.visible));
+const tintedFloor = await floorPixels();
+const redder = (a, b) => (a[0] - a[1]) - (b[0] - b[1]);
+check(redder(tintedFloor[0], plainFloor[0]) > 20 && Math.abs(redder(tintedFloor[1], plainFloor[1])) < 8,
+      `Show filled areas tints the invented half of the floor and leaves the filmed half (${plainFloor} -> ${tintedFloor})`);
+await page.click("#show-filled");
+check((await page.textContent("#show-filled")) === "Show filled areas", "and hides it again");
 
 // ------------------------------------------------------------- colours
 // The colour on screen where the bed is: the screenshot read back in the page.

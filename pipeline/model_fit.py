@@ -209,6 +209,7 @@ def attach(space: Path, log=print) -> dict:
     fits = {}
     for piece in manifest["pieces"]:
         piece.pop("generated", None)
+        (piece.get("provenance") or {}).pop("generated", None)
         if piece.get("show") == "generated":
             piece["show"] = "model"
         folder = space / "object-models" / piece["id"]
@@ -234,6 +235,7 @@ def attach(space: Path, log=print) -> dict:
             continue
         out.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(folder / "model.glb", out / f"{piece['id']}.glb")
+        piece.setdefault("provenance", {"scan": "observed", "model": "inferred"})["generated"] = "generated"
         piece["generated"] = {"file": f"generated/{piece['id']}.glb",
                               **{k: result[k] for k in ("origin", "scale", "turnDegrees", "offset")},
                               "fit": {k: result[k] for k in ("iou", "boxIou", "views")}}

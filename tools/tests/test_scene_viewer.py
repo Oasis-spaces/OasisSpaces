@@ -78,12 +78,23 @@ def make_scene(folder: Path) -> None:
     # A pillow on it, carried by it.
     splat(scene / "pieces" / "B1.splat", [-0.3, 0, -0.15], [0.3, 0.15, 0.15], (240, 240, 235), count=500, seed=1)
     splat(scene / "pieces" / "rest.splat", [-1.8, 0, -1.4], [-1.5, 1.0, -1.2], (90, 90, 90), count=500, seed=2)
+    # The floor was filmed on its left half; its right half was invented by the inpainter.
+    (scene / "provenance").mkdir()
+    floor_known = np.zeros((16, 16), bool)
+    floor_known[:, :8] = True
+    ms.provenance_png(ms.provenance_map(floor_known, "keep")).save(scene / "provenance" / "floor.png")
+    ms.provenance_png(ms.provenance_map(np.ones((16, 16), bool), "keep")).save(scene / "provenance" / "wall-0.png")
     manifest = {
-        "space": "test-room", "units": "metres", "up": "y",
+        "space": "test-room",
+        "surfaces": [{"name": "floor", "use": "keep", "mask": "provenance/floor.png", "areaM2": 12.0,
+                      "observed": 0.5, "inferred": 0.0, "generated": 0.5},
+                     {"name": "wall-0", "use": "keep", "mask": "provenance/wall-0.png", "areaM2": 10.0,
+                      "observed": 1.0, "inferred": 0.0, "generated": 0.0}], "units": "metres", "up": "y",
         "room": {"width": 4.0, "depth": 3.0, "height": 2.5}, "shell": "shell.glb",
         "pieces": [
             {"id": "B0", "file": "pieces/B0.splat", "label": "bed", "movable": True, "model": "models/B0.glb",
-             "show": "scan", "anchor": [0.5, 0, 0.2], "box": {"min": [-0.7, 0, -1.0], "max": [0.7, 0.5, 1.0]},
+             "show": "scan", "provenance": {"scan": "observed", "model": "inferred", "generated": "generated"},
+             "anchor": [0.5, 0, 0.2], "box": {"min": [-0.7, 0, -1.0], "max": [0.7, 0.5, 1.0]},
              "generated": {"file": "generated/B0.glb", "origin": [10.5, 0, 10.35], "scale": 2.0, "turnDegrees": 90.0,
                            "offset": [0, 0, 0], "fit": {"iou": 0.81, "boxIou": 0.77, "views": 4}}},
             {"id": "B1", "file": "pieces/B1.splat", "label": "pillow", "movable": True, "on": "B0",

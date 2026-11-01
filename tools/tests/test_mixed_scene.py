@@ -283,6 +283,21 @@ def test_a_review_sheet_takes_any_number_of_pictures_in_a_row():
         assert np.asarray(Image.open(named))[5, 5].tolist() == [30, 30, 30]   # the heading bar
 
 
+
+def test_each_texel_says_whether_it_was_filmed_continued_or_invented():
+    known = np.zeros((4, 6), bool)
+    known[:, :4] = True                                          # two thirds filmed
+    kept = ms.provenance_map(known, "keep")
+    assert (kept[:, :4] == ms.OBSERVED).all() and (kept[:, 4:] == ms.GENERATED).all()
+    filmed = ms.provenance_map(known, "filmed")                 # the rest painted plain from the filmed part
+    assert (filmed[:, 4:] == ms.INFERRED).all() and (filmed[:, :4] == ms.OBSERVED).all()
+    assert (ms.provenance_map(known, "plain") == ms.INFERRED).all()
+    barely = np.zeros((10, 10), bool); barely[0, 0] = True       # texture() paints a hardly filmed surface plain
+    assert (ms.provenance_map(barely, "keep") == ms.INFERRED).all()
+    rgba = np.asarray(ms.provenance_png(kept))
+    assert rgba.shape == (4, 6, 4) and (rgba[:, :4, 3] == 0).all() and (rgba[:, 4:, 3] > 0).all()
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):
