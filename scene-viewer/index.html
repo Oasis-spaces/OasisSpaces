@@ -20,6 +20,7 @@
   .row.selected { background: rgba(255, 159, 10, 0.16); }
   .row input { accent-color: var(--accent); margin: 0; }
   .row .name { flex: 1; text-transform: capitalize; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
   .row .count { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
   .group { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin: 12px 8px 4px; }
   .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 12px; }
@@ -34,6 +35,16 @@
   #selection:not([hidden]) ~ #hint { display: none; }
   #selection .title { font-weight: 600; text-transform: capitalize; padding: 0 8px 0 4px; }
   #selection .size { color: var(--dim); font-size: 12px; padding-right: 6px; font-variant-numeric: tabular-nums; }
+  #selection button, #selection .size { white-space: nowrap; }
+  #selection input[type=color] { flex: none; width: 34px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 8px;
+    background: none; cursor: pointer; }
+  #selection label { color: var(--dim); font-size: 12px; display: flex; align-items: center; gap: 4px; }
+  #selection label[hidden], #selection button[hidden] { display: none; }
+  #selection input[type=number] { width: 58px; font: inherit; color: var(--ink); background: rgba(255, 255, 255, 0.07);
+    border: 1px solid var(--line); border-radius: 8px; padding: 5px 6px; }
+  #toast { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 8px 12px; font-size: 13px; z-index: 4; max-width: calc(100vw - 32px); }
+  #toast[hidden] { display: none; }
   #hint { position: fixed; bottom: 18px; right: 18px; color: var(--dim); font-size: 12px; text-align: right; pointer-events: none; }
   #status { position: fixed; inset: 0; display: grid; place-items: center; background: #101012; color: var(--dim); transition: opacity 0.4s; }
   #status.done { opacity: 0; pointer-events: none; }
@@ -65,6 +76,8 @@
   <div class="sub" id="subtitle"></div>
   <div class="group">Furniture</div>
   <div id="furniture"></div>
+  <div class="group">Added</div>
+  <div id="added"></div>
   <div class="group">Room</div>
   <div id="fixed"></div>
   <div class="buttons">
@@ -74,7 +87,10 @@
     <button id="all-models">All as models</button>
     <button id="reset">Reset layout</button>
     <button id="export">Save layout</button>
+    <button id="load" title="A layout saved here, with its added objects">Load layout…</button>
+    <button id="add" title="A .glb or .gltf model, placed on the floor where you are looking (or drop the file on the room)">Add object…</button>
   </div>
+  <input type="file" id="picker" hidden>
   <div class="sub" id="summary" style="margin: 10px 2px 0"></div>
 </aside>
 <button id="menu" title="Pieces and views">☰</button>
@@ -83,10 +99,14 @@
   <button id="turn-left" title="Turn left (Q)">⟲ 15°</button>
   <button id="turn-right" title="Turn right (E)">⟳ 15°</button>
   <button id="swap" title="">Show clean model</button>
+  <input type="color" id="tint" title="Colour this piece">
+  <button id="untint" title="Back to its own colours" hidden>Own colour</button>
+  <label id="height-wrap" title="Its height; the model scales evenly" hidden>H <input type="number" id="height" min="1" step="1"> cm</label>
   <button id="hide" title="Hide (H)">Hide</button>
   <button id="put-back" title="Back to where it was filmed">Put back</button>
 </div>
-<div id="hint">Click a piece to select it · drag it across the floor · Q / E turn · M scan or model · H hide · Esc deselect</div>
+<div id="hint">Click a piece to select it · drag it across the floor · Q / E turn · M scan, clean or generated model · H hide · Esc deselect · drop a .glb to add it</div>
+<div id="toast" hidden></div>
 <script type="module" src="main.js"></script>
 </body>
 </html>

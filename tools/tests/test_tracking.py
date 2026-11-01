@@ -173,6 +173,91 @@ def test_the_sheet_tints_each_object_in_its_colour():
     assert centre[0] > centre[1] + 30
 
 
+
+# ------------------------------------------------------------------ SAM 3
+def sam3_frame(objects, size=(540, 960)):
+    """One frame of SAM 3's processed output, as numpy: objects are
+    (id, prompt, score, (x0, y0, x1, y1) in the frame given to it)."""
+    w, h = size
+    masks = np.zeros((len(objects), h, w), bool)
+    for k, (_, _, _, (x0, y0, x1, y1)) in enumerate(objects):
+        masks[k, y0:y1, x0:x1] = True
+    by_prompt = {}
+    for obj_id, prompt, _, _ in objects:
+        by_prompt.setdefault(prompt, []).append(obj_id)
+    return {"object_ids": np.array([o[0] for o in objects]), "scores": np.array([o[2] for o in objects]),
+            "boxes": np.array([o[3] for o in objects], float).reshape(-1, 4), "masks": masks,
+            "prompt_to_obj_ids": by_prompt}
+
+
+def test_sam3_outputs_become_tracks_in_frame_pixels_with_their_prompt_as_name():
+    # Frames given to SAM 3 at half size: boxes come back in the frames' own pixels.
+    outputs = [(f, sam3_frame([(7, "bed", 0.9, (100, 400, 400, 700))] + ([(9, "lamp", 0.6, (450, 100, 500, 200))]
+                                                                       if f >= 3 else [])))
+               for f in range(len(FRAMES))]
+    tracks = tracking.sam3_tracks(outputs, FRAMES, (W, H), 0.5, log=lambda *_: None)
+    assert tracks.model == tracking.SAM3_ID and tracks.summary()["model"] == tracking.SAM3_ID + " (video)"
+    by_label = {t["label"]: t for t in tracks.tracks}
+    assert set(by_label) == {"bed", "lamp"}
+    bed, lamp = by_label["bed"], by_label["lamp"]
+    assert len(bed["frames"]) == 10 and len(lamp["frames"]) == 7 and lamp["seed"] == FRAMES[3]
+    assert np.allclose(bed["frames"][FRAMES[0]]["box"], [200, 800, 800, 1400])
+    # Ten frames' votes weigh like the detector's PROMPT_FRAMES frames would, no more.
+    assert abs(bed["votes"]["bed"] - 9.0) < 1e-6
+    mask = tracks.mask(bed["id"], FRAMES[0], (H, W))
+    assert mask[1000, 500] and not mask[200, 900]
+
+
+def test_sam3_finding_one_door_under_two_names_merges_them_and_it_stays_doorish():
+    outputs = [(f, sam3_frame([(1, "wardrobe", 0.8, (100, 100, 300, 800)), (2, "door", 0.5, (102, 100, 300, 800))]))
+               for f in range(len(FRAMES))]
+    tracks = tracking.sam3_tracks(outputs, FRAMES, (W, H), 0.5, log=lambda *_: None)
+    assert len(tracks.tracks) == 1
+    merged = tracks.tracks[0]
+    assert merged["label"] == "wardrobe" and set(merged["votes"]) == {"wardrobe", "door"}
+    assert tracks.doorish() == {merged["id"]}
+
+
+def test_auto_falls_back_to_sam2_when_sam3_will_not_load_and_sam3_alone_says_why():
+    from semantics import Vocabulary
+
+    vocabulary = Vocabulary([{"name": "bed", "role": "furniture", "build_as": "bed"},
+                             {"name": "shirt", "role": "loose"}])
+    prompts = {FRAMES[0]: [{"label": "bed", "score": 0.8, "box": [0, 0, 10, 10]},
+                           {"label": "shirt", "score": 0.5, "box": [5, 5, 8, 8]}]}
+    calls = []
+
+    class Gated:
+        def __init__(self, device=None):
+            raise OSError("You are trying to access a gated repo.\nMake sure to request access")
+
+    class FakeSam2:
+        device, dtype = "cpu", "float32"
+
+        def __init__(self, device=None):
+            pass
+
+        def run(self, image_dir, frames, to_track, log=print):
+            calls.append(sorted({d["label"] for dets in to_track.values() for d in dets}))
+            return tracking.Tracks(frames, (W, H), [], {})
+
+    saved = tracking.Sam3Tracker, tracking.Tracker
+    tracking.Sam3Tracker, tracking.Tracker = Gated, FakeSam2
+    said = []
+    try:
+        tracks, rest = tracking.track(Path("."), FRAMES, prompts, vocabulary, "auto", log=said.append)
+        assert calls == [["bed"]] and tracks.model == tracking.SEGMENTER_ID
+        assert [d["label"] for d in rest[FRAMES[0]]] == ["shirt"]
+        assert said[0].startswith("SAM 3 not available (You are trying to access a gated repo.)")
+        try:
+            tracking.track(Path("."), FRAMES, prompts, vocabulary, "sam3", log=said.append)
+            raise AssertionError("--tracker sam3 must not fall back")
+        except OSError:
+            pass
+    finally:
+        tracking.Sam3Tracker, tracking.Tracker = saved
+
+
 if __name__ == "__main__":
     for name, test in sorted(globals().items()):
         if name.startswith("test_"):

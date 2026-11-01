@@ -39,8 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
 from semantics import (SEGMENTER_ID, Detector, Segmenter, planned_vocabulary,
                        default_device, pixel_labels)
-from tracking import (PROMPT_FRAMES, Tracker, merge_detections, prompt_frames, split_prompts,
-                      tracked_names)
+from tracking import PROMPT_FRAMES, TRACKERS, merge_detections, prompt_frames, track
 from mirrors import fill_unreliable
 import lens
 
@@ -297,6 +296,10 @@ def main():
                         help="carry each detected object through every frame with SAM 2.1's "
                              "video model (tracking.py), so it keeps one name and has an outline "
                              "in every frame; auto = on CUDA only (it is slow on a Mac's GPU)")
+    parser.add_argument("--tracker", choices=TRACKERS, default="auto",
+                        help="what tracks: sam3 finds and tracks the room's names in one model "
+                             "(facebook/sam3, gated: needs access and a Hugging Face login); sam2 "
+                             "tracks what GroundingDINO found; auto = SAM 3 when its weights load")
     parser.add_argument("--prompt-frames", type=int, default=None,
                         help="about how many frames the detector runs on when tracking "
                              f"(default {PROMPT_FRAMES})")
@@ -452,13 +455,8 @@ def main():
             try:
                 # The room's names (pieces, surfaces, openings) are tracked;
                 # the rest keep their per-keyframe detections, outlined below.
-                to_track, rest = split_prompts(prompts, tracked_names(vocabulary))
-                tracker = Tracker(device=device)
-                print(f"Object tracking: {SEGMENTER_ID} (video) on {tracker.device} ({tracker.dtype}), "
-                      f"{len(prompts)} prompt frames of {len(all_names)}; tracking "
-                      + (", ".join(sorted({d["label"] for dets in to_track.values() for d in dets})) or "nothing"))
-                tracks = tracker.run(workspace / "images", all_names, to_track, log=print)
-                del tracker
+                tracks, rest = track(workspace / "images", all_names, prompts, vocabulary,
+                                     args.tracker, device, log=print)
                 release_model_memory(torch)
                 tracks.save(workspace / "tracks")
                 # The keyframes are labelled by the tracked outlines, named by
@@ -469,7 +467,7 @@ def main():
                     f["detections"] = tracks.detections(name, work_size=1024) + list(rest.get(name, []))
                 meta["detections"] = merge_detections(tracks.all_detections(), rest)
                 meta["tracks"] = tracks.summary()
-                meta["outlines"] = SEGMENTER_ID + " (video)"
+                meta["outlines"] = tracks.model + " (video)"
                 counts = tracks.summary()["labels"]
                 print(f"  {len(tracks.tracks)} objects: "
                       + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
@@ -498,7 +496,8 @@ def main():
                         print(f"  {name}: {done}/{len(todo[f['id']])} outlined")
                     del segmenter
                     release_model_memory(torch)
-                    meta["outlines"] = SEGMENTER_ID if tracks is None else SEGMENTER_ID + " (video and image)"
+                    meta["outlines"] = (SEGMENTER_ID if tracks is None
+                                        else f"{tracks.model} (video), {SEGMENTER_ID} (image)")
                 except Exception as exc:  # weights missing, or the model failed
                     for dets in todo.values():
                         for det in dets:

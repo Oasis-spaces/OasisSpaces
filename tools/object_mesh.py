@@ -14,8 +14,17 @@ are gated.
 On a T4 (16 GB, no bfloat16) it runs in float16 with the xformers attention
 backend; the mesh and its texture are decoded after the Gaussians are freed.
 
+TRELLIS is not a package: its clone is found at $TRELLIS (the notebook's
+install-trellis cell puts it in /content/TRELLIS), and the utils3d commit it
+needs, which differs from the one MoGe needs, at $TRELLIS_DEPS
+(/opt/trellis-deps), both put first on the path of this process only.
+
+What it makes is not trusted on sight: pipeline/model_fit.py turns and sizes
+each model to its piece by the job's frames and keeps it only when it matches
+them as well as the plain box model does (stage 4's `models` step runs both).
+
 Usage (on the GPU machine):
-    python object_mesh.py /content/jobs [--only B13] [--steps 12]
+    python object_mesh.py spaces/<name>/object-models [--only B13] [--steps 12]
 """
 
 from __future__ import annotations
@@ -23,11 +32,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
 os.environ.setdefault("ATTN_BACKEND", "xformers")   # flash-attn needs Ampere or newer
 os.environ.setdefault("SPCONV_ALGO", "native")      # no benchmarking: each object runs once
+TRELLIS = Path(os.environ.get("TRELLIS", "/content/TRELLIS"))
+TRELLIS_DEPS = Path(os.environ.get("TRELLIS_DEPS", "/opt/trellis-deps"))
 
 MODEL = "microsoft/TRELLIS-image-large"
 TEXTURE_SIZE = 1024
@@ -55,6 +67,9 @@ def cut_out(image_path: Path, mask_path: Path):
 
 
 def run(jobs: Path, only: list[str] | None, steps: int, log=print) -> list[dict]:
+    for path in (TRELLIS_DEPS, TRELLIS):
+        if path.is_dir() and str(path) not in sys.path:
+            sys.path.insert(0, str(path))
     import torch
     from trellis.pipelines import TrellisImageTo3DPipeline
     from trellis.utils import postprocessing_utils

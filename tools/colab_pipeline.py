@@ -25,8 +25,9 @@ taught (Sep 2026), done the same way every time:
 Stage 4 runs as its steps, each its own job, fetched before the next:
 train-quick, train-long (saved every 10,000 steps and resumed from the newest
 save), choose-training, fill, scene (the mixed scene, built from the chosen
-training; being the agent's last step, it also brings Claude's capture
-advice); choose-best then runs here. A session installs
+training; it also brings Claude's capture advice), models (a TRELLIS model of
+every piece, kept in the scene only where it matches the frames as well as the
+plain box does: pipeline/model_fit.py); choose-best then runs here. A session installs
 only what its steps need, and the OpenSplat binary built on Colab is kept in
 tools/colab-cache/ and reused by later sessions with the same PyTorch and GPU.
 
@@ -44,6 +45,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import signal
 import subprocess
@@ -60,10 +62,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # earlier splat of the video is; the scene does not wait for it, because it is
 # built from the space's own splat.ply, not from the published best.
 STEPS = ["reconstruct", "densify", "shapes", "train-quick", "train-long", "train-spirula", "train-anysplat",
-         "choose-training", "fill", "scene"]
-# Run only when asked for by name: long training takes an hour, and AnySplat
-# (a trial) installs its own PyTorch.
-ON_REQUEST = ("train-long", "train-anysplat")
+         "choose-training", "fill", "scene", "models"]
+# Run only when asked for by name: long training takes an hour, AnySplat (a
+# trial) installs its own PyTorch, and models (TRELLIS) installs CUDA extensions
+# whose licences are non-commercial (nvdiffrast; mip-splatting's rasteriser).
+ON_REQUEST = ("train-long", "train-anysplat", "models")
 SPLAT_STEPS = STEPS[3:]
 # The notebook install cells each step needs. OpenSplat links OpenCV, which the
 # COLMAP cell installs, so training needs that cell too.
@@ -78,6 +81,7 @@ NEEDS = {
     "choose-training": ["install-python"],
     "fill": ["install-python"],
     "scene": ["install-python"],           # LaMa, as for fill
+    "models": ["install-python", "install-trellis"],
 }
 CACHE = ROOT / "tools" / "colab-cache"   # the OpenSplat binary built on Colab, reused
 OPENSPLAT_BIN = "/content/OpenSplat/build/opensplat"
@@ -87,7 +91,7 @@ REMOTE_WORK = "/content/oasis-run"
 RELAY = "/content/claude-relay"
 PART_BYTES = 20 * 1024 * 1024
 INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat", "install-mapanything",
-                 "install-anysplat"]
+                 "install-anysplat", "install-trellis"]
 # What the notebook's helper cell sets before running the agent.
 REMOTE_ENV = {
     "BLENDER": "/opt/blender/blender",
@@ -96,6 +100,8 @@ REMOTE_ENV = {
     "OASIS_CLAUDE_RELAY": RELAY,
     "ANYSPLAT_DIR": "/content/AnySplat",
     "ANYSPLAT_PYTHON": "/content/anysplat-env/bin/python",
+    "TRELLIS": "/content/TRELLIS",
+    "TRELLIS_DEPS": "/opt/trellis-deps",
 }
 # Kept on the VM only: COLMAP's database is rebuilt by reconstruct.py, and the
 # splat project is links plus a seed file rebuilt by splat_seed.py.
@@ -434,7 +440,8 @@ def wait_installs(vm: Colab, needed: list[str]) -> None:
 # step. A step that only reads them (fill and scene read splat.ply) gets them.
 REMADE_BY = {"choose-training": ("splat.ply", "splat.splat"),
              "fill": ("splat-filled.ply", "splat-filled.splat"),
-             "scene": ("scene/",)}
+             "scene": ("scene/",),
+             "models": ("object-models/", "scene/generated/")}
 
 
 def remade_by(stages: list[str]) -> tuple[str, ...]:
@@ -524,6 +531,31 @@ print(json.dumps(changed))
             tar.extractall(local_space, filter="data")
     vm.shell(f"mv {manifest_remote}.next {manifest_remote}", timeout=120)
     return count
+
+
+def hugging_face_token() -> str | None:
+    """This Mac's Hugging Face login (HF_TOKEN, or what `hf auth login` saved)."""
+    if os.environ.get("HF_TOKEN"):
+        return os.environ["HF_TOKEN"].strip()
+    home = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
+    path = Path(os.environ.get("HF_TOKEN_PATH") or home / "token")
+    return path.read_text().strip() if path.is_file() and path.read_text().strip() else None
+
+
+def share_hugging_face_login(vm: Colab) -> None:
+    """SAM 3's weights are gated (facebook/sam3: request access, then log in):
+    the VM gets this Mac's login in its own token file, never on a command line,
+    which the driver's logs would show. Without one densify tracks with SAM 2.1."""
+    token = hugging_face_token()
+    if not token:
+        log("Hugging Face: not logged in here (hf auth login), so densify tracks with SAM 2.1, not SAM 3")
+        return
+    vm.python("import os\n"
+              "path = os.path.expanduser('~/.cache/huggingface/token')\n"
+              "os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+              f"open(path, 'w').write({token!r})\n"
+              "os.chmod(path, 0o600)\n", timeout=120)
+    log("Hugging Face: this Mac's login is on the VM (SAM 3 tracks when facebook/sam3 access is granted)")
 
 
 def remote_env() -> str:
@@ -662,6 +694,8 @@ def main() -> None:
         except RuntimeError as exc:
             log(f"  could not keep the OpenSplat binary ({exc})")
 
+    if "densify" in args.stages:
+        share_hugging_face_login(vm)
     relay_log = ROOT / "spaces" / f"{args.name}-relay.log"
     relay_log.parent.mkdir(parents=True, exist_ok=True)
     relay = subprocess.Popen([sys.executable, str(ROOT / "tools" / "claude_relay.py"),

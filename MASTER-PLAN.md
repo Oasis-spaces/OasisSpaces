@@ -158,11 +158,11 @@ Against "editable: deletable, colours, textures, dimensions, any object added":
 | Delete a piece | Yes — Splat Viewer (⌫), `splat_edit.py remove`, scene viewer (hide); the floor and wall behind are filled | Fill quality behind large pieces on sparse walls |
 | Move / turn | Yes — Splat Viewer handles, scene viewer drag/turn, saved layouts | — |
 | Resize (dimensions) | Splat Viewer: corner, height handles, exact cm in the inspector (Gaussians scaled); models: cuboid parts scale | Resizing a *scanned* piece without stretching its texture: regenerate a model at the new size (TRELLIS job exists: `tools/object_mesh.py`, GPU) |
-| Colours | Walls repainted from swatches or any colour (only the wall's own paint changes); library pieces recoloured | Per-piece recolour of scanned pieces and models in the scene viewer and the phone |
+| Colours | Walls repainted from swatches or any colour (only the wall's own paint changes); library pieces recoloured; scene viewer: any piece, scanned or model, any colour at its own shading, saved with the layout | The same in the Mac app's editor and the phone |
 | Textures | Shell textures come from the frames (LaMa continues them); not user-editable | A texture picker for walls/floor (tile, wood, paint) applied to the shell's materials; UV-mapped shell |
-| Add any 3D object | Library furniture only (sofa, bed, table, chair, desk, wardrobe, box, as blobs or cuboid models) | Import any GLB/USDZ into the scene viewer and the apps, placed on the floor, scaled in metres, saved with the layout; a catalogue of generated models |
-| Clean furniture models | Cuboid models in the scan's colours; TRELLIS meshes on a GPU | Run the model job in the Colab flow by default; amodal completion (FIRE3D or Lucida-style) once released |
-| Correct rooms every time | Measured score, rollback, repairs; passes on the pan | A wall score (do the cameras' walls meet the floor where the frames say?); ground truth from a tape measure of both rooms; SAM 3 when access is granted; scale anchors from known sizes (doors ~2.0 m) |
+| Add any 3D object | Library furniture (sofa, bed, table, chair, desk, wardrobe, box, as blobs or cuboid models); scene viewer: any GLB, on the floor, in metres, height in cm, saved inside the layout, layouts reopen | USDZ; a native import in the Mac app's editor; a catalogue of generated models |
+| Clean furniture models | Cuboid models in the scan's colours; stage 4's `models` step runs TRELLIS in the Colab flow on request (its nvdiffrast and rasteriser dependencies are non-commercial) and keeps a mesh only where its silhouettes match the frames as well as the box's (`pipeline/model_fit.py`) | A first real run on Colab (the install cell and the fit are tested only off the GPU); amodal completion (FIRE3D or Lucida-style) once released |
+| Correct rooms every time | Measured score, rollback, repairs; passes on the pan; SAM 3 wired in as the tracker (`--tracker auto`, SAM 2.1 when its gated weights do not load) | A wall score (do the cameras' walls meet the floor where the frames say?); ground truth from a tape measure of both rooms; SAM 3's first run on both rooms once access is granted, compared with SAM 2.1's labels; scale anchors from known sizes (doors ~2.0 m) |
 | Tracking in every run | Colab only | Fit the walkthrough inside a session (fewer tracked names or a paid runtime), or a Mac path that batches objects |
 | Reconstruction on the phone | Live perception only; stages 1-5 on the Mac and Colab | `docs/on-device-plan-2026-10.md`: the trainer adapter, the post-capture depth and outline pass, the room-shape and render-check port, the fill on Core ML, then the mixed scene, measured on the iPhone 13; and the licences for the shipped models (SegFormer and ADE20K, YOLOE, MobileCLIP, MoGe-2's data) |
 | Phone on both platforms | iPhone (iOS 18) | Android with ARCore feeding the same `capture-rules.json` and the same models exported for TFLite/NNAPI |
@@ -195,7 +195,7 @@ are gitignored: large, generated, or personal footage.)
 - `densify.py` — MoGe-2 metric depth fused over the poses; names and outlines per keyframe; tracking and mirror planes; writes `cloud-dense.ply` and `densify.json`.
 - `depth_maps.py` — MoGe-2 depth for every registered frame in the solve's units (for the phone's tools).
 - `semantics.py` — the object vocabulary and roles, GroundingDINO detector, SAM 2.1 outlines, pixel labels.
-- `tracking.py` — objects carried through the video with SAM 2.1's video model; votes, merges, doorish tracks.
+- `tracking.py` — objects carried through the video: SAM 3 finding and tracking the room's names (gated), or SAM 2.1's video model tracking GroundingDINO's finds; votes, merges, doorish tracks.
 - `mirrors.py` — the plane of a mirror's surroundings written into its outline.
 - `shapes.py` — planes and boxes from the labelled dense cloud (`shapes.json`).
 - `room_up.py` — the room's up: from the cameras' level sideways axes, then levelled on the cloud's floor and ceiling (shared by shapes, splat_export and the capture map).
@@ -203,6 +203,7 @@ are gitignored: large, generated, or personal footage.)
 - `room_score.py` — the measured room score (agreement, collision, walk, doorway).
 - `object_models.py` — per-object jobs (a frame and a cut-out) for image-to-3D models.
 - `lens.py` — the solved camera's lens (COLMAP's OPENCV distortion), for every stage that turns pixels into rays (`unproject`) or points into pixels (`project`); a solve whose polynomial folds inside the frame ends at the fold.
+- `model_fit.py` — a generated model turned and sized to its piece by silhouettes through the real cameras, kept only when it agrees with the frames as well as the box does; written into the scene.
 - `pointcloud.py` — PLY I/O, downsampling, outlier removal.
 - `splat_seed.py`, `splat_export.py`, `splat_spirula.py`, `splat_anysplat.py` — OpenSplat project seeded from the dense cloud; compact `.splat` and starting view; Spirula Studio as a plug-in trainer; AnySplat's one-pass prediction, aligned to the solve and polished (a trial, `--anysplat on`).
 
@@ -215,7 +216,7 @@ are gitignored: large, generated, or personal footage.)
 - `evaluate_space.py`, `show_prompts.py` — scoring spaces; printing every question the pipeline asks Claude.
 - `colab_pipeline.py`, `claude_relay.py`, `paced_proxy.py` — the Colab driver, the Claude relay, the paced upload proxy for this network.
 - `anysplat_infer.py` — AnySplat's prediction for a set of frames, run in AnySplat's own environment (PyTorch 2.2).
-- `tools/tests/` — twenty-six test suites (`python3 tools/tests/test_<name>.py`): AnySplat convert, advisor parse, capture findings, check phone capture, capture map, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, object naming, phone objects, placement, pose priors, room height, room score, room up, room views, shot list, splat read, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
+- `tools/tests/` — twenty-eight test suites (`python3 tools/tests/test_<name>.py`): advisor parse, AnySplat convert, capture findings, capture map, check phone capture, crop vote, frame choice, incremental seeds, lens, mirrors, mixed scene, model fit, object naming, phone objects, placement, pose priors, room height, room score, room up, room views, scene viewer (headless Chromium, `scene_viewer_check.mjs`), shot list, splat read, stage-1 gaps, structure review, surface fill, surface fill depth, tracking.
 - Gitignored but needed locally: `tools/opensplat` + `tools/default.metallib` (OpenSplat built for Metal, AGPL, patched), `tools/colab-cache/` (the OpenSplat binary built on Colab), `tools/spirula-studio/`.
 
 ### `apps/OasisCapture/` — the iPhone capture app
@@ -236,12 +237,12 @@ are gitignored: large, generated, or personal footage.)
 - `main.py`, `requirements.txt`, `tests/test_relay.py`, `README.md`. Service `oasis-relay` on Render, Supabase project `oasis-spaces` (jobs table, `oasis` bucket).
 
 ### Viewers and the browser editor
-- `scene-viewer/` — the mixed-scene viewer (three.js 0.180 + Spark, vendored in `vendor/`): select, drag, turn, hide, swap scan/model, save a layout; served by the Mac app and the phone app too.
+- `scene-viewer/` — the mixed-scene viewer (three.js 0.180 + Spark, vendored in `vendor/`): select, drag, turn, hide, swap scan/model, colour any piece, add any GLB, save and reopen a layout; served by the Mac app and the phone app too.
 - `splat-viewer/` — a WebGL splat viewer (MIT, with `convert.py`).
 - `editor/index.html` — a browser point-cloud editor.
 
 ### Colab, scripts, docs
-- `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything, AnySplat), clone, Claude relay, upload, the four stages, download.
+- `notebooks/OasisSpaces_Colab.ipynb` — the GPU notebook: install cells (COLMAP, Python deps, Blender, OpenSplat, MapAnything, AnySplat, TRELLIS), clone, Claude relay, upload, the four stages, download.
 - `scripts/process_video.sh` — the whole chain without the agent; `scripts/make_sample.py` — a synthetic demo room.
 - `docs/research-3d-reconstruction-2026-09.md` — the tool survey that shaped pipeline v2; `docs/research-weaknesses-2026-10.md` — the October research on our measured weaknesses and the plan that followed; `docs/audit-prompts-and-stack-2026-10.md` — every Claude question and every stage-1 option measured on 16 clips, with the field's state of the art per layer and the decisions it leaves open; `docs/on-device-plan-2026-10.md` — the open-source stack that moves reconstruction onto the phone, what was measured for it, and the licence asks. `docs/device-run-1.md` — the first run on the iPhone 13 and the Mac, command by command. `docs/test-videos.md` — where the test videos are.
 - `third_party/arkit-3dgs-scanner/` — the Apache-2.0 snapshot (commit d5d8e31) of Kuo Feng-Yuan's Swift + Metal splat trainer and camera-only pose refinement, kept verbatim; `OASIS-PROVENANCE.md` says why and what we owe.
@@ -261,7 +262,7 @@ pip3 install --break-system-packages --no-deps \
 - OpenSplat built locally for Metal into `tools/opensplat` with `tools/default.metallib` (the README's OpenSplat note; AGPL, kept out of git).
 - Blender on the path or `BLENDER=/path/to/blender` (the room build and the render check).
 - LaMa's `big-lama.pt` in `~/.cache/oasisspaces/` (downloaded on first use; the notebook fetches it on Colab).
-- Model weights download on first run from Hugging Face: MoGe-2 (`Ruicheng/moge-2-vitl-normal`), GroundingDINO-tiny, SAM 2.1 hiera-tiny. SAM 3 needs an access request on Hugging Face and a login (`huggingface-cli login`); it is not wired in yet.
+- Model weights download on first run from Hugging Face: MoGe-2 (`Ruicheng/moge-2-vitl-normal`), GroundingDINO-tiny, SAM 2.1 hiera-tiny. SAM 3 (`facebook/sam3`, the tracker densify prefers) needs an access request on Hugging Face and a login (`hf auth login`; the Colab driver copies it to the VM); without it densify tracks with SAM 2.1. TRELLIS (`microsoft/TRELLIS-image-large`, ungated) is fetched by the notebook's install-trellis cell.
 - **Claude:** the `claude` CLI signed in (Claude Code) — the agent's default backend, model `claude-opus-5`; or `ANTHROPIC_API_KEY` for the API backend. Without either the pipeline runs with its deterministic rules only.
 - Run one agent stage at a time on an 8 GB Mac: `python3 pipeline/agent.py videos/<video>.MOV --name <space> --stage reconstruct|densify|shapes|splat`.
 

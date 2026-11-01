@@ -133,8 +133,9 @@ SPLAT_LABELS = {"quick": "quick ({steps} steps, 1/{downscale} resolution)",
 # any time): every step keeps its results in the space, and the next one
 # picks them up. The long training also saves every LONG_CHECKPOINT_STEPS and
 # resumes from the newest save.
+# The last step, models, gives the scene's pieces generated models (TRELLIS, on CUDA).
 SPLAT_STEPS = ["train-quick", "train-long", "train-spirula", "train-anysplat", "choose-training", "fill",
-               "choose-best", "scene"]
+               "choose-best", "scene", "models"]
 LONG_CHECKPOINT_STEPS = 10000
 # OpenSplat keeps every training image on the GPU as 32-bit floats; past this
 # it reads them from memory each step instead, so an 8 GB Mac is not swamped.
@@ -2115,7 +2116,7 @@ class Agent:
         steps = {"train-quick": self.train_quick, "train-long": self.train_long,
                  "train-spirula": self.train_spirula, "train-anysplat": self.train_anysplat,
                  "choose-training": self.pick_training, "fill": self.fill_step,
-                 "choose-best": self.best_step, "scene": self.scene_step}
+                 "choose-best": self.best_step, "scene": self.scene_step, "models": self.models_step}
         for name in SPLAT_STEPS:
             if name not in self.splat_steps:
                 continue
@@ -2353,6 +2354,65 @@ class Agent:
                     metrics={"movable": len(movable), "as_model": len(as_model), "photographed_sides": photographed,
                              "fixed_gaussians": fixed,
                              "reviewed": bool(verdict)},
+                    seconds=round(time.time() - started, 1))
+
+    def models_step(self) -> bool:
+        """A generated model for every movable piece of the scene: each piece's
+        frames and masks (pipeline/object_models.py) go to TRELLIS
+        (tools/object_mesh.py, CUDA only), and each mesh that comes back is
+        turned and sized to its piece by those frames (pipeline/model_fit.py)
+        and kept only when it matches them as well as the plain box model does.
+        Without CUDA, models made earlier on a GPU (object-models/<id>/model.glb)
+        are still fitted. An extra: it never ends the run."""
+        if not (self.space / "scene" / "scene.json").exists():
+            self.decide("splat", "skip", "no generated models: the scene was not built")
+            return True
+        started = time.time()
+        try:
+            self.generate_models(started)
+        except (Exception, SystemExit) as exc:
+            self.decide("splat", "skip", f"no generated models ({type(exc).__name__}: {exc})",
+                        seconds=round(time.time() - started, 1))
+        return True
+
+    def generate_models(self, started: float) -> None:
+        from model_fit import attach
+        from object_models import jobs
+
+        from object_mesh import TRELLIS
+
+        made = ""
+        if self.cuda and not (TRELLIS / "trellis").is_dir():
+            self.decide("splat", "skip", f"no generated models: TRELLIS is not installed at {TRELLIS} "
+                        "(the notebook's install-trellis cell)")
+            return
+        if self.cuda:
+            written = jobs(self.space, log=lambda text: print("   " + text))
+            if not written:
+                self.decide("splat", "skip", "no generated models: no piece was seen whole in any frame")
+                return
+            ok, _ = self.run([sys.executable, str(ROOT / "tools/object_mesh.py"), str(self.space / "object-models")],
+                             "object models", f"TRELLIS, {len(written)} piece(s)")
+            if not ok:
+                self.decide("splat", "skip", f"no generated models: TRELLIS failed (see {self.log_path.name})",
+                            seconds=round(time.time() - started, 1))
+                return
+            made = f"TRELLIS made {len(written)} model(s); "
+        elif not any((self.space / "object-models").glob("*/model.glb")):
+            self.decide("splat", "skip", "no generated models: TRELLIS needs CUDA (run the models step on Colab)")
+            return
+        fits = attach(self.space, log=lambda text: print("   " + text))
+        kept = {k: v for k, v in fits.items() if v.get("keep")}
+        labels = {p["id"]: p["label"] for p in json.loads((self.space / "scene" / "scene.json").read_text())["pieces"]}
+        self.decide("splat", "accept" if kept else "skip",
+                    made + f"{len(kept)} of {len(fits)} fitted to their pieces and kept"
+                    + (f" ({', '.join(f'{labels.get(k, k)} {v['iou']:.2f} vs box {v['boxIou']:.2f}' for k, v in kept.items())})"
+                       if kept else "")
+                    + (f"; not kept: {', '.join(labels.get(k, k) for k in fits if k not in kept)}"
+                       if len(kept) < len(fits) else ""),
+                    metrics={"generated": len(fits), "kept": len(kept),
+                             "fits": {k: {"keep": v.get("keep"), "iou": v.get("iou"), "boxIou": v.get("boxIou")}
+                                      for k, v in fits.items()}},
                     seconds=round(time.time() - started, 1))
 
     def image_cache_gb(self, downscale: int) -> float:
@@ -2889,7 +2949,8 @@ class Agent:
         last = "shapes" if not self.do_splat else "splat"
         # Stage 4 run step by step is over only after its last step; advice after
         # every step would ask Claude the same question again each time.
-        splat_done = stages[-1] == "splat" and self.splat_steps[-1] == SPLAT_STEPS[-1]
+        # The scene step is the run's end for this (models, after it, is an extra on a GPU).
+        splat_done = stages[-1] == "splat" and "scene" in self.splat_steps
         run_is_over = stopped_at is not None or (stages[-1] == last and last != "splat") or splat_done
 
         self.advice = []
