@@ -78,6 +78,35 @@ def test_a_loft_cabinet_merged_with_its_wardrobe_is_split_and_stays_on_the_wall(
         assert any("leaves a part under" in t for t in applied), applied
 
 
+def test_every_question_carries_the_record_and_folds_its_answer_back():
+    with tempfile.TemporaryDirectory() as tmp:
+        a = agent(Path(tmp), None)
+        asked = []
+
+        class Advisor:
+            def ask_json(self, prompt, images, max_tokens):
+                asked.append(prompt)
+                return {"keep": True, "record": {"objects": [{"name": "desk", "boxes": ["B1"]}],
+                                                  "doubts": ["a second headboard"]}}
+        a.advisor = Advisor()
+        a.remember("densify", "removed 'television' from the object list")
+        assert a.ask_json("Is this a room?")["keep"]
+        assert "removed 'television'" in asked[0] and asked[0].endswith("Is this a room?")
+        a.ask_json("And now?")
+        assert '"desk"' in asked[1] and "a second headboard" in asked[1]
+        # the record says B1 is the desk: the box gets that identity, and the score matches it
+        shapes = room([box((0, 0, 0), (1, 1, 2)), box((2, 0, 0), (3, 1, 0.8), "table", "chest of drawers")], [])
+        assert a.apply_identities(shapes) == ["B1 is the desk"]
+        import room_score
+        from semantics import Vocabulary
+        vocabulary = Vocabulary([{"name": "desk", "role": "furniture", "build_as": "table"},
+                                 {"name": "chest of drawers", "role": "storage", "build_as": "wardrobe"}], "test")
+        assert [i for i, _ in room_score.boxes_of(shapes, "desk", vocabulary)] == [1]
+        assert 1 not in [i for i, _ in room_score.boxes_of(shapes, "chest of drawers", vocabulary)]   # no longer the detector's name
+        a.forget_boxes()
+        assert a.record()["objects"] == [{"name": "desk"}]
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

@@ -44,6 +44,35 @@ RELAY_WAIT_SECONDS = 1800
 # this on its long side: the most Claude reads of an image (the high-resolution
 # tier of Claude 4.7 and later; a 36-frame contact sheet needs every pixel).
 RELAY_IMAGE_LONG_SIDE = 2576
+# A photo (a video frame, 3840 px on its long side) is sent at this size: enough to
+# tell what an object is, at about a third of the tokens of the full tier. Sheets
+# the pipeline draws (plans, crops) are below RELAY_IMAGE_LONG_SIDE and go as drawn.
+PHOTO_LONG_SIDE = 1568
+PHOTO_ABOVE = 2600
+# The brief every question is asked under: what Oasis does and what the model's part is.
+BRIEF_PATH = Path(__file__).with_name("oasis_brief.md")
+
+
+def image_block(path: Path) -> dict:
+    """An image as a base64 content block, a photo shrunk to PHOTO_LONG_SIDE and
+    anything else to RELAY_IMAGE_LONG_SIDE."""
+    import base64
+    import io
+    import mimetypes
+
+    from PIL import Image
+
+    data, media = path.read_bytes(), mimetypes.guess_type(path.name)[0] or "image/png"
+    with Image.open(path) as img:
+        side = max(img.size)
+        target = PHOTO_LONG_SIDE if side > PHOTO_ABOVE else RELAY_IMAGE_LONG_SIDE
+        if side > target:
+            img.thumbnail((target, target))
+            buffer = io.BytesIO()
+            img.convert("RGB").save(buffer, "JPEG", quality=88)
+            data, media = buffer.getvalue(), "image/jpeg"
+    return {"type": "image", "source": {"type": "base64", "media_type": media,
+                                        "data": base64.standard_b64encode(data).decode()}}
 
 
 def first_json(text: str) -> dict:
@@ -73,10 +102,13 @@ def first_json(text: str) -> dict:
 class Advisor:
     """One place to ask Claude, whichever way this machine can reach it."""
 
-    def __init__(self, model: str = MODEL, timeout: int = 600, enabled: bool = True):
+    def __init__(self, model: str = MODEL, timeout: int = 600, enabled: bool = True,
+                 system: str | None = None):
         self.model = model
         self.timeout = timeout
+        self.system = system          # the system prompt every question is asked under (the brief)
         self.calls = 0
+        self.usage: list[dict] = []   # tokens and cost of each answered call
         self.reason: str | None = None
         self.backend = self._pick_backend() if enabled else "offline"
         if not enabled:
@@ -104,26 +136,67 @@ class Advisor:
 
     # ------------------------------------------------------------- backends
     def _ask_cli(self, prompt: str, images: list[Path]) -> str | None:
-        # The CLI reads files referenced with @path, so images go in as paths.
-        refs = " ".join(f"@{p.resolve()}" for p in images)
-        command = ["claude", "-p", f"{refs}\n\n{prompt}" if refs else prompt,
-                   "--output-format", "json", "--model", self.model]
-        if images:
-            command += ["--allowedTools", "Read"]
+        """One turn of `claude -p`: the images go inline in the message (stream-json
+        input), so the CLI needs no tool to open them; no tools, no MCP servers and
+        the brief instead of Claude Code's own system prompt. About 3k input tokens
+        for a question with a photo, against ~98k when the CLI read each image with
+        its Read tool over three turns carrying its whole default context."""
+        import tempfile
+
+        message = {"type": "user", "message": {"role": "user", "content":
+                   [image_block(p) for p in images] + [{"type": "text", "text": prompt}]}}
+        command = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                   "--verbose", "--model", self.model, "--tools", "", "--strict-mcp-config",
+                   "--no-session-persistence"]
+        system_file = None
+        if self.system:
+            system_file = tempfile.NamedTemporaryFile("w", suffix=".md", delete=False)
+            system_file.write(self.system)
+            system_file.close()
+            command += ["--system-prompt-file", system_file.name]
         try:
-            result = subprocess.run(command, capture_output=True, text=True,
-                                    timeout=self.timeout)
-            payload = first_json(result.stdout)
+            result = subprocess.run(command, input=json.dumps(message) + "\n", capture_output=True,
+                                    text=True, timeout=self.timeout)
         except subprocess.TimeoutExpired:
             self._disable(f"the claude CLI did not answer within {self.timeout}s")
             return None
-        except (json.JSONDecodeError, OSError) as exc:
+        except OSError as exc:
             self._disable(f"could not run the claude CLI: {exc}")
+            return None
+        finally:
+            if system_file:
+                Path(system_file.name).unlink(missing_ok=True)
+        payload = {}
+        for line in result.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result":
+                payload = event
+        if not payload:
+            self._disable((result.stderr or "the claude CLI gave no result").strip())
             return None
         if payload.get("is_error"):
             self._disable(str(payload.get("result", "claude CLI reported an error")))
             return None
+        self._record_usage(payload.get("usage") or {}, payload.get("total_cost_usd"))
         return payload.get("result")
+
+    def _record_usage(self, usage: dict, cost=None) -> None:
+        self.usage.append({"input": int(usage.get("input_tokens") or 0),
+                           "cache_write": int(usage.get("cache_creation_input_tokens") or 0),
+                           "cache_read": int(usage.get("cache_read_input_tokens") or 0),
+                           "output": int(usage.get("output_tokens") or 0),
+                           **({"cost_usd": round(float(cost), 4)} if cost is not None else {})})
+
+    def usage_total(self) -> dict:
+        """Tokens and cost over every call so far."""
+        total = {"calls": len(self.usage)}
+        for entry in self.usage:
+            for k, v in entry.items():
+                total[k] = round(total.get(k, 0) + v, 4)
+        return total
 
     def _ask_relay(self, prompt: str, images: list[Path]) -> str | None:
         """Leave the question in the relay folder and wait for the answer that
@@ -132,7 +205,7 @@ class Advisor:
         (root / "requests").mkdir(parents=True, exist_ok=True)
         (root / "responses").mkdir(parents=True, exist_ok=True)
         name = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.json"
-        request = {"prompt": prompt, "model": self.model,
+        request = {"prompt": prompt, "model": self.model, "system": self.system,
                    "images": [str(p.resolve()) for p in images]}
         if images:
             # One download for the whole question instead of one per image.
@@ -184,32 +257,27 @@ class Advisor:
         return path
 
     def _ask_api(self, prompt: str, images: list[Path], max_tokens: int) -> str | None:
-        import base64
-        import mimetypes
-
         import anthropic
 
-        content: list[dict] = []
-        for path in images:
-            content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": mimetypes.guess_type(path.name)[0] or "image/png",
-                    "data": base64.standard_b64encode(path.read_bytes()).decode(),
-                },
-            })
-        content.append({"type": "text", "text": prompt})
+        content = [image_block(p) for p in images] + [{"type": "text", "text": prompt}]
+        # The brief is the same on every call: cached, it costs a tenth after the first.
+        system = ([{"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}]
+                  if self.system else anthropic.NOT_GIVEN)
         try:
             message = anthropic.Anthropic().messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
+                system=system,
                 output_config={"effort": "low"},  # short judgement calls
                 messages=[{"role": "user", "content": content}],
             )
         except Exception as exc:  # auth, network, rate limit
             self._disable(f"{type(exc).__name__}: {exc}")
             return None
+        u = message.usage
+        self._record_usage({"input_tokens": u.input_tokens, "output_tokens": u.output_tokens,
+                            "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0),
+                            "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", 0)})
         return "".join(b.text for b in message.content if b.type == "text")
 
     # ----------------------------------------------------------------- asks

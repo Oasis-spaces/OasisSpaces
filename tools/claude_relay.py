@@ -73,6 +73,7 @@ def answer(session: str, remote: str, name: str, work: Path) -> str:
     text, advisor = None, None
     for _ in range(2):  # one retry: a rate limit or empty reply would switch Claude off on the VM
         advisor = Advisor(model=request.get("model", "claude-opus-5"))
+        advisor.system = request.get("system")      # the brief the pipeline asks under
         text = advisor.ask(request["prompt"], images) if advisor.available else None
         if text:
             break

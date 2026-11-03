@@ -127,8 +127,13 @@ def boxes_of(shapes: dict, label: str, vocabulary) -> list[tuple[int, dict]]:
     kind of storage), or built as its furniture type without a detection."""
     found = []
     for i, b in built_pieces(shapes, vocabulary):
-        detected = b.get("detected")
-        if detected:
+        identity, detected = b.get("identity"), b.get("detected")
+        if identity:
+            # What the review says the box is (the room record) comes before the
+            # detector's name: a "chest of drawers" box the frames show is the desk.
+            if identity == label or vocabulary.same_kind(identity, label) or label in identity.split():
+                found.append((i, b))
+        elif detected:
             if vocabulary.same_kind(detected, label):
                 found.append((i, b))
         elif b.get("label") == vocabulary.build_as(label):

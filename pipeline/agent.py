@@ -49,7 +49,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pipeline"))
 sys.path.insert(0, str(ROOT / "tools"))
-from advisor import Advisor  # noqa: E402
+from advisor import BRIEF_PATH, Advisor  # noqa: E402
 from evaluate_space import evaluate, ply_vertex_count  # noqa: E402
 from plan_image import draw_plan  # noqa: E402
 from object_frames import draw_object_frames  # noqa: E402
@@ -220,6 +220,10 @@ show but the room lacks, or drop a misplaced piece and add it again where the ro
 the check did not flag."""
 
 ADD_BOXES_MAX = 3                # boxes Claude may add from the frames in one structure review
+RECORD_HISTORY = 16              # earlier steps shown to each question
+RECORD_LINE = 400                # characters of each
+RECORD_DOUBTS = 8
+RECORD_TOKENS = 600              # room in each answer for the record
 RESIZE_MAX_SHARE = 0.6           # a resize takes at most this share off a box's side ...
 RESIZE_GROW_M = 0.5              # ... or adds at most this much to it
 SPLIT_MIN_M = 0.3                # both parts of a split box are at least this tall
@@ -235,7 +239,8 @@ measured score: {problems}
   would have to move in to clear the walk. The box's points ran on past the furniture, or two pieces were measured as
   one.
 - "overlap": two built pieces share that much of the smaller one's volume.
-- "no box": the object is outlined in that many frames but no built box stands where it is.
+- "no box": the object is outlined in that many frames but no box is known to be it. If a built box already is that
+  object, list it under the object in your record (that is how the score learns which box it is); if none is, add one.
 - "poor fit": the piece's box covers only that share of its outlines in the frames (1.0 would be a perfect fit).
 For these you have two more actions, besides drop, relabel and add:
 - resize_boxes: move one side of a box: side is left, right, top or bottom as seen in the floor plan, or height for
@@ -593,7 +598,8 @@ class Agent:
         self.gates: dict[str, dict] = {}
         self.last_error = ""                   # the failing step's root cause (run)
         self.use_claude = use_claude
-        self.advisor = Advisor(enabled=use_claude)
+        self.advisor = Advisor(enabled=use_claude,
+                               system=BRIEF_PATH.read_text() if BRIEF_PATH.exists() else None)
 
     @property
     def capture(self) -> str:
@@ -687,7 +693,7 @@ class Agent:
             return None
         candidates = spread(images, FRAME_CHOICES)
         sheet = self.contact_sheet(candidates, self.space / "frame-choices.png")
-        verdict = self.advisor.ask_json(
+        verdict = self.ask_json(
             FRAME_CHOICE_PROMPT.format(capture=self.capture, count=len(candidates), room=ROOM_FRAMES,
                                        objects=OBJECT_NAMING_FRAMES),
             [sheet], max_tokens=800)
@@ -727,7 +733,85 @@ class Agent:
             print(f"    claude check skipped ({type(exc).__name__}: {exc})")
             return default
 
+    # ------------------------------------------------------------ the room record
+    # Claude's running understanding of this room, shared by every question of the
+    # run (and of later runs of other stages): the real objects and the boxes that
+    # stand for them, doubts, and what earlier steps decided or had undone. See
+    # pipeline/oasis_brief.md, the brief every question is asked under.
+    @property
+    def record_path(self) -> Path:
+        return self.space / "room-understanding.json"
+
+    def record(self) -> dict:
+        try:
+            data = json.loads(self.record_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        return {"objects": data.get("objects") or [], "doubts": data.get("doubts") or [],
+                "history": data.get("history") or []}
+
+    def save_record(self, data: dict) -> None:
+        self.space.mkdir(parents=True, exist_ok=True)
+        data["history"] = data.get("history", [])[-RECORD_HISTORY:]
+        self.record_path.write_text(json.dumps(data, indent=1) + "\n")
+
+    def remember(self, stage: str, text: str) -> None:
+        """One line of what happened, for the questions after it."""
+        data = self.record()
+        data["history"].append({"stage": stage, "what": text[:RECORD_LINE]})
+        self.save_record(data)
+
+    def forget_boxes(self) -> None:
+        """The box ids in the record name the boxes of a shapes.json that a new
+        shapes run replaces: keep the objects, drop their box ids."""
+        data = self.record()
+        for o in data["objects"]:
+            o.pop("boxes", None)
+        self.save_record(data)
+
+    def ask_json(self, prompt: str, images=(), max_tokens: int = 1024) -> dict | None:
+        """Every question goes through here: asked under the brief (the advisor's
+        system prompt), with the room record and the run so far in front of it,
+        and the "record" in the answer folded back in."""
+        data = self.record()
+        context = ""
+        if data["objects"] or data["doubts"]:
+            context += ("ROOM RECORD, your understanding from earlier steps (keep it current):\n"
+                        + json.dumps({"objects": data["objects"], "doubts": data["doubts"]}) + "\n")
+        if data["history"]:
+            context += ("EARLIER STEPS of this run, oldest first (decisions, and edits undone):\n"
+                        + "\n".join(f"- [{h['stage']}] {h['what']}" for h in data["history"]) + "\n")
+        verdict = self.advisor.ask_json((context + "\nTHIS STEP:\n" if context else "") + prompt, images,
+                                        max_tokens + RECORD_TOKENS)
+        update = verdict.get("record") if isinstance(verdict, dict) else None
+        if isinstance(update, dict):
+            data = self.record()
+            if isinstance(update.get("objects"), list):
+                data["objects"] = [o for o in update["objects"] if isinstance(o, dict) and o.get("name")]
+            if isinstance(update.get("doubts"), list):
+                data["doubts"] = [str(d) for d in update["doubts"]][:RECORD_DOUBTS]
+            self.save_record(data)
+        return verdict
+
+    def apply_identities(self, shapes: dict) -> list[str]:
+        """What each box is, as the record says: a built box listed under an object
+        gets that object's name as its identity, which the score and the later
+        stages read before the detector's name."""
+        notes = []
+        boxes = shapes.get("boxes") or []
+        for o in self.record()["objects"]:
+            for ident in o.get("boxes") or []:
+                ident = str(ident)
+                i = int(ident[1:]) if ident[:1] == "B" and ident[1:].isdigit() else None
+                if i is None or i >= len(boxes) or not boxes[i].get("build", True):
+                    continue
+                if boxes[i].get("identity") != o["name"]:
+                    boxes[i]["identity"] = o["name"]
+                    notes.append(f"{ident} is the {o['name']}")
+        return notes
+
     def judged(self, stage: str, verdict: dict, shown: str) -> None:
+        self.remember(stage, f"Claude: {shown}")
         entry = {"stage": stage, **verdict}
         if JUDGEMENT_STAGE.get(stage, stage) == "splat" and self.current_step:
             entry["step"] = self.current_step
@@ -765,6 +849,8 @@ class Agent:
     def decide(self, stage: str, action: str, why: str, metrics: dict | None = None,
                seconds: float | None = None) -> None:
         entry = {"stage": stage, "action": action, "why": why}
+        if action not in ("score",):
+            self.remember(stage, f"{action}: {why}")
         if stage == "splat" and self.current_step:
             entry["step"] = self.current_step
         if metrics:
@@ -826,7 +912,7 @@ class Agent:
                        "how often it was seen (red never), and a compass of the directions the camera faced. "
                        "Read it for whether the path is one coherent line; its coverage is the capture's, "
                        "which no retry changes.")
-        verdict = self.advisor.ask_json(prompt, images)
+        verdict = self.ask_json(prompt, images)
         if verdict:
             problems = ", ".join(verdict.get("capture_problems") or [])
             self.judged("reconstruct", verdict,
@@ -930,7 +1016,7 @@ class Agent:
         maps = [self.space / "capture-map-colmap.png", self.space / "capture-map.png"]
         if not self.advisor.available or not all(m.exists() for m in maps):
             return None
-        verdict = self.advisor.ask_json(WALK_PROMPT.format(capture=self.capture, before=before["frames"], total=before["total"],
+        verdict = self.ask_json(WALK_PROMPT.format(capture=self.capture, before=before["frames"], total=before["total"],
                                                            after=after["frames"], facts=facts), maps)
         if verdict:
             self.judged("reconstruct", {"walk_keep": verdict.get("keep"), "why": verdict.get("why")},
@@ -952,7 +1038,7 @@ class Agent:
             print("    object list: Claude unavailable, the detector uses the default list")
             return
         frames = self.picked_frames("objects", OBJECT_NAMING_FRAMES) or self.sample_frames(OBJECT_NAMING_FRAMES)
-        verdict = self.advisor.ask_json(
+        verdict = self.ask_json(
             OBJECT_NAMING_PROMPT.format(capture=self.capture, count=len(frames), limit=MAX_OBJECTS - 4),
             frames, max_tokens=2000)
         listed = (verdict or {}).get("objects")
@@ -1009,7 +1095,7 @@ class Agent:
         searched = (f"{dense['tracks']['frames']} frames (each object it found on about twenty of them was "
                     "tracked through the rest, so a box is a tracked outline's rectangle)"
                     if dense.get("tracks") else f"{len(dense.get('detections') or {})} keyframes")
-        verdict = self.advisor.ask_json(LABEL_REVIEW_PROMPT.format(
+        verdict = self.ask_json(LABEL_REVIEW_PROMPT.format(
             capture=self.capture,
             keyframes=searched, shown=len(frames),
             listing=json.dumps(listing), limit=MAX_OBJECTS - 4),
@@ -1094,6 +1180,7 @@ class Agent:
         for i, b in enumerate(shapes["boxes"]):
             candidates.append({"id": f"B{i}", "label": b.get("label"),
                                "detected_as": b.get("detected"),
+                               **({"is": b["identity"]} if b.get("identity") else {}),
                                "size": [size(b["max"][k] - b["min"][k]) for k in range(3)],
                                **({"from_floor": [size(b["min"][2] - floor_z), size(b["max"][2] - floor_z)]}
                                   if floor_z is not None else {}),
@@ -1178,12 +1265,13 @@ class Agent:
                                    self.space / "room-views.png") if r.exists()]
             prompt += RECHECK_NOTE.format(count=len(renders), problems=json.dumps(feedback))
             images += renders
-        verdict = self.advisor.ask_json(prompt, images, max_tokens=2048)
+        verdict = self.ask_json(prompt, images, max_tokens=2048)
         if not verdict:
             print(f"    claude (structure): no usable answer"
                   + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
             return
         applied = self.apply_structure_review(shapes, verdict)
+        applied += self.apply_identities(shapes)
         # On disk as reviewed before any piece is placed, so nothing downstream reads the candidates.
         shapes_path.write_text(json.dumps(shapes, indent=1) + "\n")
         for label, dropped in dropped_pieces(shapes, verdict, applied).items():
@@ -1417,7 +1505,7 @@ class Agent:
             '"width_m": number, "depth_m": number, "height_m": number, "why": string}} '
             f'or {{"none": true, "why": string}} when the frames do not show a whole {label}.')
         for attempt in range(2):
-            verdict = self.advisor.ask_json(prompt, images, max_tokens=800)
+            verdict = self.ask_json(prompt, images, max_tokens=800)
             if not verdict:
                 applied.append(f"asked where the {label} stands: no usable answer")
                 break
@@ -1836,7 +1924,7 @@ class Agent:
             'the footage that would fix a structural problem above, each naming the wall or area '
             'and where to film it from (empty when none would; never general filming tips)}')
         images = [render] + ([plan] if plan.exists() else []) + self.room_frames(1) + ([sheet] if sheet else [])
-        verdict = self.advisor.ask_json(prompt, images)
+        verdict = self.ask_json(prompt, images)
         if not verdict:
             print(f"    claude (blender): no usable answer"
                   + (f" ({self.advisor.reason})" if self.advisor.reason else ""))
@@ -2243,6 +2331,7 @@ class Agent:
         # The phone's second opinion names boxes by index: one from an earlier run would
         # vouch for the wrong boxes.
         (self.space / "phone-objects.json").unlink(missing_ok=True)
+        self.forget_boxes()
         ok, _ = self.run([sys.executable, str(ROOT / "pipeline/shapes.py"),
                           str(self.space)], "shapes", "planes and labelled boxes")
         if not ok:
@@ -2652,7 +2741,7 @@ class Agent:
             draw.text((x + 4, y + 4), letter, fill="black", font=font)
         sheet_path = self.space / f"{ply.stem}-start-views.png"
         sheet.save(sheet_path)
-        verdict = self.advisor.ask_json(START_VIEW_PROMPT.format(capture=self.capture, count=len(views),
+        verdict = self.ask_json(START_VIEW_PROMPT.format(capture=self.capture, count=len(views),
                                                                    letters=", ".join(letters)),
                                         [sheet_path] + self.room_frames(2), max_tokens=1000)
         pick = verdict.get("best") if verdict else None
@@ -2732,7 +2821,7 @@ class Agent:
 
         verdicts = {}
         if rows and self.advisor.available:
-            answer = self.advisor.ask_json(FILL_REVIEW_PROMPT.format(
+            answer = self.ask_json(FILL_REVIEW_PROMPT.format(
                 capture=self.capture,
                 surfaces=json.dumps([{"id": r["id"], "surface": r["surface"],
                                       "seen_by_video": not r["unseen"]} for r in rows])),
@@ -3139,7 +3228,7 @@ class Agent:
                 def measured(stage: str, value: dict) -> str:
                     return json.dumps(value) if value or stage in self.gates else '"not run"'
 
-                verdict = self.safe(self.advisor.ask_json, CAPTURE_ADVICE_PROMPT.format(
+                verdict = self.safe(self.ask_json, CAPTURE_ADVICE_PROMPT.format(
                     capture=self.capture,
                     recon=json.dumps(recon), dense=measured("densify", dense),
                     shapes=measured("shapes", shapes),
@@ -3171,7 +3260,9 @@ class Agent:
             "stopped_at": stopped_at,
             "gates": self.gates,
             "claude": {"backend": self.advisor.backend, "calls": self.advisor.calls,
-                       "note": self.advisor.reason},
+                       "note": self.advisor.reason,
+                       **({"usage": self.advisor.usage_total(), "per_call": self.advisor.usage}
+                          if hasattr(self.advisor, "usage_total") else {})},
             "decisions": self.stages,
             "judgements": self.judgements,
             "evaluation": row,
