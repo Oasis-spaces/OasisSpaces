@@ -1685,7 +1685,15 @@ class Agent:
                 continue
             boxes[i]["mounted" if hold == "height" else "hold_place"] = True
             boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
+            # Held as it was before the finish step moved it: its height, or its place on the floor.
+            was = (getattr(self, "prefinish_boxes", None) or [])
+            if i < len(was) and was[i].get("min") and was[i].get("max"):
+                for k in ((2,) if hold == "height" else (0, 1)):
+                    boxes[i]["min"][k], boxes[i]["max"][k] = was[i]["min"][k], was[i]["max"][k]
             applied.append(f"held {ident}'s {hold}")
+            if settle(f"holding {ident}", snapshot):
+                boxes = shapes["boxes"]
+            snapshot = checkpoint()
         floor_z = (shapes.get("room_level") or {}).get("floor_z")
         for item in verdict.get("split_boxes") or []:
             ident = str(item.get("id", ""))
@@ -1738,6 +1746,8 @@ class Agent:
         fit (finish_effect): the measured review sees a rule that lowered a piece,
         with the moves the step made, and can hold that box."""
         before = self.safe(self.measure_room)
+        # The boxes as the review left them: a hold puts a box back to these.
+        self.prefinish_boxes = copy.deepcopy(json.loads((self.space / "shapes.json").read_text()).get("boxes") or [])
         ok, output = self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"), str(self.space),
                                "--finish-only"], "finish", note)
         after = self.safe(self.measure_room) if before else None

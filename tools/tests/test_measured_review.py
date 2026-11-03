@@ -121,11 +121,15 @@ def test_the_review_can_hold_a_box_at_its_height_or_its_place():
     with tempfile.TemporaryDirectory() as tmp:
         shapes = room([box((0, 0, 0.7), (1.2, 0.5, 0.8), "table", "desk"), box((1, 1, 0), (2.5, 3, 0.5), "bed", "bed")], [])
         a = agent(Path(tmp), lambda s: {"score": 0.0})
+        a.prefinish_boxes = [box((0, 0, 0.7), (1.2, 0.5, 0.8), "table", "desk"), box((1, 1, 0), (2.5, 3, 0.5), "bed", "bed")]
+        shapes["boxes"][0]["min"][2] = 0.0                          # the finish stood the desk on the floor
+        shapes["boxes"][1]["min"][1] += 0.4 * UNIT                  # and moved the bed to the wall
         applied = a.apply_structure_review(shapes, {"hold_boxes": [
             {"id": "B0", "hold": "height", "why": "wall-mounted desk"},
             {"id": "B1", "hold": "place", "why": "the bed stands away from the wall"},
             {"id": "B1", "hold": "sideways", "why": "?"}]})
         assert shapes["boxes"][0]["mounted"] and shapes["boxes"][1]["hold_place"], applied
+        assert shapes["boxes"][0]["min"][2] == 0.7 * UNIT and shapes["boxes"][1]["min"][1] == 1 * UNIT   # put back
         assert any(t.startswith("ignored holding B1") for t in applied)
         # the finish faces the held bed but does not move it up to the wall
         roomdict = {"center": [2 * UNIT, 2 * UNIT], "axis_u": [1.0, 0.0], "axis_v": [0.0, 1.0],
