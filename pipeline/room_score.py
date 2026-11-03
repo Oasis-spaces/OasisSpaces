@@ -476,8 +476,9 @@ def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None, walls=N
     level = shapes.get("room_level") or {}
     height = level.get("height")
     cameras = shapes.get("cameras") or []
-    tall = [b for _, b in built
-            if height and (b["max"][2] - level.get("floor_z", b["min"][2])) >= WALK_MIN_SHARE * height]
+    tall = [b for _, b in built                  # a cabinet mounted on the wall stands over the walk, not in it
+            if height and not b.get("mounted")
+            and (b["max"][2] - level.get("floor_z", b["min"][2])) >= WALK_MIN_SHARE * height]
     inside = 0
     for x, y in cameras:
         if any(b["min"][0] <= x <= b["max"][0] and b["min"][1] <= y <= b["max"][1] for b in tall):

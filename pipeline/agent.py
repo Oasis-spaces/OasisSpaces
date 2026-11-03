@@ -220,6 +220,33 @@ show but the room lacks, or drop a misplaced piece and add it again where the ro
 the check did not flag."""
 
 ADD_BOXES_MAX = 3                # boxes Claude may add from the frames in one structure review
+RESIZE_MAX_SHARE = 0.6           # a resize takes at most this share off a box's side ...
+RESIZE_GROW_M = 0.5              # ... or adds at most this much to it
+SPLIT_MIN_M = 0.3                # both parts of a split box are at least this tall
+MEASURED_ROUNDS = 2              # extra structure reviews driven by the measured problems, each kept only if it helps
+PROBLEM_OVERLAP = 0.2            # two pieces sharing this much of the smaller one's volume is a problem worth a look
+PROBLEM_POOR_FIT = 0.15          # a piece covering less of its outlines in the frames than this fits poorly
+MEASURED_NOTE = """
+
+Measured problems. These come from the numbers, not from a picture, and every one of them costs the room's
+measured score: {problems}
+- "walk": the phone was carried through a tall box's footprint, which cannot be (nothing solid stands where the
+  person walked). clear_by_m says how much each side of the box (left, right, top, bottom as seen in the floor plan)
+  would have to move in to clear the walk. The box's points ran on past the furniture, or two pieces were measured as
+  one.
+- "overlap": two built pieces share that much of the smaller one's volume.
+- "no box": the object is outlined in that many frames but no built box stands where it is.
+- "poor fit": the piece's box covers only that share of its outlines in the frames (1.0 would be a perfect fit).
+For these you have two more actions, besides drop, relabel and add:
+- resize_boxes: move one side of a box: side is left, right, top or bottom as seen in the floor plan, or height for
+  its top; by_m > 0 moves that side in (the box shrinks), by_m < 0 moves it out. At most {share:.0%} of the box's
+  size off a side, or {grow} m added.
+- split_boxes: cut a box at a height above the floor into a lower and an upper piece, when the frames show two
+  things stacked (a loft cabinet above a wardrobe, a shelf unit on a desk): lower and upper are each a furniture type
+  (bed, seat, table, wardrobe, block) or "drop"; the upper piece stays on the wall where it is, it is not stood on
+  the floor.
+Use them where the frames show what the real object is and how big; each edit is measured and undone if it lowers
+the score, so fix what the problems point at and leave the rest."""
 FURNITURE_TYPES = {"bed", "seat", "table", "wardrobe", "block"}
 ADDED_SIZE_M = {"width": (0.3, 4.0), "depth": (0.2, 2.0), "height": (0.2, 3.0)}   # sanity limits, metres
 CAMERA_CLEARANCE_M = 0.1         # an added box this close to where the phone was cannot be there
@@ -1041,7 +1068,7 @@ class Agent:
             changes.append("left out " + ", ".join(dropped) + " (limits)")
         return revised, (changes if revised.objects != vocabulary.objects else [])
 
-    def structure_review(self, feedback: list | None = None) -> None:
+    def structure_review(self, feedback: list | None = None, problems: list | None = None) -> None:
         """Claude decides what each measured candidate is. It can drop a wall or
         a box, relabel a box, or add a box for furniture the frames show that the
         points never boxed (placed against a measured wall, place_added_box), but
@@ -1063,10 +1090,13 @@ class Agent:
                                "points": p["points"],
                                **({"surface_behind": size(p["behind"]["depth"])}
                                   if p.get("behind") else {})})
+        floor_z = (shapes.get("room_level") or {}).get("floor_z")
         for i, b in enumerate(shapes["boxes"]):
             candidates.append({"id": f"B{i}", "label": b.get("label"),
                                "detected_as": b.get("detected"),
                                "size": [size(b["max"][k] - b["min"][k]) for k in range(3)],
+                               **({"from_floor": [size(b["min"][2] - floor_z), size(b["max"][2] - floor_z)]}
+                                  if floor_z is not None else {}),
                                "points": b["points"], "built": b.get("build", True),
                                "check": b.get("reason")})
         sheet = self.space / "object-frames.png"
@@ -1099,8 +1129,10 @@ class Agent:
             "The space need not be a closed box: an open-plan area, an L-shaped room or a "
             "capture through several rooms has openings, and walls the camera never faced "
             "are simply absent. A missing wall is not a reason to drop or add anything.\n"
-            "Decide what each candidate is. You cannot move or resize anything; the "
-            "measurements stay. You may drop a wall that duplicates another wall or is "
+            "Decide what each candidate is. "
+            + ("You cannot move or resize anything except as the measured problems below allow; "
+               if problems else "You cannot move or resize anything; the measurements stay. ")
+            + "You may drop a wall that duplicates another wall or is "
             "not a wall (for example a wardrobe front), drop a box that is not a real "
             "object, or relabel a built box as one of: bed, seat, table, wardrobe, block. "
             "Boxes are built as free-standing furniture, so drop any box that is part of "
@@ -1134,7 +1166,12 @@ class Agent:
             '"relabel_boxes": [{"id": string, "label": string, "why": string}], '
             '"add_boxes": [{"label": string, "against": "W<n>", "from_corner_with": "W<n>" or null, '
             '"offset_m": number, "width_m": number, "depth_m": number, "height_m": number, "why": string}], '
-            '"notes": one sentence}')
+            + ('"resize_boxes": [{"id": string, "side": "left|right|top|bottom|height", "by_m": number, "why": string}], '
+               '"split_boxes": [{"id": string, "at_height_m": number, "lower": string, "upper": string, "why": string}], '
+               if problems else "")
+            + '"notes": one sentence}')
+        if problems:
+            prompt += MEASURED_NOTE.format(problems=json.dumps(problems), share=RESIZE_MAX_SHARE, grow=RESIZE_GROW_M)
         images = [plan] + ([sheet] if picked else []) + self.room_frames(3)
         if feedback:
             renders = [r for r in (self.space / "room-render.png", self.space / "room-render-plan.png",
@@ -1522,6 +1559,56 @@ class Agent:
                     boxes = shapes["boxes"]
                 snapshot = checkpoint()
         units = self.densify_metrics().get("colmap_units_per_metre")
+        sides = {"left": (0, "min"), "right": (0, "max"), "bottom": (1, "min"), "top": (1, "max"), "height": (2, "max")}
+        for item in verdict.get("resize_boxes") or []:
+            ident, side = str(item.get("id", "")), str(item.get("side", ""))
+            i = int(ident[1:]) if ident[:1] == "B" and ident[1:].isdigit() else None
+            try:
+                by = float(item.get("by_m")) * (units or 0)
+            except (TypeError, ValueError):
+                by = 0.0
+            if i is None or i >= len(boxes) or not boxes[i].get("build", True):
+                applied.append(f"ignored resizing {ident}: not a built box")
+            elif side not in sides or not units or by == 0:
+                applied.append(f"ignored resizing {ident}: no side '{side}' or no size to move it by")
+            else:
+                k, end = sides[side]
+                length = boxes[i]["max"][k] - boxes[i]["min"][k]
+                by = min(by, RESIZE_MAX_SHARE * length) if by > 0 else max(by, -RESIZE_GROW_M * units)
+                boxes[i][end][k] += -by if end == "max" else by
+                applied.append(f"resized {ident}: its {side} side {'in' if by > 0 else 'out'} by {abs(by) / units:.2f} m")
+                if settle(f"resizing {ident}", snapshot):
+                    boxes = shapes["boxes"]
+                snapshot = checkpoint()
+        floor_z = (shapes.get("room_level") or {}).get("floor_z")
+        for item in verdict.get("split_boxes") or []:
+            ident = str(item.get("id", ""))
+            i = int(ident[1:]) if ident[:1] == "B" and ident[1:].isdigit() else None
+            lower, upper = item.get("lower"), item.get("upper")
+            try:
+                cut = floor_z + float(item.get("at_height_m")) * units
+            except (TypeError, ValueError):
+                cut = None
+            if i is None or i >= len(boxes) or not boxes[i].get("build", True):
+                applied.append(f"ignored splitting {ident}: not a built box")
+            elif cut is None or not units or floor_z is None:
+                applied.append(f"ignored splitting {ident}: no height to cut at")
+            elif not (boxes[i]["min"][2] + SPLIT_MIN_M * units <= cut <= boxes[i]["max"][2] - SPLIT_MIN_M * units):
+                applied.append(f"ignored splitting {ident}: {item.get('at_height_m')} m leaves a part under {SPLIT_MIN_M} m")
+            elif not {lower, upper} <= FURNITURE_TYPES | {"drop"} or lower == upper == "drop":
+                applied.append(f"ignored splitting {ident}: parts must be furniture types or 'drop'")
+            else:
+                top = copy.deepcopy(boxes[i])
+                top["min"][2], boxes[i]["max"][2] = cut, cut
+                top.update({"label": upper if upper != "drop" else top.get("label"), "mounted": True,
+                            "build": upper != "drop", "source": "split", "reason": f"Claude: {item.get('why', '')}"})
+                boxes[i].update({"label": lower if lower != "drop" else boxes[i].get("label"), "build": lower != "drop",
+                                 "reason": f"Claude: {item.get('why', '')}"})
+                boxes.append(top)
+                applied.append(f"split {ident} at {item.get('at_height_m')} m: {lower} below, B{len(boxes) - 1} {upper} above")
+                if settle(f"splitting {ident}", snapshot):
+                    boxes = shapes["boxes"]
+                snapshot = checkpoint()
         for n, item in enumerate(verdict.get("add_boxes") or []):
             what = f"an added {item.get('label')}"
             if n >= ADD_BOXES_MAX:
@@ -1539,6 +1626,79 @@ class Agent:
                     boxes = shapes["boxes"]
                 snapshot = checkpoint()
         return applied
+
+    def measured_problems(self, shapes: dict, measured: dict) -> list[dict]:
+        """What the room score charges for, named box by box so a review can act
+        on it: the walk through a tall box (and how far each side would have to
+        move in to clear it), overlapping pieces, objects outlined in the frames
+        with no box, and boxes that fit their outlines poorly."""
+        units = self.densify_metrics().get("colmap_units_per_metre") or 1.0
+        level = shapes.get("room_level") or {}
+        height, floor_z = level.get("height"), level.get("floor_z", 0.0)
+        cameras = shapes.get("cameras") or []
+        problems = []
+        built = room_score.built_pieces(shapes, room_vocabulary(self.space))
+        for i, b in built:
+            if not height or b.get("mounted") or b["max"][2] - floor_z < room_score.WALK_MIN_SHARE * height:
+                continue
+            inside = [(x, y) for x, y in cameras
+                      if b["min"][0] <= x <= b["max"][0] and b["min"][1] <= y <= b["max"][1]]
+            if not inside:
+                continue
+            xs, ys = [c[0] for c in inside], [c[1] for c in inside]
+            problems.append({"problem": "walk", "box": f"B{i}", "label": b.get("label"),
+                             "cameras_inside": len(inside), "of": len(cameras),
+                             "clear_by_m": {"left": round((max(xs) - b["min"][0]) / units, 2),
+                                            "right": round((b["max"][0] - min(xs)) / units, 2),
+                                            "bottom": round((max(ys) - b["min"][1]) / units, 2),
+                                            "top": round((b["max"][1] - min(ys)) / units, 2)}})
+        for n, (i, a) in enumerate(built):
+            for j, b in built[n + 1:]:
+                share = room_score.overlap_share(a, b)
+                if share >= PROBLEM_OVERLAP:
+                    problems.append({"problem": "overlap", "boxes": [f"B{i}", f"B{j}"],
+                                     "labels": [a.get("label"), b.get("label")], "share": round(share, 2)})
+        for label, piece in (measured.get("pieces") or {}).items():
+            if not piece.get("box"):
+                problems.append({"problem": "no box", "object": label, "frames": piece.get("frames")})
+            elif piece["agreement"] < PROBLEM_POOR_FIT:
+                problems.append({"problem": "poor fit", "object": label, "box": piece["box"],
+                                 "agreement": piece["agreement"]})
+        return problems
+
+    def measured_rechecks(self, measured: dict | None) -> dict | None:
+        """Review the room again while the score still names problems: Claude
+        sees them box by box (measured_problems) and may resize or split boxes
+        as well as drop, relabel and add them; the finish step runs again, and
+        the round is kept only when the room's measured score went up. At most
+        MEASURED_ROUNDS rounds, stopping at the first that does not help."""
+        if measured is None or not self.advisor.available:
+            return measured
+        path = self.space / "shapes.json"
+        for round_no in range(1, MEASURED_ROUNDS + 1):
+            problems = self.measured_problems(json.loads(path.read_text()), measured)
+            if not problems:
+                break
+            print(f"    measured problems, round {round_no}: " + "; ".join(
+                f"{p['problem']} {p.get('box') or p.get('object') or '/'.join(p.get('boxes', []))}" for p in problems))
+            before = path.read_text()
+            self.structure_review(problems=problems)
+            self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"), str(self.space), "--finish-only"],
+                     "finish", "finish the room again after the measured review")
+            self.safe(self.settle_pieces)
+            after = self.safe(self.measure_room)
+            if after is None or room_score.compare(measured, after) != "better":
+                path.write_text(before)
+                self.decide("shapes", "measured recheck",
+                            f"round {round_no} did not raise the room score"
+                            + (f" ({measured['score']:.2f} -> {after['score']:.2f})" if after else "")
+                            + "; kept the room as it was", after)
+                break
+            self.decide("shapes", "measured recheck",
+                        f"round {round_no} raised the room score from {measured['score']:.2f} to {after['score']:.2f}",
+                        after)
+            measured = after
+        return measured
 
     def build_front(self, shapes: dict, i: int, why: str) -> str:
         """Wall i is the front of built-in furniture: move the wall back to the
@@ -2102,6 +2262,7 @@ class Agent:
         measured = self.safe(self.measure_room)
         if measured:
             self.decide("shapes", "score", room_score.describe(measured), measured)
+            measured = self.safe(self.measured_rechecks, measured, default=measured)
         metrics = self.shape_metrics()
         self.decide("shapes", "accept",
                     f"{metrics.get('walls', 0)} walls"
