@@ -439,15 +439,47 @@ class WallEvidence:
         return found
 
 
-def wall_terms(shapes: dict, walls: "WallEvidence | None") -> tuple[float, float, dict]:
+STAND_IN_M = 0.8        # a built wall parallel to a dropped one and this close stands in for it ...
+STAND_IN_COVER = 0.5    # ... when it runs along this share of it
+
+
+def stood_in_for(shapes: dict, i: int, units: float | None) -> bool:
+    """Whether a built wall stands in for wall i: parallel, within STAND_IN_M,
+    along most of it. A dropped plane that one stands in for was the front of
+    tall furniture (a shelf unit, a wardrobe) or a duplicate: the room still
+    has the wall behind it, so its support is not missing."""
+    planes = shapes.get("planes") or []
+    p = planes[i]
+    a, c = np.array(p["axis_a"][:2], float), np.array(p["center"][:2], float)
+    n = np.array([-a[1], a[0]])
+    reach = STAND_IN_M * (units or 1.0)
+    lo, hi = c @ a - p["half_a"], c @ a + p["half_a"]
+    for j, q in enumerate(planes):
+        if j == i or q.get("kind") != "wall" or q.get("build") is False:
+            continue
+        qa, qc = np.array(q["axis_a"][:2], float), np.array(q["center"][:2], float)
+        if abs(qa @ a) < 0.97 or abs((qc - c) @ n) > reach:
+            continue
+        qlo, qhi = qc @ a - q["half_a"], qc @ a + q["half_a"]
+        if min(hi, qhi) - max(lo, qlo) >= STAND_IN_COVER * (hi - lo):
+            return True
+    return False
+
+
+def wall_terms(shapes: dict, walls: "WallEvidence | None", units: float | None = None) -> tuple[float, float, dict]:
     """(missing, cut, per-wall detail): the dropped share of the measured
-    wall support, and the worst built wall's slice through the room."""
+    wall support, and the worst built wall's slice through the room. A dropped
+    wall another built wall stands in for (stood_in_for) is not missing."""
     if walls is None:
         return 0.0, 0.0, {}
     measured = walls.measured(shapes)
+    for k, w in measured.items():
+        if not w["built"] and stood_in_for(shapes, int(k[1:]), units):
+            w["stood_in"] = True
     mass = {k: w["support"] * w["points"] for k, w in measured.items()}
     total = sum(mass.values())
-    missing = sum(m for k, m in mass.items() if not measured[k]["built"]) / total if total else 0.0
+    missing = sum(m for k, m in mass.items()
+                  if not measured[k]["built"] and not measured[k].get("stood_in")) / total if total else 0.0
     cut = max((w["interior"] for w in measured.values() if w["built"]), default=0.0)
     return missing, cut, measured
 
@@ -495,7 +527,7 @@ def room_score(space: Path, shapes: dict, evidence_for, vocabulary=None, walls=N
         doorways[box_id] = max(doorways.get(box_id, 0.0), share)
     doorway = max(doorways.values(), default=0.0)
 
-    missing, cut, measured_walls = wall_terms(shapes, walls)
+    missing, cut, measured_walls = wall_terms(shapes, walls, units_per_metre(space))
 
     score = ((agreement or 0.0) - COLLISION_WEIGHT * collision - WALK_WEIGHT * walk
              - DOORWAY_WEIGHT * doorway - WALL_WEIGHT * missing - WALL_CUT_WEIGHT * cut)
@@ -528,7 +560,8 @@ def describe(result: dict) -> str:
         worst = max(result["doorways"].items(), key=lambda kv: kv[1])
         text += f"; {worst[0]} stands in a doorway or window ({worst[1]:.0%} of it)"
     if result.get("wall_missing"):
-        dropped = sorted(k for k, w in result["walls"].items() if not w["built"] and w["support"])
+        dropped = sorted(k for k, w in result["walls"].items()
+                         if not w["built"] and w["support"] and not w.get("stood_in"))
         text += (f"; dropped walls held {result['wall_missing']:.0%} of the measured wall "
                  f"support ({', '.join(dropped)})")
     if result.get("wall_cut"):

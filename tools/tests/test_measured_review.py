@@ -107,6 +107,35 @@ def test_every_question_carries_the_record_and_folds_its_answer_back():
         assert a.record()["objects"] == [{"name": "desk"}]
 
 
+def test_a_furniture_front_dropped_in_front_of_a_built_wall_is_not_a_missing_wall():
+    import room_score
+    wall = lambda x, half=1.5, build=True: {"kind": "wall", "axis_a": [0.0, 1.0, 0.0], "center": [x * UNIT, 0.0, 1.0],  # noqa: E731
+                                            "half_a": half * UNIT, "build": build}
+    shapes = {"planes": [wall(-1.76, build=False), wall(-2.13), wall(-3.6, build=False)]}
+    assert room_score.stood_in_for(shapes, 0, UNIT)          # 0.37 m in front of the real wall
+    assert not room_score.stood_in_for(shapes, 2, UNIT)      # 1.5 m away: nothing stands in for it
+
+
+def test_the_review_can_hold_a_box_at_its_height_or_its_place():
+    import classify_shapes as cs
+    with tempfile.TemporaryDirectory() as tmp:
+        shapes = room([box((0, 0, 0.7), (1.2, 0.5, 0.8), "table", "desk"), box((1, 1, 0), (2.5, 3, 0.5), "bed", "bed")], [])
+        a = agent(Path(tmp), lambda s: {"score": 0.0})
+        applied = a.apply_structure_review(shapes, {"hold_boxes": [
+            {"id": "B0", "hold": "height", "why": "wall-mounted desk"},
+            {"id": "B1", "hold": "place", "why": "the bed stands away from the wall"},
+            {"id": "B1", "hold": "sideways", "why": "?"}]})
+        assert shapes["boxes"][0]["mounted"] and shapes["boxes"][1]["hold_place"], applied
+        assert any(t.startswith("ignored holding B1") for t in applied)
+        # the finish faces the held bed but does not move it up to the wall
+        roomdict = {"center": [2 * UNIT, 2 * UNIT], "axis_u": [1.0, 0.0], "axis_v": [0.0, 1.0],
+                    "half_u": 2 * UNIT, "half_v": 2 * UNIT}
+        bed = shapes["boxes"][1]
+        before = [list(bed["min"]), list(bed["max"])]
+        cs.orient_furniture([bed], roomdict, lambda d: f"{d:.1f}", UNIT)
+        assert [bed["min"], bed["max"]] == before and bed.get("facing")
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

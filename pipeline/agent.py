@@ -229,6 +229,8 @@ RESIZE_GROW_M = 0.5              # ... or adds at most this much to it
 SPLIT_MIN_M = 0.3                # both parts of a split box are at least this tall
 MEASURED_ROUNDS = 2              # extra structure reviews driven by the measured problems, each kept only if it helps
 PROBLEM_OVERLAP = 0.2            # two pieces sharing this much of the smaller one's volume is a problem worth a look
+FINISH_LOWERED = 0.03           # a piece whose fit the finish step lowered by more than this is shown to the review
+FINISH_MOVES = 12
 PROBLEM_POOR_FIT = 0.15          # a piece covering less of its outlines in the frames than this fits poorly
 MEASURED_NOTE = """
 
@@ -242,6 +244,9 @@ measured score: {problems}
 - "no box": the object is outlined in that many frames but no box is known to be it. If a built box already is that
   object, list it under the object in your record (that is how the score learns which box it is); if none is, add one.
 - "poor fit": the piece's box covers only that share of its outlines in the frames (1.0 would be a perfect fit).
+- "finish": the rule-based finish step that runs after your review lowered these pieces' fit (before -> after), and
+  these are the moves it made. Its rules assume floor-standing furniture and beds against walls; where the frames
+  show otherwise, hold the box.
 For these you have two more actions, besides drop, relabel and add:
 - resize_boxes: move one side of a box: side is left, right, top or bottom as seen in the floor plan, or height for
   its top; by_m > 0 moves that side in (the box shrinks), by_m < 0 moves it out. At most {share:.0%} of the box's
@@ -250,6 +255,9 @@ For these you have two more actions, besides drop, relabel and add:
   things stacked (a loft cabinet above a wardrobe, a shelf unit on a desk): lower and upper are each a furniture type
   (bed, seat, table, wardrobe, block) or "drop"; the upper piece stays on the wall where it is, it is not stood on
   the floor.
+- hold_boxes: tell the finish step to leave a box as measured: hold "height" for a piece mounted on the wall or
+  standing on something (a wall-mounted desk, a shelf): it is not stood on the floor; hold "place" for a piece the
+  frames show where it was measured (a bed away from the wall): it is not moved to a wall.
 Use them where the frames show what the real object is and how big; each edit is measured and undone if it lowers
 the score, so fix what the problems point at and leave the rest."""
 FURNITURE_TYPES = {"bed", "seat", "table", "wardrobe", "block"}
@@ -1255,6 +1263,7 @@ class Agent:
             '"offset_m": number, "width_m": number, "depth_m": number, "height_m": number, "why": string}], '
             + ('"resize_boxes": [{"id": string, "side": "left|right|top|bottom|height", "by_m": number, "why": string}], '
                '"split_boxes": [{"id": string, "at_height_m": number, "lower": string, "upper": string, "why": string}], '
+               '"hold_boxes": [{"id": string, "hold": "height|place", "why": string}], '
                if problems else "")
             + '"notes": one sentence}')
         if problems:
@@ -1668,6 +1677,15 @@ class Agent:
                 if settle(f"resizing {ident}", snapshot):
                     boxes = shapes["boxes"]
                 snapshot = checkpoint()
+        for item in verdict.get("hold_boxes") or []:
+            ident, hold = str(item.get("id", "")), item.get("hold")
+            i = int(ident[1:]) if ident[:1] == "B" and ident[1:].isdigit() else None
+            if i is None or i >= len(boxes) or not boxes[i].get("build", True) or hold not in ("height", "place"):
+                applied.append(f"ignored holding {ident}: not a built box, or no hold '{hold}'")
+                continue
+            boxes[i]["mounted" if hold == "height" else "hold_place"] = True
+            boxes[i]["reason"] = f"Claude: {item.get('why', '')}"
+            applied.append(f"held {ident}'s {hold}")
         floor_z = (shapes.get("room_level") or {}).get("floor_z")
         for item in verdict.get("split_boxes") or []:
             ident = str(item.get("id", ""))
@@ -1715,6 +1733,27 @@ class Agent:
                 snapshot = checkpoint()
         return applied
 
+    def finish_room(self, note: str) -> None:
+        """Run the rule-based finish step, and keep what it did to each piece's
+        fit (finish_effect): the measured review sees a rule that lowered a piece,
+        with the moves the step made, and can hold that box."""
+        before = self.safe(self.measure_room)
+        ok, output = self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"), str(self.space),
+                               "--finish-only"], "finish", note)
+        after = self.safe(self.measure_room) if before else None
+        self.finish_effect = None
+        if before and after:
+            lowered = {label: [before["pieces"][label]["agreement"], piece["agreement"]]
+                       for label, piece in after["pieces"].items()
+                       if label in before["pieces"] and before["pieces"][label]["agreement"] - piece["agreement"] > FINISH_LOWERED}
+            moves = [line.strip() for line in (output or "").splitlines()
+                     if line.strip() and not line.startswith(("room ", "wrote "))][:FINISH_MOVES]
+            self.finish_effect = {"lowered": lowered, "moves": moves,
+                                  "score": [before["score"], after["score"]]}
+            if after["score"] < before["score"] - room_score.EPS:
+                self.remember("finish", f"the finish step lowered the room score {before['score']:.2f} -> "
+                              f"{after['score']:.2f}" + (f"; fits lowered: {lowered}" if lowered else ""))
+
     def measured_problems(self, shapes: dict, measured: dict) -> list[dict]:
         """What the room score charges for, named box by box so a review can act
         on it: the walk through a tall box (and how far each side would have to
@@ -1746,6 +1785,9 @@ class Agent:
                 if share >= PROBLEM_OVERLAP:
                     problems.append({"problem": "overlap", "boxes": [f"B{i}", f"B{j}"],
                                      "labels": [a.get("label"), b.get("label")], "share": round(share, 2)})
+        finish = getattr(self, "finish_effect", None)
+        if finish and finish.get("lowered"):
+            problems.append({"problem": "finish", "lowered": finish["lowered"], "moves": finish["moves"]})
         for label, piece in (measured.get("pieces") or {}).items():
             if not piece.get("box"):
                 problems.append({"problem": "no box", "object": label, "frames": piece.get("frames")})
@@ -1771,8 +1813,7 @@ class Agent:
                 f"{p['problem']} {p.get('box') or p.get('object') or '/'.join(p.get('boxes', []))}" for p in problems))
             before = path.read_text()
             self.structure_review(problems=problems)
-            self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"), str(self.space), "--finish-only"],
-                     "finish", "finish the room again after the measured review")
+            self.finish_room("finish the room again after the measured review")
             self.safe(self.settle_pieces)
             after = self.safe(self.measure_room)
             if after is None or room_score.compare(measured, after) != "better":
@@ -2344,9 +2385,7 @@ class Agent:
         self.safe(self.structure_review)
         # Finish only what survived the review, so a box Claude dropped cannot
         # have pushed a wall out first.
-        self.run([sys.executable, str(ROOT / "tools/classify_shapes.py"),
-                  str(self.space), "--finish-only"], "finish",
-                 "stand furniture on the floor, keep it inside the walls, close the room")
+        self.finish_room("stand furniture on the floor, keep it inside the walls, close the room")
         self.safe(self.settle_pieces)
         measured = self.safe(self.measure_room)
         if measured:

@@ -476,7 +476,7 @@ def back_storage_to_walls(walls: list[dict], boxes: list[dict], room: dict, size
                  else STORAGE_MAX_DEPTH_FRAC * width)
     notes = []
     for b in boxes:
-        if b.get("label") != "wardrobe":
+        if b.get("label") != "wardrobe" or b.get("hold_place"):
             continue
         u_lo, u_hi, v_lo, v_hi = box_in_room(b, room)
         best = None
@@ -767,6 +767,7 @@ def orient_furniture(boxes: list[dict], room: dict, size, units_per_metre=None) 
         if label not in ("wardrobe", "bed"):
             continue
         span = [b["max"][k] - b["min"][k] for k in (0, 1)]
+        held = b.get("hold_place")         # the review saw it stands where it was measured: face it, never move it
         mid = [(b["max"][k] + b["min"][k]) / 2 for k in (0, 1)]
         if label == "wardrobe":
             axis = 0 if span[0] <= span[1] else 1  # depth runs along the shorter side
@@ -789,12 +790,12 @@ def orient_furniture(boxes: list[dict], room: dict, size, units_per_metre=None) 
         gap_lo, gap_hi = b["min"][axis] - stop_lo, stop_hi - b["max"][axis]
         if gap_hi <= gap_lo:
             b["facing"] = "+" + "xy"[axis]
-            if 0 < gap_hi <= snap:
+            if 0 < gap_hi <= snap and not held:
                 b["max"][axis] = stop_hi
                 notes.append(f"moved the bed's head {size(gap_hi)} up to the wall behind it")
         else:
             b["facing"] = "-" + "xy"[axis]
-            if 0 < gap_lo <= snap:
+            if 0 < gap_lo <= snap and not held:
                 b["min"][axis] = stop_lo
                 notes.append(f"moved the bed's head {size(gap_lo)} up to the wall behind it")
     return notes
