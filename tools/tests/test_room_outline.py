@@ -177,6 +177,25 @@ def test_the_floor_mesh_covers_the_outline_only():
     assert abs(ms.surface_inside(floor, polygons).mean() - 24 / 30) < 0.01
 
 
+def test_an_outline_stopped_by_a_wardrobe_moves_back_to_the_wall_behind_it():
+    # A 6 x 5 room; along the top wall stands a wardrobe 0.6 m deep over 4 m of it,
+    # so the outline seen has a notch there. The measured wall is at the top.
+    seen = (np.array([[0, 0], [6, 0], [6, 5], [5, 5], [5, 4.4], [1, 4.4], [1, 5], [0, 5]], float) * UNIT).tolist()
+    outline = {"polygons": [seen]}
+    room = {"center": [3 * UNIT, 2.5 * UNIT], "axis_u": [1.0, 0.0], "axis_v": [0.0, 1.0],
+            "half_u": 3 * UNIT, "half_v": 2.5 * UNIT}
+    walls = [{"plane": {}, "along": "u", "offset": 2.5 * UNIT, "lo": -3 * UNIT, "hi": 3 * UNIT},
+             {"plane": {}, "along": "u", "offset": -2.5 * UNIT, "lo": -3 * UNIT, "hi": 3 * UNIT},
+             {"plane": {}, "along": "v", "offset": -3 * UNIT, "lo": -2.5 * UNIT, "hi": 2.5 * UNIT},
+             {"plane": {}, "along": "v", "offset": 3 * UNIT, "lo": -2.5 * UNIT, "hi": 2.5 * UNIT}]
+    polygons, moved = cs.snap_outline_to_walls(walls, room, outline, UNIT)
+    assert moved >= 1 and len(polygons[0]) == 4, polygons
+    assert abs(abs(ro._area(polygons[0])) / UNIT ** 2 - 30) < 1e-6
+    outline["polygons"] = polygons
+    notes = cs.close_outline(walls, room, outline, lambda d: f"{d / UNIT:.1f} m", UNIT)
+    assert notes == [] and len(walls) == 4, notes      # nothing to close: no wall across the wardrobe's front
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

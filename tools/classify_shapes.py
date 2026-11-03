@@ -600,6 +600,55 @@ MIN_GAP_METRES = 0.30
 MIN_GAP_FRAC = 0.06
 
 
+# Tall furniture against a wall (a wardrobe, a bed's headboard unit, a shelf)
+# looks like wall from above, so the outline seen stops at its front. A measured
+# wall running along an outline side, this close behind (or in front of) it and
+# covering this share of it, is where that side really is.
+SNAP_TO_WALL_METRES = 0.80
+SNAP_TO_WALL_FRAC = 0.20        # of the room's width, without a metric scale
+SNAP_MIN_COVER = 0.5
+
+
+def snap_outline_to_walls(walls: list[dict], room: dict, outline: dict, units_per_metre=None) -> tuple[list, int]:
+    """The outline's polygons with each side moved onto the measured wall that
+    runs along it (see SNAP_TO_WALL_METRES), in scene x, y. Returns the
+    polygons and how many sides moved."""
+    from room_outline import _area, _clean
+
+    width = 2 * min(room["half_u"], room["half_v"])
+    reach = SNAP_TO_WALL_METRES * units_per_metre if units_per_metre else SNAP_TO_WALL_FRAC * width
+    out, moved = [], 0
+    for poly in outline.get("seen") or outline["polygons"]:
+        pts = [list(to_room(room, p)) for p in poly]
+        n = len(pts)
+        for i in range(n):
+            a, b = pts[i], pts[(i + 1) % n]
+            along = "u" if abs(b[0] - a[0]) >= abs(b[1] - a[1]) else "v"
+            k = 1 if along == "u" else 0                     # the coordinate the side sits at
+            lo, hi = sorted((a[1 - k], b[1 - k]))
+            if hi - lo <= 0:
+                continue
+            best = None
+            for w in walls:
+                if w["along"] != along or abs(w["offset"] - a[k]) > reach:
+                    continue
+                cover = (min(hi, w["hi"]) - max(lo, w["lo"])) / (hi - lo)
+                if cover >= SNAP_MIN_COVER and (best is None or abs(w["offset"] - a[k]) < abs(best - a[k])):
+                    best = w["offset"]
+            if best is None or best == a[k]:
+                continue
+            trial = [q[:] for q in pts]
+            trial[i][k] = trial[(i + 1) % n][k] = best
+            before, after = abs(_area(pts)), _area(trial)
+            if after <= 0 or abs(after - before) > 0.5 * before:  # it would fold the outline over
+                continue
+            pts, moved = trial, moved + 1
+        pts = _clean([tuple(q) for q in pts])
+        if len(pts) >= 4:
+            out.append([list(map(float, from_room(room, *q))) for q in pts])
+    return out or outline["polygons"], moved
+
+
 def close_outline(walls: list[dict], room: dict, outline: dict, size, units_per_metre=None) -> list[str]:
     """Give every side of the room's outline a wall: a stretch no measured wall
     covers (the camera never faced it, or the room turns a corner the
@@ -756,6 +805,12 @@ def finish_room(data: dict, units_per_metre: float | None = None,
     join_corners(walls, room)
     before = len(walls)
     outline = data.get("outline")
+    if outline:
+        outline.setdefault("seen", outline["polygons"])     # as stage 3 found it; snapping starts from it each run
+        outline["polygons"], moved = snap_outline_to_walls(walls, room, outline, units_per_metre)
+        if moved:
+            notes.append(f"moved {moved} side(s) of the room's outline onto the walls behind them "
+                         "(tall furniture stood in front)")
     notes += (close_outline(walls, room, outline, size, units_per_metre) if outline
               else close_room(walls, furniture, room, size))
     join_corners(walls, room)
