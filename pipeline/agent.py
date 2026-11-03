@@ -1850,6 +1850,13 @@ class Agent:
                     + "; kept the first room")
 
     def build_room(self) -> None:
+        if not Path(BLENDER).exists():
+            # Without Blender (a Linux box with no install) there is no room.blend and no
+            # render to judge; the room model itself is finished, so the run carries on.
+            note = f"Blender not found at {BLENDER}: skipping the room build and its render check (set BLENDER to its path)"
+            print("    " + note)
+            self.log(note)
+            return
         self.run([BLENDER, "--background",
                   "--python", str(ROOT / "tools/blender_room.py"), "--",
                   str(self.space / "shapes.json"), str(self.space / "room.blend"),

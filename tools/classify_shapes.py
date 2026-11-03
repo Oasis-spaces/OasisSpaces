@@ -518,6 +518,51 @@ def extend_box_to_wall(box: dict, room: dict, wall: dict, sign: float) -> bool:
     return True
 
 
+# The phone was carried along the walk, so that floor is open: no piece of
+# furniture stands there. A hand reaches out over a bed's edge or a desk, so a
+# box may run this far over the path; beyond that its points ran on past the
+# furniture (clothes on the floor, a loft cabinet merged with the wardrobe
+# below, the walk itself mislabelled) and it is cut back from the side that
+# costs it least. More than this share of a side is never cut: such a box is
+# left for the review to judge.
+WALK_REACH_METRES = 0.30
+WALK_REACH_FRAC = 0.08          # of the room's width, without a metric scale
+WALK_MAX_CUT_SHARE = 0.60
+
+
+def clear_the_walk(boxes: list[dict], cameras, room: dict, size, units_per_metre=None,
+                   names: list[str] | None = None) -> list[str]:
+    """Trim each box so the camera path runs at most WALK_REACH over it."""
+    if not cameras:
+        return []
+    width = 2 * min(room["half_u"], room["half_v"])
+    reach = WALK_REACH_METRES * units_per_metre if units_per_metre else WALK_REACH_FRAC * width
+    cams = [(float(c[0]), float(c[1])) for c in cameras]
+    notes = []
+    for i, b in enumerate(boxes):
+        name = names[i] if names else f"box {i}"
+        for _ in range(4):                                     # one side at a time
+            lo, hi = b["min"], b["max"]
+            r, e = (reach, reach), reach * 1.001           # a camera just cut to the edge's reach is not inside
+            inside = [c for c in cams if lo[0] + e < c[0] < hi[0] - e and lo[1] + e < c[1] < hi[1] - e]
+            if not inside:
+                break
+            # the cut that puts every such camera within reach of the box's edge, per side
+            cuts = {(0, "max"): hi[0] - (min(c[0] for c in inside) + r[0]),
+                    (0, "min"): (max(c[0] for c in inside) - r[0]) - lo[0],
+                    (1, "max"): hi[1] - (min(c[1] for c in inside) + r[1]),
+                    (1, "min"): (max(c[1] for c in inside) - r[1]) - lo[1]}
+            allowed = {k: v for k, v in cuts.items() if v <= WALK_MAX_CUT_SHARE * (hi[k[0]] - lo[k[0]])}
+            if not allowed:
+                notes.append(f"the walk runs through the middle of {name} {b.get('label')}; left as it is")
+                break
+            (axis, end), cut = min(allowed.items(), key=lambda kv: kv[1] / (hi[kv[0][0]] - lo[kv[0][0]]))
+            b[end][axis] += -cut if end == "max" else cut
+            notes.append(f"cut {size(cut)} off {name} {b.get('label')}: the phone was carried there, "
+                         "so nothing stands on that floor")
+    return notes
+
+
 def contain_furniture(walls: list[dict], boxes: list[dict], room: dict, size) -> list[str]:
     """Move walls on the room's edge out so furniture does not cut through
     them. The measured furniture wins over the measured wall, up to a limit."""
@@ -801,6 +846,8 @@ def finish_room(data: dict, units_per_metre: float | None = None,
         notes += left_out
         join_corners(walls, room)
     notes += back_storage_to_walls(walls, furniture, room, size, units_per_metre)
+    notes += clear_the_walk(furniture, data.get("cameras"), room, size, units_per_metre,
+                            names=[f"B{i}" for i, _ in built])
     notes += contain_furniture(walls, furniture, room, size)
     join_corners(walls, room)
     before = len(walls)
