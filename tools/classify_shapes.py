@@ -1267,8 +1267,15 @@ def main(argv: list[str] | None = None) -> int:
     outline = data.get("outline")
     margin = outline_margin(outline, units_per_metre) if outline else 0.0
     if outline:
+        # A wall may stand as far behind the outline seen as the finish step moves an
+        # outline side to meet it (tall furniture in front, SNAP_TO_WALL): only a wall
+        # beyond that is in another space.
+        width = max(max(p[k] for poly in outline["polygons"] for p in poly)
+                    - min(p[k] for poly in outline["polygons"] for p in poly) for k in (0, 1))
+        wall_margin = max(margin, SNAP_TO_WALL_METRES * units_per_metre if units_per_metre
+                          else SNAP_TO_WALL_FRAC * width)
         for i, (plane, label) in enumerate(zip(planes, plane_labels)):
-            if label == "wall" and plane.get("build", True) and not wall_near_outline(plane, outline, margin):
+            if label == "wall" and plane.get("build", True) and not wall_near_outline(plane, outline, wall_margin):
                 plane["build"] = False
                 plane["reason"] = "outside the room's outline: a wall of a space seen through a door"
                 print(f"left out W{i}: it stands outside the room's outline, in a space seen through a door")
