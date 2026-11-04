@@ -425,7 +425,7 @@ def test_each_wall_drop_is_measured_on_its_own_and_undone_when_it_loses_a_measur
     applied = agent.Agent.apply_structure_review(
         agent_, shapes, {"drop_walls": [{"id": "W0", "why": "x"}, {"id": "W1", "why": "x"},
                                         {"id": "W5", "why": "x"}, {"id": "W2", "why": "x"}]})
-    assert applied == ["kept W0: the largest wall is never dropped", "dropped W1", "dropped W5",
+    assert applied == ["kept W0: the largest wall is never dropped unmeasured", "dropped W1", "dropped W5",
                        "kept W2: at most half the walls can be dropped"]
     assert [p.get("build", True) for p in shapes["planes"]] == [True, False, True, True, True, False]
 

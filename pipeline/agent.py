@@ -1588,7 +1588,11 @@ class Agent:
             walls = {i: p for i, p in enumerate(shapes["planes"])
                      if p["kind"] == "wall" and p.get("build", True)}
             fronted.clear()
-        biggest = max(walls, key=lambda i: walls[i]["points"]) if walls else None
+        # Without a measurement to undo a wrong drop, the largest wall and the largest
+        # detected object stay whatever the review says. With one, the score decides:
+        # the guard used to overrule Claude when it was right (a shelf unit's front
+        # taken for the largest wall, a curtain boxed as the wardrobe's door).
+        biggest = max(walls, key=lambda i: walls[i]["points"]) if walls and measured is None else None
         can_drop = len(walls) // 2  # never remove more than half the walls
         snapshot = checkpoint()
         for item in verdict.get("drop_walls") or []:
@@ -1599,7 +1603,7 @@ class Agent:
             elif i not in walls:
                 applied.append(f"ignored {ident}: not a wall candidate")
             elif i == biggest:
-                applied.append(f"kept {ident}: the largest wall is never dropped")
+                applied.append(f"kept {ident}: the largest wall is never dropped unmeasured")
             elif can_drop <= 0:
                 applied.append(f"kept {ident}: at most half the walls can be dropped")
             else:
@@ -1622,7 +1626,8 @@ class Agent:
         snapshot = checkpoint()
         vouched = self.safe(self.phone_matches, default={}) or {}
         detected = [i for i, b in enumerate(boxes) if b.get("detected") and b.get("build", True)]
-        main_object = max(detected, key=lambda i: boxes[i]["points"]) if detected else None
+        main_object = (max(detected, key=lambda i: boxes[i]["points"])
+                       if detected and measured is None else None)
         for item in verdict.get("drop_boxes") or []:
             ident = str(item.get("id", ""))
             i = int(ident[1:]) if ident[:1] == "B" and ident[1:].isdigit() else None
@@ -1631,7 +1636,7 @@ class Agent:
                 continue
             if i == main_object:
                 applied.append(f"kept {ident}: the room's largest detected object "
-                               f"({boxes[i]['detected']}) is never dropped")
+                               f"({boxes[i]['detected']}) is never dropped unmeasured")
                 continue
             if ident in vouched and boxes[i].get("source") not in ("claude", "phone", "masks"):
                 # Two independent measurements agree on it: one opinion does not remove it.
