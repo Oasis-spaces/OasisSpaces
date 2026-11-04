@@ -373,6 +373,12 @@ Revise the list so the detector finds what is really in the space, and nothing e
   help the detector ("almirah" -> "wardrobe", "monitor" -> "computer screen").
 - "remove": a name whose boxes land on something else (a "chest of drawers" box on the side of a bed, a "wardrobe" box
   on a wall shelf) and whose own object is not in the room. Removing it frees those points for the right name.
+- furniture fronts: a wardrobe's or cupboard's doors, panels or drawers (patterned, glossy, mirrored or plain) are often
+  boxed as a flat thing (poster, curtain, door, television, mirror) or not at all, and the furniture is then left with
+  its edges only. Wherever the frames show that, "add" the front as a name of its own with the furniture's role and
+  builder, worded for what it looks like ("patterned sliding wardrobe door", "mirrored wardrobe door", role storage,
+  build_as wardrobe), and say in "wrong" which names landed on it. A furniture outline wins the pixels a poster, door or
+  curtain outline shares with it, so the flat name may stay for the real poster or curtain elsewhere.
 Change nothing when the detections already match the room. Mirrors, windows and screens are always searched for.
 At most {limit} names in total.
 Fields: {{"objects_seen": array of short phrases, "missed": array of objects no box covers, "wrong": array of

@@ -367,10 +367,29 @@ class Segmenter:
 
 
 def pixel_labels(us: np.ndarray, vs: np.ndarray, detections: list[dict],
-                 index: dict[str, int]) -> np.ndarray:
+                 index: dict[str, int], yielding: set[str] | None = None,
+                 furniture: set[str] | None = None) -> np.ndarray:
     """Label index per pixel: the highest-scoring detection covering it, by
     its outline when Segmenter gave it one, else by its rectangle. Among
-    detections of about the same score the smaller wins: a pillow on a bed."""
+    detections of about the same score the smaller wins: a pillow on a bed.
+
+    A `yielding` name (a fixture or a hanging thing: poster, door, curtain)
+    never takes a pixel a `furniture` name's outline also covers, whatever
+    their scores. Nothing of the room hangs in front of a wardrobe; the
+    detector calls a wardrobe's patterned or glossy door panels a poster or a
+    curtain, and those points left the wardrobe with only its edges."""
+    labels = _pixel_labels(us, vs, detections, index)
+    if yielding and furniture:
+        ids = [index[n] for n in yielding if n in index]
+        at = np.flatnonzero(np.isin(labels, ids))
+        if len(at):
+            under = _pixel_labels(us[at], vs[at], [d for d in detections if d["label"] in furniture], index)
+            labels[at[under > 0]] = under[under > 0]
+    return labels
+
+
+def _pixel_labels(us: np.ndarray, vs: np.ndarray, detections: list[dict],
+                  index: dict[str, int]) -> np.ndarray:
     labels = np.zeros(len(us), dtype=np.uint8)
 
     def area(d):

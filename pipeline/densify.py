@@ -353,7 +353,7 @@ def main():
         print(f"Depth Anything V2 (small) on {device}")
 
     use_detector = args.depth_model == "moge" and not args.no_semantics
-    label_index, label_names, unreliable_ids = None, None, np.zeros(0, int)
+    label_index, label_names, unreliable_ids, yielding = None, None, np.zeros(0, int), set()
 
     all_pts, all_cols, all_norms, all_labels = [], [], [], []
     dropped_unreliable, filled_on_planes, fills = 0, 0, {}
@@ -422,6 +422,8 @@ def main():
                 label_index = {name: i for i, name in enumerate(label_names)}
                 unreliable_ids = np.array([label_index[name] for name in vocabulary.unreliable],
                                           dtype=int)
+                # Names of the room itself: they give way to furniture outlines (pixel_labels).
+                yielding = set(vocabulary.with_role("fixture", "hanging"))
                 meta["objects"] = vocabulary.to_json()
                 print(f"Object detection: GroundingDINO-tiny on {detector.device}, "
                       f"{len(vocabulary.names)} names ({vocabulary.source} list): "
@@ -564,7 +566,8 @@ def main():
             without_ray.append(no_ray)
             labels = None
             if label_index is not None:
-                labels = pixel_labels(us, vs, f["detections"], label_index)
+                labels = pixel_labels(us, vs, f["detections"], label_index,
+                                      yielding, set(vocabulary.with_role("furniture", "storage")))
                 on_unreliable = np.isin(labels, unreliable_ids)
                 if filled_map is not None and on_unreliable.any():
                     # A filled outline stands where its surface is, so its

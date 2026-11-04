@@ -38,6 +38,11 @@ rearrange it without surprises:
   names on the room's object list and label the points. The detector only finds
   what it is asked for, and it takes words literally: a list meant for another
   room finds a sofa in a bedroom.
+  A wardrobe's or cupboard's doors (patterned, glossy, mirrored) are often boxed
+  as a flat thing (poster, curtain, door, screen) or missed, which leaves the
+  furniture with its edges only. The fix is a name for the front itself
+  ("patterned sliding wardrobe door", storage); a furniture outline always wins
+  the pixels a poster, door or curtain outline shares with it.
 - **Shapes.** RANSAC finds the walls, floor and ceiling. Labelled points become
   boxes. The usual errors come from this step:
   - Storage names (wardrobe, chest of drawers, overhead cabinet) are clustered
