@@ -68,6 +68,21 @@ def test_the_bed_comes_out_as_a_piece_in_metres_with_y_up():
         assert np.allclose(bed_box["max"], [1.5, 0.5, 1.0], atol=1e-3)
         assert room["floorColor"] == [150, 140, 120] and abs(room["height"] - 2.6) < 1e-6
         assert room["walls"][0]["from"] == [2.0, 1.5] and room["walls"][0]["to"] == [2.0, -1.5]
+        assert room["scaleSource"] == "video"
+
+        # A person measured the bed's 1.0 m width as really 1.1 m: the space gets its real scale.
+        import set_real_scale
+        done = set_real_scale.set_scale(space, real_m=1.1, reconstructed_m=1.0)
+        assert abs(done["factor"] - 1.1) < 1e-9
+        meta = json.loads((space / "densify.json").read_text())
+        assert meta["colmap_units_per_metre_video"] == U and abs(meta["colmap_units_per_metre"] - U / 1.1) < 1e-9
+        room = json.loads((sve.export(space) / "room.json").read_text())
+        assert room["scaleSource"] == "measured"
+        bed = room["pieces"][0]
+        assert abs((bed["max"][0] - bed["min"][0]) - 1.1) < 1e-3 and abs(room["height"] - 2.86) < 1e-3
+        # set again from the same video-scale measurement: the factor is not applied twice
+        set_real_scale.set_scale(space, real_m=1.1, reconstructed_m=1.0)
+        assert abs(json.loads((space / "densify.json").read_text())["colmap_units_per_metre"] - U / 1.1) < 1e-9
 
 
 if __name__ == "__main__":

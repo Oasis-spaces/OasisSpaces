@@ -49,7 +49,8 @@ def export(space: Path, max_points: int = 450_000) -> Path:
 
     space = Path(space)
     shapes = json.loads((space / "shapes.json").read_text())
-    metre = json.loads((space / "densify.json").read_text())["colmap_units_per_metre"]
+    meta = json.loads((space / "densify.json").read_text())
+    metre = meta["colmap_units_per_metre"]
     world = np.array(shapes["world"], float)
     level, room = shapes["room_level"], shapes["room"]
     origin = np.array([room["center"][0], room["center"][1], level["floor_z"]], float)
@@ -118,7 +119,10 @@ def export(space: Path, max_points: int = 450_000) -> Path:
         f.write(np.ascontiguousarray(colours, np.uint8).tobytes())
         f.write(piece_of.tobytes())
     (out / "room.json").write_text(json.dumps({
-        "space": space.name, "count": int(len(pts)), "height": round(level["height"] / metre, 3),
+        "space": space.name, "count": int(len(pts)),
+        # "video": metres from monocular depth; "measured": set from a real length (set_real_scale.py)
+        "scaleSource": "measured" if meta.get("scale_measured") else "video",
+        "scaleMeasured": meta.get("scale_measured"), "height": round(level["height"] / metre, 3),
         "floorColor": floor_colour.tolist(), "floor": floor_polys, "walls": walls, "pieces": pieces,
         "path": path}, indent=1) + "\n")
     return out

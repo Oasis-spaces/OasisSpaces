@@ -30,6 +30,7 @@
   .piece.selected { border-color: var(--accent); }
   .piece.removed .name { text-decoration: line-through; color: var(--muted); }
   .piece .meta { color: var(--muted); font-size: 12px; }
+  .piece > .row { flex-wrap: nowrap; }
   .tag { font-size: 11px; padding: 1px 6px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
   .tag.added { color: var(--accent); border-color: #2f6aa6; }
   #selected { margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; display: none; }
@@ -50,6 +51,9 @@
   .card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: #2a2f36; }
   .card div { padding: 6px 8px; font-size: 12px; }
   .search { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: #15181c; }
+  #labels { position: fixed; inset: 0; pointer-events: none; }
+  .measure-label { position: absolute; left: 0; top: 0; background: #ffd166; color: #1b1b1b; font-weight: 600;
+                   font-size: 12px; padding: 2px 7px; border-radius: 99px; white-space: nowrap; }
   .credit { color: var(--muted); font-size: 12px; margin-top: 10px; }
   .credit a { color: var(--accent); }
   @media (max-width: 640px) {
@@ -85,6 +89,11 @@
     </div>
   </div>
 
+  <h2>Measure</h2>
+  <div class="row"><button id="measure">Measure a distance</button><button id="reset-scale" disabled>Reset scale</button></div>
+  <div class="sub" id="scale-status" style="margin-top:6px"></div>
+  <div id="measures" style="margin-top:6px"></div>
+
   <h2>Add furniture</h2>
   <div class="row">
     <button class="primary" id="open-catalogue">Browse free models</button>
@@ -107,6 +116,7 @@
   <button id="view-top">From above</button>
   <button id="view-inside">From inside</button>
 </div>
+<div id="labels"></div>
 <div id="status">Loading the space…</div>
 
 <div id="catalogue">

@@ -485,6 +485,14 @@ with the floor's colour, marked as inferred), and add furniture from
 size), a `.glb`/`.gltf` link or a file; drag what you add to move it, turn it
 and size it. The layout is kept in the browser and can be exported as JSON.
 
+**Measure** a distance by clicking two points. A reconstruction from video alone
+takes its metres from monocular depth; if you know a real length (a door's width,
+a wall), **Set real length** on that measurement and the whole space rescales to
+it (added furniture keeps its true size). To make it stick for every stage:
+export the layout and run `python3 tools/set_real_scale.py spaces/<name> --layout
+<name>-layout.json` (or `--real 0.90 --reconstructed 0.83`), which writes the
+corrected scale into densify.json and re-exports the viewer in real metres.
+
 ```bash
 python3 tools/space_viewer_export.py spaces/bedroom     # writes spaces/bedroom/viewer/
 python3 -m http.server 8734                             # from the project root

@@ -37,7 +37,12 @@ const modelGroup = new THREE.Group();     // walls, floor outline, boxes
 const pathGroup = new THREE.Group();
 const fillGroup = new THREE.Group();      // floor filled where a piece was taken out
 const addedGroup = new THREE.Group();
-scene.add(modelGroup, pathGroup, fillGroup, addedGroup);
+const measureGroup = new THREE.Group();   // measurement lines
+// Everything measured from the video lives in spaceRoot, whose scale a real length sets
+// (Set real length); added furniture stays at its true size outside it.
+const spaceRoot = new THREE.Group();
+spaceRoot.add(modelGroup, pathGroup, fillGroup, measureGroup);
+scene.add(spaceRoot, addedGroup);
 pathGroup.visible = false;
 
 let room = null;
@@ -47,6 +52,10 @@ const pieces = new Map();      // id -> {info, box (helper), pick (invisible mes
 const added = new Map();       // id -> {group, source, name}
 let selected = null;
 let nextAdded = 1;
+let factor = 1;                // real metres per reconstructed metre (1 until a real length is set)
+let realScale = null;          // {a, b, real}: the measurement that set it
+const measures = [];           // {a, b (Vector3, reconstructed metres), line, label}
+let measuring = null;          // null, or {first: Vector3 | null}
 
 function resize() {
   camera.aspect = innerWidth / innerHeight;
@@ -88,20 +97,26 @@ async function loadSpace() {
   geometry.setAttribute("piece", new THREE.BufferAttribute(new Uint8Array(buffer, n * 15, n), 1));
   points = new THREE.Points(geometry, pointsMaterial());
   points.frustumCulled = false;
-  scene.add(points);
+  spaceRoot.add(points);
   resize();
   buildModel();
   $("title").textContent = room.space.replace(/-/g, " ");
   const span = bounds();
-  $("subtitle").textContent = `${span.x.toFixed(1)} × ${span.z.toFixed(1)} m, ${room.height.toFixed(2)} m tall · ` +
-    `${n.toLocaleString()} points · ${room.pieces.length} pieces`;
+  updateSubtitle();
   viewFromAbove();
 }
 
 function bounds() {
-  const xs = room.floor.flat().map((p) => p[0]), zs = room.floor.flat().map((p) => p[1]);
+  // In real metres: the reconstructed room times the scale a real length set.
+  const xs = room.floor.flat().map((p) => p[0] * factor), zs = room.floor.flat().map((p) => p[1] * factor);
   return { x: Math.max(...xs) - Math.min(...xs), z: Math.max(...zs) - Math.min(...zs),
            cx: (Math.max(...xs) + Math.min(...xs)) / 2, cz: (Math.max(...zs) + Math.min(...zs)) / 2 };
+}
+
+function updateSubtitle() {
+  const span = bounds();
+  $("subtitle").textContent = `${span.x.toFixed(2)} × ${span.z.toFixed(2)} m, ${(room.height * factor).toFixed(2)} m tall · ` +
+    `${room.count.toLocaleString()} points · ${room.pieces.length} pieces`;
 }
 
 // ------------------------------------------------------------------ the room model
@@ -133,7 +148,7 @@ function buildModel() {
     const pick = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ visible: false }));
     pick.position.set(...centre);
     pick.userData = { kind: "piece", id: info.id };
-    scene.add(pick);
+    spaceRoot.add(pick);
     pieces.set(info.id, { info, box, pick, fill: null, removed: false });
   }
   if (room.path.length > 1) {
@@ -285,7 +300,7 @@ function renderList() {
     list.appendChild(el);
   };
   for (const [id, p] of pieces) {
-    const s = p.info.max.map((v, k) => v - p.info.min[k]);
+    const s = p.info.max.map((v, k) => (v - p.info.min[k]) * factor);
     row(id, p.info.name, `${s[0].toFixed(2)} × ${s[2].toFixed(2)} m, ${s[1].toFixed(2)} m tall`, p.removed ? "taken out" : "filmed", p.removed ? "removed" : "");
   }
   for (const [id, a] of added) row(id, a.name, "drag to move", "added");
@@ -347,6 +362,7 @@ function aim(event) {
 
 renderer.domElement.addEventListener("pointerdown", (event) => {
   downAt = { x: event.clientX, y: event.clientY };
+  if (measuring) return;
   aim(event);
   const hit = ray.intersectObjects(addedGroup.children, true)[0];
   if (hit) {
@@ -370,10 +386,145 @@ renderer.domElement.addEventListener("pointerup", (event) => {
   if (dragging) { dragging = null; controls.enabled = true; persist(); return; }
   if (!downAt || Math.hypot(event.clientX - downAt.x, event.clientY - downAt.y) > 5) return;   // a drag of the view
   aim(event);
+  if (measuring) { measureClick(); return; }
   const picks = [...pieces.values()].filter((p) => !p.removed).map((p) => p.pick);
   const hit = ray.intersectObjects(picks, false)[0];
   select(hit ? hit.object.userData.id : null);
 });
+
+// ------------------------------------------------------------------ measuring
+function surfaceUnderPointer() {
+  // The nearest visible point of the cloud under the pointer, else a box's face, else
+  // the floor; in reconstructed metres (spaceRoot's own frame).
+  ray.params.Points.threshold = 0.02;
+  const piece = points.geometry.getAttribute("piece");
+  const hit = ray.intersectObject(points, false).find((h) => !hidden[piece.getX(h.index)]);
+  const box = ray.intersectObjects([...pieces.values()].filter((p) => !p.removed).map((p) => p.pick), false)[0];
+  let at = hit ? hit.point : null;
+  if (box && (!at || box.distance < hit.distance - 0.05)) at = box.point;
+  if (!at) at = ray.ray.intersectPlane(floorPlane, new THREE.Vector3());
+  return at ? spaceRoot.worldToLocal(at.clone()) : null;
+}
+
+function startMeasuring() {
+  measuring = { first: null };
+  $("measure").textContent = "Cancel measuring";
+  say("Click the first point of the length you want to measure.");
+}
+function stopMeasuring(text) {
+  measuring = null;
+  $("measure").textContent = "Measure a distance";
+  if (text) say(text);
+}
+
+function measureClick() {
+  const at = surfaceUnderPointer();
+  if (!at) return;
+  if (!measuring.first) {
+    measuring.first = at;
+    say("Now click the second point.");
+    return;
+  }
+  const m = addMeasure(measuring.first, at);
+  stopMeasuring(`${fmt(lengthOf(m))} between the two points. Know the real length? Set it in the panel.`);
+}
+
+const lengthOf = (m) => m.a.distanceTo(m.b) * factor;
+const fmt = (metres) => (metres < 1 ? `${(metres * 100).toFixed(1)} cm` : `${metres.toFixed(3)} m`);
+
+function addMeasure(a, b, save = true) {
+  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]),
+                              new THREE.LineBasicMaterial({ color: 0xffd166, depthTest: false }));
+  line.renderOrder = 10;
+  const dots = new THREE.Points(new THREE.BufferGeometry().setFromPoints([a, b]),
+                                new THREE.PointsMaterial({ color: 0xffd166, size: 8, sizeAttenuation: false, depthTest: false }));
+  dots.renderOrder = 10;
+  line.add(dots);
+  measureGroup.add(line);
+  const label = document.createElement("div");
+  label.className = "measure-label";
+  $("labels").appendChild(label);
+  const m = { a: a.clone(), b: b.clone(), line, label };
+  measures.push(m);
+  renderMeasures();
+  if (save) persist();
+  return m;
+}
+
+function removeMeasure(m) {
+  measureGroup.remove(m.line);
+  m.label.remove();
+  measures.splice(measures.indexOf(m), 1);
+  if (realScale && realScale.measure === m) setScale(1, null);
+  renderMeasures();
+  persist();
+}
+
+function setScale(value, from, save = true) {
+  // `value` real metres per reconstructed metre; `from` the measurement and the real length behind it.
+  factor = value;
+  realScale = from;
+  spaceRoot.scale.setScalar(factor);
+  updateSubtitle();
+  renderList();
+  renderMeasures();
+  if (save) persist();
+}
+
+function setRealLength(m, metres) {
+  const measured = m.a.distanceTo(m.b);
+  if (!(metres > 0) || measured <= 0) return;
+  setScale(metres / measured, { measure: m, real: metres });
+  const change = (factor - 1) * 100;
+  say(`Scale set from a ${fmt(metres)} length: the space is ${Math.abs(change).toFixed(1)}% ` +
+      `${change >= 0 ? "larger" : "smaller"} than reconstructed.`);
+}
+
+function renderMeasures() {
+  const list = $("measures");
+  list.textContent = "";
+  for (const m of measures) {
+    const row = document.createElement("div");
+    row.className = "piece";
+    const isScale = realScale && realScale.measure === m;
+    row.innerHTML = `<div><div class="name"></div><div class="meta"></div></div><div class="row"></div>`;
+    row.querySelector(".name").textContent = fmt(lengthOf(m));
+    row.querySelector(".meta").textContent = isScale ? "sets the real scale" : `reconstructed ${fmt(m.a.distanceTo(m.b))}`;
+    const buttons = row.querySelector(".row");
+    const set = document.createElement("button");
+    set.textContent = "Set real length";
+    set.onclick = (e) => {
+      e.stopPropagation();
+      const answer = prompt("The real length, in metres (e.g. 0.90 for a 90 cm door):", lengthOf(m).toFixed(3));
+      if (answer !== null) setRealLength(m, parseFloat(answer.replace(",", ".")));
+    };
+    const del = document.createElement("button");
+    del.textContent = "×";
+    del.className = "danger";
+    del.onclick = (e) => { e.stopPropagation(); removeMeasure(m); };
+    buttons.append(set, del);
+    list.appendChild(row);
+    m.label.textContent = fmt(lengthOf(m));
+  }
+  const change = (factor - 1) * 100;
+  const fixed = room.scaleMeasured;
+  $("scale-status").textContent = realScale
+    ? `Scale set from a real ${fmt(realScale.real)}: ${Math.abs(change).toFixed(1)}% ${change >= 0 ? "larger" : "smaller"} than reconstructed. ` +
+      "Export the layout and run tools/set_real_scale.py to fix it in the pipeline."
+    : fixed ? `Real scale, fixed in the pipeline from a measured ${fmt(fixed.real_m)}.`
+            : "Scale as reconstructed (from the video alone).";
+  $("reset-scale").disabled = !realScale;
+}
+
+function placeLabels() {
+  const r = renderer.domElement.getBoundingClientRect();
+  for (const m of measures) {
+    const mid = spaceRoot.localToWorld(m.a.clone().add(m.b).multiplyScalar(0.5)).project(camera);
+    const visible = mid.z < 1 && measureGroup.visible;
+    m.label.style.display = visible ? "block" : "none";
+    m.label.style.transform = `translate(${(mid.x + 1) / 2 * r.width}px, ${(1 - mid.y) / 2 * r.height}px) translate(-50%, -50%)`;
+  }
+}
 
 // ------------------------------------------------------------------ views
 function viewFromAbove() {
@@ -394,7 +545,11 @@ function viewFromInside() {
 function layout() {
   return {
     space: SPACE,
+    scaleSource: room.scaleSource || "video",
     removed: [...pieces].filter(([, p]) => p.removed).map(([id]) => id),
+    measures: measures.map((m) => ({ a: m.a.toArray().map((v) => +v.toFixed(4)), b: m.b.toArray().map((v) => +v.toFixed(4)),
+                                     metres: +lengthOf(m).toFixed(4) })),
+    scale: realScale ? { factor: +factor.toFixed(5), real_m: realScale.real, measure: measures.indexOf(realScale.measure) } : null,
     added: [...added.values()].filter((a) => a.source.kind !== "file").map((a) => ({
       source: a.source, name: a.name, x: +a.group.position.x.toFixed(3), z: +a.group.position.z.toFixed(3),
       rot: +a.group.rotation.y.toFixed(4), scale: +a.group.scale.x.toFixed(3) })),
@@ -408,6 +563,14 @@ async function restore() {
   try { saved = JSON.parse(localStorage.getItem(STORE) || "null"); } catch { saved = null; }
   if (!saved) return;
   for (const id of saved.removed || []) setRemoved(id, true, false);
+  // Measurements are kept in the metres of the export they were taken on; after the
+  // space's scale is fixed in the pipeline (set_real_scale.py) they no longer fit it.
+  if ((saved.scaleSource || "video") === (room.scaleSource || "video")) {
+    for (const m of saved.measures || []) addMeasure(new THREE.Vector3(...m.a), new THREE.Vector3(...m.b), false);
+    if (saved.scale && measures[saved.scale.measure]) setRealLength(measures[saved.scale.measure], saved.scale.real_m);
+  } else if ((saved.measures || []).length) {
+    say("The space now has its real scale from the pipeline; earlier measurements were cleared.");
+  }
   for (const item of saved.added || []) {
     try { await addModel(item.source, item, false); } catch (err) { say(`Could not reload ${item.name}: ${err.message}`); }
   }
@@ -439,10 +602,14 @@ $("add-url").onclick = () => {
   if (url) addModel({ kind: "url", url, name: url.split("/").pop() }).catch((err) => say(`Could not load that link: ${err.message}`));
 };
 $("view-top").onclick = viewFromAbove;
+$("measure").onclick = () => (measuring ? stopMeasuring("Measuring cancelled.") : startMeasuring());
+$("reset-scale").onclick = () => { setScale(1, null); say("Scale back to the reconstruction's own."); };
 $("view-inside").onclick = viewFromInside;
 $("reset").onclick = () => {
   for (const id of [...added.keys()]) removeAdded(id);
   for (const id of pieces.keys()) setRemoved(id, false, false);
+  for (const m of [...measures]) removeMeasure(m);
+  setScale(1, null, false);
   persist();
   say("Back to the space as filmed.");
 };
@@ -454,11 +621,12 @@ $("export").onclick = () => {
   a.click();
 };
 
-renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); placeLabels(); });
 
 loadSpace()
   .then(restore)
   .then(() => { renderList(); say("Click a piece to take it out, or add furniture from the panel."); })
   .catch((err) => say(`Could not load the space: ${err.message}. Run tools/space_viewer_export.py ${SPACE} first.`));
 
-window.spaceViewer = { pieces, added, setRemoved, addModel, removeAdded, select, layout, camera, scene, hidden };
+window.spaceViewer = { pieces, added, setRemoved, addModel, removeAdded, select, layout, camera, scene, hidden,
+                       measures, addMeasure, setRealLength, setScale, bounds, get factor() { return factor; } };
