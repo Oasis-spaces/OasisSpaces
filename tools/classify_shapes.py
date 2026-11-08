@@ -1275,6 +1275,11 @@ def main(argv: list[str] | None = None) -> int:
                     - min(p[k] for poly in outline["polygons"] for p in poly) for k in (0, 1))
         wall_margin = max(margin, SNAP_TO_WALL_METRES * units_per_metre if units_per_metre
                           else SNAP_TO_WALL_FRAC * width)
+        # The same goes for furniture: a wardrobe stands between the outline seen
+        # (which stops at its front, as at a wall) and the wall behind it. With the
+        # bare margin, the bedroom's wardrobe (0.54 m deep) was left out as part of
+        # a neighbouring space.
+        margin = wall_margin
         for i, (plane, label) in enumerate(zip(planes, plane_labels)):
             if label == "wall" and plane.get("build", True) and not wall_near_outline(plane, outline, wall_margin):
                 plane["build"] = False

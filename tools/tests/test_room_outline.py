@@ -196,6 +196,15 @@ def test_an_outline_stopped_by_a_wardrobe_moves_back_to_the_wall_behind_it():
     assert notes == [] and len(walls) == 4, notes      # nothing to close: no wall across the wardrobe's front
 
 
+def test_a_wardrobe_behind_the_outline_seen_is_in_the_room_and_the_next_room_is_not():
+    outline = {"polygons": [(np.array([[0, 0], [3, 0], [3, 3], [0, 3]], float) * UNIT).tolist()]}
+    reach = max(cs.outline_margin(outline, UNIT), cs.SNAP_TO_WALL_METRES * UNIT)
+    wardrobe = {"min": [0.5 * UNIT, 3.0 * UNIT, 0], "max": [2.3 * UNIT, 3.6 * UNIT, 1.9 * UNIT]}
+    next_room = {"min": [0.5 * UNIT, 4.0 * UNIT, 0], "max": [2.3 * UNIT, 4.6 * UNIT, 1.9 * UNIT]}
+    assert not cs.box_outside(wardrobe, None, outline, reach)
+    assert cs.box_outside(next_room, None, outline, reach)
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
