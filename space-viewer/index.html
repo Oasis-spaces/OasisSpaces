@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Space viewer</title>
+<style>
+  :root { color-scheme: dark; --bg: #121417; --panel: rgba(24, 27, 31, 0.94); --line: #2c3138; --text: #e8eaed;
+          --muted: #9aa1ab; --accent: #6fb3ff; --warn: #ffb35c; --danger: #ff7a7a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  canvas { display: block; touch-action: none; }
+  button, input, select { font: inherit; color: inherit; }
+  button { background: #222831; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  button:hover { border-color: #46505c; }
+  button.primary { background: #1f4c7a; border-color: #2f6aa6; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  #panel { position: fixed; top: 12px; left: 12px; width: 300px; max-height: calc(100vh - 24px); overflow: auto;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 8px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .toggle { display: flex; gap: 8px; align-items: center; margin: 4px 0; color: var(--text); cursor: pointer; }
+  .piece { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border-radius: 8px;
+           border: 1px solid transparent; cursor: pointer; }
+  .piece:hover { background: #1c2026; }
+  .piece.selected { border-color: var(--accent); }
+  .piece.removed .name { text-decoration: line-through; color: var(--muted); }
+  .piece .meta { color: var(--muted); font-size: 12px; }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .tag.added { color: var(--accent); border-color: #2f6aa6; }
+  #selected { margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; display: none; }
+  #selected.show { display: block; }
+  #selected .title { font-weight: 600; margin-bottom: 4px; }
+  input[type=range] { width: 100%; }
+  #status { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--panel);
+            border: 1px solid var(--line); border-radius: 99px; padding: 6px 14px; color: var(--muted); font-size: 13px;
+            max-width: calc(100vw - 24px); text-align: center; }
+  #views { position: fixed; top: 12px; right: 12px; display: flex; gap: 6px; }
+  #catalogue { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; }
+  #catalogue.show { display: flex; }
+  #catalogue .box { width: min(860px, calc(100vw - 24px)); max-height: calc(100vh - 48px); overflow: auto; background: var(--panel);
+                    border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-top: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; background: #1a1e23; }
+  .card:hover { border-color: var(--accent); }
+  .card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: #2a2f36; }
+  .card div { padding: 6px 8px; font-size: 12px; }
+  .search { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: #15181c; }
+  .credit { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .credit a { color: var(--accent); }
+  @media (max-width: 640px) {
+    #panel { top: auto; bottom: 0; left: 0; right: 0; width: auto; max-height: 46vh; border-radius: 12px 12px 0 0; }
+    #status { bottom: calc(46vh + 8px); }
+  }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../scene-viewer/vendor/three/build/three.module.js",
+               "three/addons/": "../scene-viewer/vendor/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<aside id="panel">
+  <h1 id="title">Space</h1>
+  <div class="sub" id="subtitle">Loading…</div>
+
+  <h2>Show</h2>
+  <label class="toggle"><input type="checkbox" id="show-model" checked> Room model (walls, floor outline, boxes)</label>
+  <label class="toggle"><input type="checkbox" id="show-path"> Where the phone went</label>
+  <label class="toggle"><input type="checkbox" id="show-filled"> Highlight filled-in floor</label>
+  <div class="row" style="margin-top:6px"><span class="sub">Point size</span><input type="range" id="point-size" min="4" max="30" value="12" style="flex:1"></div>
+
+  <h2>Pieces</h2>
+  <div id="pieces"></div>
+  <div id="selected">
+    <div class="title" id="sel-name"></div>
+    <div class="sub" id="sel-meta"></div>
+    <div class="row" style="margin-top:8px" id="sel-actions"></div>
+    <div id="sel-scale" style="margin-top:8px; display:none">
+      <div class="sub">Size <span id="sel-scale-value">100%</span></div>
+      <input type="range" id="scale" min="50" max="160" value="100">
+    </div>
+  </div>
+
+  <h2>Add furniture</h2>
+  <div class="row">
+    <button class="primary" id="open-catalogue">Browse free models</button>
+    <label><button id="upload-button">Your file…</button><input type="file" id="upload" accept=".glb,.gltf" hidden></label>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <input class="search" id="model-url" placeholder="…or paste a .glb / .gltf link" style="flex:1">
+    <button id="add-url">Add</button>
+  </div>
+
+  <h2>Layout</h2>
+  <div class="row">
+    <button id="reset">Reset</button>
+    <button id="export">Export layout</button>
+  </div>
+  <div class="credit">Models from <a href="https://polyhaven.com/models" target="_blank" rel="noopener">Poly Haven</a> (CC0).</div>
+</aside>
+
+<div id="views">
+  <button id="view-top">From above</button>
+  <button id="view-inside">From inside</button>
+</div>
+<div id="status">Loading the space…</div>
+
+<div id="catalogue">
+  <div class="box">
+    <div class="row" style="justify-content:space-between">
+      <strong>Free furniture (Poly Haven, CC0, real-world size)</strong>
+      <button id="close-catalogue">Close</button>
+    </div>
+    <input class="search" id="search" placeholder="Search: chair, table, bed, shelf…" style="margin-top:10px">
+    <div id="grid"></div>
+  </div>
+</div>
+
+<script type="module" src="./main.js"></script>
+</body>
+</html>

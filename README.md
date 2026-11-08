@@ -475,6 +475,22 @@ did not finish, e.g. `--stages train-long choose-training fill scene`. A new
 session gets the space as it stands here, without the outputs the requested
 steps make again (`--stages scene` alone takes `splat.ply` up with it).
 
+## Viewing a space after stage 3 (no GPU needed)
+
+`space-viewer/` shows a space as soon as its room model exists: the dense cloud
+with the walls, the floor's outline and one box per piece of furniture over it.
+Click a piece to take it out (its points go, and the floor under it is filled
+with the floor's colour, marked as inferred), and add furniture from
+[Poly Haven](https://polyhaven.com/models) (85 CC0 furniture models at real-world
+size), a `.glb`/`.gltf` link or a file; drag what you add to move it, turn it
+and size it. The layout is kept in the browser and can be exported as JSON.
+
+```bash
+python3 tools/space_viewer_export.py spaces/bedroom     # writes spaces/bedroom/viewer/
+python3 -m http.server 8734                             # from the project root
+# open http://localhost:8734/space-viewer/?space=bedroom
+```
+
 ## Editing the splat
 
 `tools/splat_edit.py` edits a trained splat using what stage 3 measured, with
