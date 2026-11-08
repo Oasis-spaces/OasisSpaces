@@ -415,6 +415,32 @@ class ClaudeDetector:
         return found
 
 
+OUTLINE_SPILL_WEIGHT = 2.0     # an outline running past its box is penalised twice what it fills
+OUTLINE_IOU_WEIGHT = 0.25      # SAM's own confidence breaks near-ties
+
+
+def pick_outline(options: np.ndarray, box: tuple[int, int, int, int], iou=None) -> int:
+    """Which of SAM's candidate outlines (k x H x W) is the boxed object: the
+    one that fills the box most and spills past it least, SAM's own score
+    breaking near-ties. The box was drawn round the whole object, so a part of
+    it (one panel, the frame of a wardrobe) fills too little and the wall
+    behind it spills too much."""
+    x0, y0, x1, y1 = box
+    best, best_k = -np.inf, 0
+    box_area = max((x1 - x0 + 1) * (y1 - y0 + 1), 1)
+    for k, m in enumerate(options):
+        total = int(m.sum())
+        if total == 0:
+            continue
+        inside = int(m[y0:y1 + 1, x0:x1 + 1].sum())
+        value = inside / box_area - OUTLINE_SPILL_WEIGHT * (total - inside) / total
+        if iou is not None:
+            value += OUTLINE_IOU_WEIGHT * float(iou[k])
+        if value > best:
+            best, best_k = value, k
+    return best_k
+
+
 class Segmenter:
     """SAM 2.1 hiera-tiny, prompted with the detector's rectangles.
 
@@ -457,16 +483,22 @@ class Segmenter:
                                 d["box"][2] * sx, d["box"][3] * sy] for d in detections]],
                              dtype=torch.float32, device=self.device)
         with torch.no_grad():
-            out = self.model(pixel_values=pixels, input_boxes=boxes, multimask_output=False)
+            out = self.model(pixel_values=pixels, input_boxes=boxes, multimask_output=True)
         scale = min(1.0, self.work_size / max(W, H))
         size = (round(H * scale), round(W * scale))
-        low = out.pred_masks[0, :, :1].float().cpu()  # boxes x 1 x 256 x 256 logits
-        masks = (torch.nn.functional.interpolate(low, size, mode="bilinear",
-                                                 align_corners=False)[:, 0] > 0).numpy()
+        # SAM offers three outlines per box (a part, a bigger part, the whole). Its own
+        # favourite on the bedroom's wardrobe was the dark frame without the patterned
+        # doors; the box is drawn round the whole object, so the outline that fills it
+        # best without spilling past it is the object (pick_outline).
+        low = out.pred_masks[0].float().cpu()           # boxes x 3 x 256 x 256 logits
+        iou = out.iou_scores[0].float().cpu().numpy()   # boxes x 3: SAM's own estimate of each
         outlined = 0
-        for det, mask in zip(detections, masks):
+        for n, det in enumerate(detections):
             x0, y0, x1, y1 = (int(round(v * scale)) for v in det["box"])
             x0, y0 = max(x0, 0), max(y0, 0)
+            options = (torch.nn.functional.interpolate(low[n:n + 1], size, mode="bilinear",
+                                                       align_corners=False)[0] > 0).numpy()
+            mask = options[pick_outline(options, (x0, y0, x1, y1), iou[n])]
             clipped = np.zeros_like(mask)
             clipped[y0:y1 + 1, x0:x1 + 1] = mask[y0:y1 + 1, x0:x1 + 1]
             box_area = max((x1 - x0 + 1) * (y1 - y0 + 1), 1)

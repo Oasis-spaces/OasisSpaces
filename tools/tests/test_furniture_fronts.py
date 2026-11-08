@@ -87,6 +87,18 @@ def test_claude_marks_on_the_grid_become_detections_in_frame_pixels():
         assert "wardrobe" in advisor.asked[0][0] and "grid" in advisor.asked[0][0]
 
 
+def test_the_outline_that_fills_the_box_is_the_object_not_its_frame_or_the_wall():
+    from semantics import pick_outline
+    frame = np.zeros((100, 100), bool)
+    frame[10:90, 10:20] = frame[10:90, 50:60] = True                 # the wardrobe's dark frame only
+    whole = np.zeros((100, 100), bool)
+    whole[10:90, 10:60] = True                                        # frame and patterned doors
+    wall = np.ones((100, 100), bool)                                  # the wall behind it too
+    box = (10, 10, 59, 89)
+    assert pick_outline(np.stack([frame, whole, wall]), box) == 1
+    assert pick_outline(np.stack([frame, whole, wall]), box, iou=[0.95, 0.80, 0.70]) == 1  # SAM's favourite was the frame
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
