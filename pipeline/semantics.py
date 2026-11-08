@@ -303,6 +303,118 @@ class Detector:
         return found
 
 
+CLAUDE_FRAMES_PER_CALL = 4     # keyframes Claude marks in one question
+CLAUDE_GRID_LONG_SIDE = 1568   # the gridded copy it reads (the photo size advisor.py sends anyway)
+CLAUDE_SCORE = 0.9             # Claude gives no confidence; its boxes outrank nothing by score alone
+
+
+class ClaudeDetector:
+    """Claude marks the room's objects on the keyframes, by the room's own
+    object list, and SAM turns each mark into an outline downstream, as it did
+    the detector's rectangles.
+
+    GroundingDINO matched words to pixels and took them literally: the
+    bedroom's patterned wardrobe doors came out as a poster and a curtain while
+    Claude, naming the room from the same frames, called them "the mirrored
+    sliding wardrobe". The understanding was right and was lost in the hand-off
+    from a word list to a weaker detector. Here the understanding marks the
+    pixels: each frame goes with a light grid (tenths of its width and height,
+    numbered), and Claude answers boxes on that grid, tight enough for SAM,
+    which finds the exact outline itself. Same output as Detector.detect."""
+
+    device = "claude"
+
+    def __init__(self, vocabulary: "Vocabulary", advisor=None, per_call: int = CLAUDE_FRAMES_PER_CALL,
+                 work_dir: Path | None = None):
+        from advisor import BRIEF_PATH, Advisor
+
+        self.vocabulary = vocabulary
+        self.advisor = advisor or Advisor(system=BRIEF_PATH.read_text() if BRIEF_PATH.exists() else None)
+        self.per_call = per_call
+        self.work_dir = Path(work_dir) if work_dir else None
+        if not self.advisor.available:
+            raise RuntimeError(f"Claude is not reachable ({self.advisor.reason})")
+
+    @staticmethod
+    def gridded(path: Path, out: Path) -> tuple[Path, tuple[int, int]]:
+        """A copy of the frame with a numbered grid of tenths; returns it and the frame's size."""
+        from PIL import Image, ImageDraw
+
+        img = Image.open(path).convert("RGB")
+        size = img.size
+        img.thumbnail((CLAUDE_GRID_LONG_SIDE, CLAUDE_GRID_LONG_SIDE))
+        draw = ImageDraw.Draw(img, "RGBA")
+        w, h = img.size
+        for k in range(1, 10):
+            x, y = w * k / 10, h * k / 10
+            draw.line([(x, 0), (x, h)], fill=(255, 255, 0, 110), width=1)
+            draw.line([(0, y), (w, y)], fill=(255, 255, 0, 110), width=1)
+            for text, at in ((str(k * 10), (x + 3, 3)), (str(k * 10), (3, y + 2))):
+                draw.rectangle([at[0] - 1, at[1] - 1, at[0] + 16, at[1] + 11], fill=(0, 0, 0, 150))
+                draw.text(at, text, fill=(255, 255, 0, 255))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        img.save(out, "JPEG", quality=88)
+        return out, size
+
+    def prompt(self, count: int) -> str:
+        listing = [{"name": o["name"], "role": o["role"]} for o in self.vocabulary.objects]
+        return (
+            f"The {count} images are keyframes of the room, in order (image 1 first). Each has a yellow grid: lines at "
+            "every tenth of its width and height, numbered 10 to 90 along the top and the left edge.\n"
+            f"The room's object list (names and roles): {json.dumps(listing)}\n"
+            "Mark every object from the list that is visible in each image: its name exactly as in the list, and a box "
+            "[x0, y0, x1, y1] around the visible part of it, in percent of that image's width (x) and height (y), read "
+            "off the grid to about 2%. A segmentation model cuts the exact outline inside your box, so make the box "
+            "hold the whole visible object and little else.\n"
+            "- One box per real object; two side by side get two boxes. A piece of furniture is one box with its "
+            "doors, drawers and front, whatever they look like (patterned, glossy, mirrored), under the furniture's "
+            "name or under a name the list has for its front.\n"
+            "- A flat thing (poster, curtain, door, window, mirror, screen) gets its own box only where it really is "
+            "that thing, never on a piece of furniture's front.\n"
+            "- Leave out what is seen only in a mirror, only on a screen, or through a doorway into a room the camera "
+            "does not enter, and names that are not in the list.\n"
+            'Fields: {"frames": [{"image": 1, "objects": [{"name": string, "box": [x0, y0, x1, y1]}]}]}')
+
+    def detect_many(self, paths: list[Path], log=print) -> dict[str, list[dict]]:
+        """{frame name: detections} for every frame, asked per_call frames at a time."""
+        import tempfile
+
+        work = self.work_dir or Path(tempfile.mkdtemp(prefix="claude-marks-"))
+        found: dict[str, list[dict]] = {}
+        for start in range(0, len(paths), self.per_call):
+            batch = [Path(p) for p in paths[start:start + self.per_call]]
+            shown, sizes = [], []
+            for p in batch:
+                g, size = self.gridded(p, work / f"{p.stem}-grid.jpg")
+                shown.append(g)
+                sizes.append(size)
+            answer = self.advisor.ask_json(self.prompt(len(batch)), shown, max_tokens=4000) or {}
+            by_image = {}
+            for entry in answer.get("frames") or []:
+                try:
+                    by_image[int(entry.get("image"))] = entry.get("objects") or []
+                except (TypeError, ValueError):
+                    continue
+            for n, (p, (w, h)) in enumerate(zip(batch, sizes), start=1):
+                dets = []
+                for obj in by_image.get(n, []):
+                    label = self.vocabulary.canonical(str(obj.get("name", "")))
+                    box = obj.get("box")
+                    if label is None or not isinstance(box, list) or len(box) != 4:
+                        continue
+                    try:
+                        x0, y0, x1, y1 = (min(100.0, max(0.0, float(v))) for v in box)
+                    except (TypeError, ValueError):
+                        continue
+                    if x1 - x0 < 1 or y1 - y0 < 1:
+                        continue
+                    dets.append({"label": label, "score": CLAUDE_SCORE,
+                                 "box": [x0 / 100 * w, y0 / 100 * h, x1 / 100 * w, y1 / 100 * h]})
+                found[p.name] = dets
+                log(f"  {p.name}: " + (", ".join(sorted({d['label'] for d in dets})) or "nothing marked"))
+        return found
+
+
 class Segmenter:
     """SAM 2.1 hiera-tiny, prompted with the detector's rectangles.
 

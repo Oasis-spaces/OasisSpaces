@@ -34,15 +34,16 @@ rearrange it without surprises:
 - **Depth and scale (MoGe-2).** Each keyframe's depth sets the metric scale. The
   keyframes should agree within a few percent. Mirrors, windows and screens give
   false depth: a mirror shows a room behind the wall.
-- **Objects (GroundingDINO, then SAM tracking).** They search the frames for the
-  names on the room's object list and label the points. The detector only finds
-  what it is asked for, and it takes words literally: a list meant for another
-  room finds a sofa in a bedroom.
-  A wardrobe's or cupboard's doors (patterned, glossy, mirrored) are often boxed
-  as a flat thing (poster, curtain, door, screen) or missed, which leaves the
-  furniture with its edges only. The fix is a name for the front itself
-  ("patterned sliding wardrobe door", storage); a furniture outline always wins
-  the pixels a poster, door or curtain outline shares with it.
+- **Objects (you, then SAM).** You mark the room's objects on the keyframes, by
+  the room's object list, with a box read off a grid on each frame; SAM cuts
+  each object's exact outline inside your box, and the outlines label the
+  points. What you leave unmarked is never found; a box on the wrong thing
+  labels the wrong points. A piece of furniture is one box with its doors and
+  front, whatever they look like (patterned, glossy, mirrored); a flat thing
+  (poster, curtain, door, screen) is boxed only where it really is one. A
+  furniture outline wins the pixels a poster, door or curtain outline shares
+  with it. (Without you, GroundingDINO matches the list's words instead, and
+  takes them literally: it boxed patterned wardrobe doors as a poster.)
 - **Shapes.** RANSAC finds the walls, floor and ceiling. Labelled points become
   boxes. The usual errors come from this step:
   - Storage names (wardrobe, chest of drawers, overhead cabinet) are clustered

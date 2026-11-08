@@ -37,7 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
-from semantics import (SEGMENTER_ID, Detector, Segmenter, planned_vocabulary,
+from semantics import (SEGMENTER_ID, ClaudeDetector, Detector, Segmenter, planned_vocabulary,
                        default_device, pixel_labels)
 from tracking import PROMPT_FRAMES, TRACKERS, merge_detections, prompt_frames, track
 from mirrors import fill_unreliable
@@ -286,6 +286,10 @@ def main():
                         help="monocular depth network (default moge)")
     parser.add_argument("--work-size", type=int, default=1280,
                         help="longest side, in pixels, that MoGe predicts at (default 1280)")
+    parser.add_argument("--detector", choices=["auto", "claude", "dino"], default="auto",
+                        help="who marks the room's objects on the keyframes: claude (the room's own understanding; "
+                             "SAM cuts the outlines), dino (GroundingDINO, matching the object list's words), auto "
+                             "(Claude when reachable, GroundingDINO otherwise)")
     parser.add_argument("--no-semantics", action="store_true",
                         help="skip object detection: no labels on the cloud, and no "
                              "filtering of mirrors, windows and screens")
@@ -417,7 +421,16 @@ def main():
         if use_detector:
             try:
                 vocabulary = planned_vocabulary(space)
-                detector = Detector(device=device, vocabulary=vocabulary)
+                detector = None
+                if args.detector in ("auto", "claude"):
+                    try:
+                        detector = ClaudeDetector(vocabulary, work_dir=workspace / "claude-marks")
+                    except Exception as exc:
+                        if args.detector == "claude":
+                            raise
+                        print(f"Claude cannot mark the objects ({exc}); GroundingDINO instead")
+                if detector is None:
+                    detector = Detector(device=device, vocabulary=vocabulary)
                 label_names = ["unlabelled"] + vocabulary.names
                 label_index = {name: i for i, name in enumerate(label_names)}
                 unreliable_ids = np.array([label_index[name] for name in vocabulary.unreliable],
@@ -425,7 +438,8 @@ def main():
                 # Names of the room itself: they give way to furniture outlines (pixel_labels).
                 yielding = set(vocabulary.with_role("fixture", "hanging"))
                 meta["objects"] = vocabulary.to_json()
-                print(f"Object detection: GroundingDINO-tiny on {detector.device}, "
+                print(f"Object detection: {'Claude' if detector.device == 'claude' else 'GroundingDINO-tiny'} "
+                      f"on {detector.device}, "
                       f"{len(vocabulary.names)} names ({vocabulary.source} list): "
                       + ", ".join(vocabulary.names))
                 # With tracking, the detector also names things on frames in
@@ -435,10 +449,15 @@ def main():
                 prompt_names = (prompt_frames(all_names, key_names, args.prompt_frames or PROMPT_FRAMES)
                                 if tracking_on else key_names)
                 prompts = {}
-                for name in prompt_names:
-                    prompts[name] = detector.detect(Image.open(workspace / "images" / name))
-                    seen = ", ".join(sorted({d["label"] for d in prompts[name]}))
-                    print(f"  {name}: {seen or 'nothing detected'}")
+                if isinstance(detector, ClaudeDetector):
+                    prompts = detector.detect_many([workspace / "images" / n for n in prompt_names])
+                    meta["detector"] = {"by": "claude", "usage": detector.advisor.usage_total()}
+                else:
+                    for name in prompt_names:
+                        prompts[name] = detector.detect(Image.open(workspace / "images" / name))
+                        seen = ", ".join(sorted({d["label"] for d in prompts[name]}))
+                        print(f"  {name}: {seen or 'nothing detected'}")
+                    meta["detector"] = {"by": "groundingdino"}
                 for f in frames:
                     f["detections"] = prompts.get(images[f["id"]]["name"], [])
                 # Kept so stage 3 can show Claude the frame where each object

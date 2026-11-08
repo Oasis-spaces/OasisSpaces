@@ -163,7 +163,7 @@ Fields: {{"room": [numbers, best first], "objects": [numbers, best first], "why"
 
 OBJECT_NAMING_PROMPT = """You are preparing object detection for a 3D model of an indoor space, captured by an ordinary person on a phone ({capture}). The {count} attached frames are spread across the whole capture.
 
-Name every kind of thing in the space that the model needs to know about. An open-vocabulary detector (GroundingDINO) will search every keyframe for exactly your names, so anything you leave out is never found, and anything you name that is not there can mislabel something else. Each name's role tells the pipeline what to do with the points the detector labels: furniture and storage become separate pieces a person can move in the finished model, glass and screens are removed because their depth is wrong, and the rest stay part of the room or are left out.
+Name every kind of thing in the space that the model needs to know about. You will then mark every keyframe for exactly your names (or, without you, an open-vocabulary detector will search for them), so anything you leave out is never found, and anything you name that is not there can mislabel something else. Each name's role tells the pipeline what to do with the points the detector labels: furniture and storage become separate pieces a person can move in the finished model, glass and screens are removed because their depth is wrong, and the rest stay part of the room or are left out.
 
 Naming rules:
 - Short, plain English nouns a general detector knows, 1 to 3 words, no commas, whatever language any labels in the space are in: "wardrobe" for an almirah, "sofa" for a couch, "shelf" for a wall rack. The plainest common word wins.
@@ -355,7 +355,7 @@ LABEL_REVIEW_PROMPT = """You check object detection for a 3D model of an indoor 
 The detector's labels decide what becomes a movable piece of furniture in the finished model, what is removed (glass and
 screens, whose depth is wrong) and what stays part of the room; after your revision the detector runs once more with
 the revised list, and that run is final.
-An open-vocabulary detector (GroundingDINO) searched {keyframes} for exactly the names in this list; each name has a
+{detector} searched {keyframes} for exactly the names in this list; each name has a
 role that tells the pipeline what to do with the points it labels:
 {listing}
 The first image shows {shown} of those frames with every detection box drawn and named (name and confidence). The other
@@ -1109,8 +1109,11 @@ class Agent:
         searched = (f"{dense['tracks']['frames']} frames (each object it found on about twenty of them was "
                     "tracked through the rest, so a box is a tracked outline's rectangle)"
                     if dense.get("tracks") else f"{len(dense.get('detections') or {})} keyframes")
+        by = (dense.get("detector") or {}).get("by")
         verdict = self.ask_json(LABEL_REVIEW_PROMPT.format(
             capture=self.capture,
+            detector=("You (Claude) marked the objects on the keyframes and SAM cut their outlines; you"
+                      if by == "claude" else "An open-vocabulary detector (GroundingDINO)"),
             keyframes=searched, shown=len(frames),
             listing=json.dumps(listing), limit=MAX_OBJECTS - 4),
             [sheet] + (self.picked_frames("objects", 4) or self.sample_frames(4)), max_tokens=2000)

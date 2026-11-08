@@ -49,6 +49,44 @@ def test_things_on_furniture_and_mirrors_are_not_affected():
     assert fronts[50 * 100 + 45] == INDEX["mirror"]   # its depth is a reflection: the plane fill decides, not this
 
 
+def test_claude_marks_on_the_grid_become_detections_in_frame_pixels():
+    import tempfile
+    from PIL import Image
+    from semantics import ClaudeDetector, Vocabulary
+
+    vocabulary = Vocabulary([{"name": "wardrobe", "role": "storage", "build_as": "wardrobe"},
+                             {"name": "poster", "role": "fixture"}], "test")
+
+    class Advisor:
+        available, reason = True, None
+
+        def __init__(self):
+            self.asked = []
+
+        def ask_json(self, prompt, images, max_tokens):
+            self.asked.append((prompt, list(images)))
+            if len(self.asked) > 1:
+                return {"frames": []}
+            return {"frames": [{"image": 1, "objects": [{"name": "wardrobe", "box": [10, 0, 60, 100]},
+                                                         {"name": "sofa", "box": [0, 0, 5, 5]},          # not in the list
+                                                         {"name": "poster", "box": [70, 20, 90, "x"]}]},  # unreadable
+                               {"image": 2, "objects": [{"name": "Poster", "box": [-5, 10, 30, 40]}]}]}
+    with tempfile.TemporaryDirectory() as tmp:
+        frames = []
+        for n in range(3):
+            path = Path(tmp) / f"frame_{n}.jpg"
+            Image.new("RGB", (2000, 1000), "white").save(path)
+            frames.append(path)
+        advisor = Advisor()
+        found = ClaudeDetector(vocabulary, advisor=advisor, per_call=2, work_dir=Path(tmp) / "marks") \
+            .detect_many(frames, log=lambda *_: None)
+        assert len(advisor.asked) == 2 and len(advisor.asked[0][1]) == 2      # two frames a question
+        assert found["frame_0.jpg"] == [{"label": "wardrobe", "score": 0.9, "box": [200.0, 0.0, 1200.0, 1000.0]}]
+        assert found["frame_1.jpg"][0]["box"] == [0.0, 100.0, 600.0, 400.0]     # clamped to the frame
+        assert found["frame_2.jpg"] == []                                       # asked, nothing marked
+        assert "wardrobe" in advisor.asked[0][0] and "grid" in advisor.asked[0][0]
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
