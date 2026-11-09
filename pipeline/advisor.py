@@ -35,7 +35,11 @@ import time
 import uuid
 from pathlib import Path
 
-MODEL = "claude-opus-5"
+# The model every question goes to. OASIS_CLAUDE_MODEL picks another (a plan that
+# cannot use this one leaves the CLI waiting instead of failing); "default" lets the
+# claude CLI use the account's own default model.
+MODEL = os.environ.get("OASIS_CLAUDE_MODEL") or "claude-opus-5"
+API_MODEL = "claude-opus-5"   # the API has no account default
 RELAY_ENV = "OASIS_CLAUDE_RELAY"
 # A relayed question waits for the other machine to fetch it (each Colab CLI
 # call takes 20 s to 2 min) plus Claude's own answer.
@@ -146,7 +150,8 @@ class Advisor:
         message = {"type": "user", "message": {"role": "user", "content":
                    [image_block(p) for p in images] + [{"type": "text", "text": prompt}]}}
         command = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                   "--verbose", "--model", self.model, "--tools", "", "--strict-mcp-config",
+                   "--verbose", *(["--model", self.model] if self.model != "default" else []),
+                   "--tools", "", "--strict-mcp-config",
                    "--no-session-persistence"]
         system_file = None
         if self.system:
@@ -265,7 +270,7 @@ class Advisor:
                   if self.system else anthropic.NOT_GIVEN)
         try:
             message = anthropic.Anthropic().messages.create(
-                model=self.model,
+                model=self.model if self.model != "default" else API_MODEL,
                 max_tokens=max_tokens,
                 system=system,
                 output_config={"effort": "low"},  # short judgement calls

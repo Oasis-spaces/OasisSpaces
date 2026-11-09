@@ -72,7 +72,8 @@ def answer(session: str, remote: str, name: str, work: Path) -> str:
                 images.append(target)
     text, advisor = None, None
     for _ in range(2):  # one retry: a rate limit or empty reply would switch Claude off on the VM
-        advisor = Advisor(model=request.get("model", "claude-opus-5"))
+        # This machine's OASIS_CLAUDE_MODEL wins: the VM cannot know which models this login can use.
+        advisor = Advisor(model=os.environ.get("OASIS_CLAUDE_MODEL") or request.get("model", "claude-opus-5"))
         advisor.system = request.get("system")      # the brief the pipeline asks under
         text = advisor.ask(request["prompt"], images) if advisor.available else None
         if text:
