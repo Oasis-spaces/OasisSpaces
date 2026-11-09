@@ -158,12 +158,20 @@ class Colab:
             text = made.stdout + made.stderr
             offline = any(k in text for k in ("NameResolutionError", "ConnectionError",
                                                "Max retries exceeded", "timed out"))
-            if ("Service Unavailable" in text or offline) and time.time() < deadline:
-                reason = "the connection to Colab failed" if offline else f"Colab has no {gpu} to give right now"
+            # Colab's own outage notice ("experiencing issues provisioning runtimes") is waited
+            # out like a missing GPU: it passes, and the run should start when it does.
+            outage = any(k in text.lower() for k in ("issues provisioning", "provisioning runtimes"))
+            if ("Service Unavailable" in text or offline or outage) and time.time() < deadline:
+                reason = ("the connection to Colab failed" if offline else
+                          "Colab cannot start runtimes right now (its own outage)" if outage else
+                          f"Colab has no {gpu} to give right now")
                 log(f"  {reason}; asking again in 10 minutes "
                     f"(until {time.strftime('%H:%M', time.localtime(deadline))})")
                 time.sleep(600)
                 continue
+            if outage:
+                sys.exit("Colab cannot start runtimes right now (Google's outage notice). Try again later, "
+                         "or pass --wait-gpu <minutes> to keep asking every 10 minutes.")
             if "Service Unavailable" in text:
                 sys.exit(f"Colab has no {gpu} to give (none free, or the free allowance is used up "
                          "for now). Try later, or pass --wait-gpu <minutes>.")
