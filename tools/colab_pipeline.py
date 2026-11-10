@@ -46,6 +46,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -90,6 +91,7 @@ REMOTE_VIDEOS = "/content/videos"
 REMOTE_WORK = "/content/oasis-run"
 RELAY = "/content/claude-relay"
 PART_BYTES = 20 * 1024 * 1024
+UPLOAD_ATTEMPTS = 8              # a part's upload is tried this often, waiting longer each time
 INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat", "install-mapanything",
                  "install-anysplat", "install-trellis"]
 # What the notebook's helper cell sets before running the agent.
@@ -282,29 +284,66 @@ class Colab:
             return
         size = local.stat().st_size
         parts = (size + PART_BYTES - 1) // PART_BYTES
-        staging = f"{REMOTE_WORK}/parts/{local.name}"
-        self.shell(f"rm -rf {shlex.quote(staging)} && mkdir -p {shlex.quote(staging)} "
-                   f"$(dirname {shlex.quote(remote)})", timeout=120)
+        # The parts of an earlier attempt stay on the VM, so a run started again
+        # after a failed upload sends only what is missing (named by md5, so a
+        # different file never reuses them).
+        staging = f"{REMOTE_WORK}/parts/{local.name}-{digest[:12]}"
+        listing = self.shell(f"mkdir -p {shlex.quote(staging)} $(dirname {shlex.quote(remote)}) && "
+                             f"cd {shlex.quote(staging)} && (stat -c '%n %s' part-* 2>/dev/null || true)", timeout=120)
+        have = {}
+        for line in listing.splitlines():
+            bits = line.split()
+            if len(bits) == 2 and bits[1].isdigit():
+                have[bits[0]] = int(bits[1])
+        kept = 0
         with tempfile.TemporaryDirectory() as tmp, open(local, "rb") as src:
             for n in range(parts):
-                part = Path(tmp) / f"part-{n:04d}"
-                part.write_bytes(src.read(PART_BYTES))
-                for attempt in range(4):
-                    sent = self.cli("upload", "-s", self.session, str(part), f"{staging}/part-{n:04d}")
+                name = f"part-{n:04d}"
+                chunk = src.read(PART_BYTES)
+                if have.get(name) == len(chunk):
+                    kept += 1
+                    continue
+                part = Path(tmp) / name
+                part.write_bytes(chunk)
+                for attempt in range(UPLOAD_ATTEMPTS):
+                    sent = self.cli("upload", "-s", self.session, str(part), f"{staging}/{name}")
                     if sent.returncode == 0:
                         break
-                    log(f"  part {n + 1}/{parts} failed ({sent.stderr.strip()[-100:]}), retrying")
-                    time.sleep(5 * (attempt + 1))
+                    log(f"  part {n + 1}/{parts} failed ({(sent.stderr or sent.stdout).strip()[-100:]}), "
+                        f"retrying ({attempt + 1}/{UPLOAD_ATTEMPTS})")
+                    time.sleep(min(90, 10 * (attempt + 1)))
                 else:
-                    raise RuntimeError(f"could not upload {local.name}")
+                    raise RuntimeError(f"could not upload {local.name}: run the same command again and it "
+                                       f"carries on from part {n + 1} (or use --video-url)")
                 part.unlink()
                 if parts > 3 and (n + 1) % 5 == 0:
-                    log(f"  {local.name}: {n + 1}/{parts} parts")
+                    log(f"  {local.name}: {n + 1}/{parts} parts" + (f" ({kept} already there)" if kept else ""))
         self.shell(f"cat {shlex.quote(staging)}/part-* > {shlex.quote(remote)} && rm -rf {shlex.quote(staging)}",
                    timeout=900)
         if self.md5(remote) != digest:
             raise RuntimeError(f"{local.name} arrived damaged (md5 differs)")
         log(f"  uploaded {local.name} ({size / 1e6:.0f} MB, {parts} parts, md5 checked)")
+
+    def fetch_url(self, url: str, remote: str, digest: str | None) -> None:
+        """The VM downloads the video itself (a Google Drive share link, or any
+        direct link): nothing goes through this Mac's upload. Checked against the
+        local copy's md5 when there is one."""
+        if digest and self.md5(remote) == digest:
+            log(f"  {Path(remote).name} already on the VM")
+            return
+        drive = re.search(r"drive\.google\.com/(?:file/d/|open\?id=|uc\?id=)([\w-]+)", url)
+        if drive:   # a share link: the direct download, past the large-file notice
+            url = f"https://drive.usercontent.google.com/download?id={drive.group(1)}&export=download&confirm=t"
+        log("  the VM is downloading the video from the link")
+        self.shell(f"mkdir -p $(dirname {shlex.quote(remote)}) && "
+                   f"curl -sSL --retry 5 --retry-delay 10 -o {shlex.quote(remote)} {shlex.quote(url)}", timeout=3600)
+        info = self.shell(f"head -c 4096 {shlex.quote(remote)} | grep -c -i '<html' || true; "
+                          f"stat -c %s {shlex.quote(remote)}", timeout=120).split()
+        if not info or info[0] != "0" or int(info[-1]) < 1_000_000:
+            raise RuntimeError("the link gave a web page or nothing, not the video: share it as 'Anyone with the link'")
+        if digest and self.md5(remote) != digest:
+            raise RuntimeError("the video from the link differs from the local file (md5): check it is the same video")
+        log(f"  video on the VM ({int(info[-1]) / 1e6:.0f} MB" + (", md5 checked)" if digest else ")"))
 
     def get(self, remote: str, local: Path) -> None:
         """Download in parts (split on the VM), join here and check the md5."""
@@ -659,12 +698,15 @@ def main() -> None:
     parser.add_argument("--no-publish", action="store_true",
                         help="skip choose-best here: an experiment's splats are not compared with the "
                              "video's published best, which stays as it is")
+    parser.add_argument("--video-url", metavar="URL",
+                        help="let the VM download the video from this link (a Google Drive share link works) "
+                             "instead of uploading it from here; the local file, if there, checks it")
     parser.add_argument("--wait-gpu", type=float, default=0, metavar="MINUTES",
                         help="when Colab has no GPU to give, keep asking for this long")
     args = parser.parse_args()
 
     video = Path(args.video).resolve()
-    if not video.is_file():
+    if not video.is_file() and not args.video_url:
         sys.exit(f"video not found: {video}")
     vm = Colab(args.session)
     fresh = not vm.alive()
@@ -684,7 +726,10 @@ def main() -> None:
         log(f"video: not uploaded (stage 1 is not run and spaces/{args.name} has its frames grid)")
     else:
         log(f"video: {video.name}")
-        vm.put(video, video_remote)
+        if args.video_url:
+            vm.fetch_url(args.video_url, video_remote, file_md5(video) if video.is_file() else None)
+        else:
+            vm.put(video, video_remote)
     if args.stages[0] != STEPS[0]:
         remote_has = vm.shell(f"test -f {REMOTE_ROOT}/spaces/{args.name}/agent-report.json && echo yes || true",
                               timeout=120).strip() == "yes"
