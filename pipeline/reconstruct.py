@@ -129,6 +129,108 @@ def mean_reprojection(model: Path) -> float | None:
     return None
 
 
+# A global solve can register every frame and still drift the lens into
+# something self-consistent but wrong (one report: fx/fy 2.36 on square frames,
+# 12 dB lost in the splat). A phone's pixels are square, so fx and fy agree.
+MAX_FOCAL_RATIO = 1.03
+MAX_RADIAL = 0.6                  # |k1| beyond this on a phone's main lens: a drifted solve
+LEFTOVER_MATCH_STRIDE = 3        # leftover frames are matched against every third frame of the main model
+CAMERA_PARAMS = {0: 3, 1: 4, 2: 4, 3: 5, 4: 8, 5: 8, 6: 12, 7: 5, 8: 4, 9: 5, 10: 12}
+
+
+def lens_problem(model: Path) -> str | None:
+    """Why a model's solved lens cannot be a phone's, or None."""
+    raw = (model / "cameras.bin").read_bytes()
+    at = 8
+    for _ in range(struct.unpack("<Q", raw[:8])[0]):
+        _, kind, _, _ = struct.unpack("<iiQQ", raw[at:at + 24]); at += 24
+        n = CAMERA_PARAMS.get(kind)
+        if n is None:
+            return None
+        params = struct.unpack(f"<{n}d", raw[at:at + 8 * n]); at += 8 * n
+        if kind in (1, 4, 5, 6, 10):          # models with fx and fy
+            ratio = max(params[0], params[1]) / max(1e-9, min(params[0], params[1]))
+            if ratio > MAX_FOCAL_RATIO:
+                return f"the solved lens has fx/fy {ratio:.2f} (a phone's pixels are square)"
+        radial = params[4] if kind in (4, 5, 6, 10) else params[3] if kind in (2, 3) else 0.0
+        if abs(radial) > MAX_RADIAL:
+            return f"the solved lens bends by k1 = {radial:.2f}, far more than a phone lens"
+    return None
+
+
+def register_leftovers(model: Path, other_models: list[Path], database: Path, images_dir: Path,
+                       workspace: Path, log: Path) -> int:
+    """Add the frames the solve put in separate pieces to the main model.
+
+    A fragmented solve leaves stretches of the walk in their own small models,
+    which nothing downstream uses. COLMAP's image registrator places each of
+    those frames against the main model's points (matches are already in the
+    database), and bundle adjustment settles them; kept only when it placed
+    more frames without hurting the reprojection error. Frames dropped as
+    detours stay out. Returns the number of frames added."""
+    dropped = set()
+    record = workspace / "dropped-frames.json"
+    if record.exists():
+        dropped = {name for names in json.loads(record.read_text()).values() for name in names}
+    names = []
+    for other in other_models:
+        names += [n for n in image_names(other) if n not in dropped]
+    if not names:
+        return 0
+    # Matching ran between neighbouring frames only, so the pieces may share no
+    # match at all (the end of a walk that comes back to where it started).
+    # Each leftover frame is matched against every few frames of the main model.
+    main_names = image_names(model)
+    pairs = [f"{a} {b}" for a in names for b in main_names[::LEFTOVER_MATCH_STRIDE]]
+    pair_list = workspace / "leftover-pairs.txt"
+    pair_list.write_text("\n".join(pairs) + "\n")
+    print(f"  Matching {len(names)} frames of the other pieces against the main model ({len(pairs)} pairs)")
+    run(["colmap", "matches_importer", "--database_path", str(database), "--match_list_path", str(pair_list),
+         "--match_type", "pairs", *gpu_flags("matches_importer", "FeatureMatching", "SiftMatching")],
+        log, check=False)
+    before, error_before = registered_images(model), mean_reprojection(model)
+    trial = workspace / "sparse-leftovers"
+    shutil.rmtree(trial, ignore_errors=True)
+    trial.mkdir()
+    image_list = workspace / "leftover-frames.txt"
+    image_list.write_text("\n".join(names) + "\n")
+    ok = run(["colmap", "image_registrator", "--database_path", str(database), "--input_path", str(model),
+              "--output_path", str(trial), "--Mapper.image_list_path", str(image_list)], log, check=False) \
+        and run(["colmap", "bundle_adjuster", "--input_path", str(trial), "--output_path", str(trial)],
+                log, check=False)
+    if not ok or not (trial / "images.bin").exists():
+        shutil.rmtree(trial, ignore_errors=True)
+        return 0
+    added = registered_images(trial) - before
+    error_after = mean_reprojection(trial)
+    worse = error_before is not None and error_after is not None and error_after > 1.25 * error_before + 0.1
+    if added <= 0 or worse or lens_problem(trial):
+        print(f"  The frames of the other pieces could not be added to the main model "
+              f"({'reprojection error grew' if worse else 'none placed' if added <= 0 else 'lens drifted'}).")
+        shutil.rmtree(trial, ignore_errors=True)
+        return 0
+    for name in ("cameras.bin", "images.bin", "points3D.bin", "frames.bin", "rigs.bin"):
+        if (trial / name).exists():
+            shutil.copy2(trial / name, model / name)
+    shutil.rmtree(trial, ignore_errors=True)
+    print(f"  Added {added} of {len(names)} frames from the other pieces to the main model "
+          f"(reprojection {error_before or 0:.2f} -> {error_after or 0:.2f} px).")
+    return added
+
+
+def image_names(model: Path) -> list[str]:
+    """The frame names a model registered (images.bin)."""
+    raw = (model / "images.bin").read_bytes()
+    at, names = 8, []
+    for _ in range(struct.unpack("<Q", raw[:8])[0]):
+        at += 64
+        end = raw.index(b"\0", at)
+        names.append(raw[at:end].decode())
+        at = end + 1
+        at += 8 + 24 * struct.unpack("<Q", raw[at:at + 8])[0]
+    return names
+
+
 def camera_path(model: Path):
     """Frames in video order: names, camera centres, frame numbers, and the
     scene's size (5-95 percentile extent of the points), or None when the
@@ -570,6 +672,8 @@ def sparse_reconstruction(
                 problem = "the global mapper failed"
             elif not solved_models(sparse_dir):
                 problem = "the global mapper registered nothing"
+            elif any(lens_problem(m) for m in solved_models(sparse_dir)):
+                problem = next(p for p in map(lens_problem, solved_models(sparse_dir)) if p)
             elif max(model_points(m) for m in solved_models(sparse_dir)) < MIN_SOLVE_POINTS:
                 # A slow slide across a large room: the global solve placed 10
                 # of 14 frames with no point.
@@ -646,6 +750,15 @@ def sparse_reconstruction(
             "with how far away the room is (a slow slide or a pan from one spot): too little "
             "parallax to measure depth from."
         )
+    if len(models) > 1 and best_model is not None:
+        # The frames of the smaller pieces are added to the main one where they fit.
+        if register_leftovers(best_model, [m for m in models if m != best_model], database,
+                              images_dir, workspace, log):
+            run(["colmap", "model_converter", "--input_path", str(best_model),
+                 "--output_path", str(best_ply), "--output_type", "PLY"], log)
+            best_points = len(load_ply(best_ply))
+            print(f"  model {best_model.name}: {best_points:,} points, "
+                  f"{registered_images(best_model)} of {total_frames} frames")
     if len(models) > 1:
         print(
             f"Note: reconstruction fragmented into {len(models)} pieces "

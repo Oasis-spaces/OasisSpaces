@@ -37,7 +37,9 @@ from pathlib import Path
 import numpy as np
 
 MODEL_ID = "IDEA-Research/grounding-dino-tiny"
-SEGMENTER_ID = "facebook/sam2.1-hiera-tiny"
+# Base-plus (80M) instead of tiny (39M): cleaner outlines from the same box, and
+# still a few seconds a keyframe on a CPU (research note, Nov 2026).
+SEGMENTER_ID = "facebook/sam2.1-hiera-base-plus"
 # An outline covering less than this share of its rectangle means SAM
 # found nothing there, so the whole rectangle is used instead.
 MIN_OUTLINE_SHARE = 0.02
@@ -332,8 +334,8 @@ class ClaudeDetector:
         self.advisor = advisor or Advisor(system=BRIEF_PATH.read_text() if BRIEF_PATH.exists() else None)
         self.per_call = per_call
         self.work_dir = Path(work_dir) if work_dir else None
-        if not self.advisor.available:
-            raise RuntimeError(f"Claude is not reachable ({self.advisor.reason})")
+        if not self.advisor.available and not (self.work_dir and (self.work_dir / "marks.json").exists()):
+            raise RuntimeError(f"Claude is not reachable ({self.advisor.reason}) and no frames were marked earlier")
 
     @staticmethod
     def gridded(path: Path, out: Path) -> tuple[Path, tuple[int, int]]:
@@ -380,9 +382,35 @@ class ClaudeDetector:
         import tempfile
 
         work = self.work_dir or Path(tempfile.mkdtemp(prefix="claude-marks-"))
+        work.mkdir(parents=True, exist_ok=True)
+        # Marks are kept beside the gridded frames (marks.json), so a later run of
+        # the same frames with the same object list, on this machine or a GPU one
+        # without Claude, uses them instead of asking again.
+        record = work / "marks.json"
+        names = sorted(self.vocabulary.names) if hasattr(self.vocabulary, "names") else None
+        kept: dict[str, list[dict]] = {}
+        if record.exists():
+            try:
+                data = json.loads(record.read_text())
+                if data.get("vocabulary") == names:
+                    kept = data.get("frames") or {}
+            except (ValueError, OSError):
+                kept = {}
         found: dict[str, list[dict]] = {}
         for start in range(0, len(paths), self.per_call):
             batch = [Path(p) for p in paths[start:start + self.per_call]]
+            if all(p.name in kept for p in batch):
+                for p in batch:
+                    found[p.name] = kept[p.name]
+                    log(f"  {p.name}: " + (", ".join(sorted({d['label'] for d in kept[p.name]})) or "nothing marked")
+                        + " (marked earlier)")
+                continue
+            if not self.advisor.available:
+                log("  Claude is not available here and these frames were not marked earlier: "
+                    + ", ".join(p.name for p in batch))
+                for p in batch:
+                    found[p.name] = []
+                continue
             shown, sizes = [], []
             for p in batch:
                 g, size = self.gridded(p, work / f"{p.stem}-grid.jpg")
@@ -411,7 +439,9 @@ class ClaudeDetector:
                     dets.append({"label": label, "score": CLAUDE_SCORE,
                                  "box": [x0 / 100 * w, y0 / 100 * h, x1 / 100 * w, y1 / 100 * h]})
                 found[p.name] = dets
+                kept[p.name] = dets
                 log(f"  {p.name}: " + (", ".join(sorted({d['label'] for d in dets})) or "nothing marked"))
+            record.write_text(json.dumps({"vocabulary": names, "frames": kept}) + "\n")
         return found
 
 

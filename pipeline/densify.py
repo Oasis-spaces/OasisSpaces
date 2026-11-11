@@ -40,11 +40,31 @@ from pointcloud import PointCloud, remove_outliers, save_ply, trim_far_points
 from semantics import (SEGMENTER_ID, ClaudeDetector, Detector, Segmenter, planned_vocabulary,
                        default_device, pixel_labels)
 from tracking import PROMPT_FRAMES, TRACKERS, merge_detections, prompt_frames, track
-from mirrors import fill_unreliable
+from mirrors import fill_unreliable, mask_at
 import lens
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
 MIN_ANCHORS = 12
+# Scale. One monocular depth map is right up to a scale, and every keyframe's
+# scale is fitted to the solve's points it sees. Along a walk the fits drift a
+# little (the solve's own scale drifts), so a keyframe takes the scale of its
+# stretch of the walk: its own fit blended with its neighbours', weighted by how
+# many points each fit rests on. A keyframe whose own fit is far from its
+# neighbours' has depth that does not match the room (a close-up, a blur, a
+# reflection taken for space) and is left out rather than forced onto a scale.
+SCALE_WINDOW = 2              # keyframes either side that a scale is smoothed with
+SCALE_OFF = float(np.log(1.25))  # own fit this far from the neighbours': bad depth
+# Free space. A point another keyframe looks straight through (it lies well in
+# front of the surface that keyframe sees at the same spot) is a floater: depth
+# bleeding at an edge, a reflection, a moving thing. Checked against the nearest
+# keyframes along the walk.
+# Labels. Each keyframe names its own points from its own outlines, so one wrong
+# outline mislabels a patch. Where several keyframes see the same small cube of
+# space, the name most of them give it wins.
+VOTE_VOXEL_M = 0.04            # side of the cube that is voted on, metres
+VOTE_SHARE = 0.6               # an unlabelled point takes a name this share of keyframes give
+SEE_THROUGH = 0.85            # nearer than this share of a neighbour's surface depth
+CHECK_NEIGHBOURS = 2          # keyframes either side checked
 
 
 def quat_to_rot(qw, qx, qy, qz):
@@ -157,20 +177,117 @@ def fit_scale_shift(pred_inv, sparse_depth):
     return a, b
 
 
-def fit_scale(pred_depth, sparse_depth):
+def fit_scale(pred_depth, sparse_depth, with_support=False):
     """Robust single scale for metric predictions: sparse ~ s * predicted.
-    Returns None when too few anchors land on valid predicted depth."""
+    Returns None when too few anchors land on valid predicted depth; with
+    with_support, (s, number of anchors that agree with it)."""
     valid = np.isfinite(pred_depth) & (pred_depth > 0)
     if valid.sum() < 8:
-        return None
+        return (None, 0) if with_support else None
     ratio = sparse_depth[valid] / pred_depth[valid]
     s = float(np.median(ratio))
+    keep = np.ones(len(ratio), bool)
     for _ in range(3):
         keep = np.abs(np.log(ratio / s)) < 0.25
         if keep.sum() < 8:
             break
         s = float(np.median(ratio[keep]))
-    return s
+    return (s, int(keep.sum())) if with_support else s
+
+
+def weighted_median(values, weights) -> float:
+    order = np.argsort(values)
+    v, w = np.asarray(values, float)[order], np.asarray(weights, float)[order]
+    return float(v[np.searchsorted(np.cumsum(w), 0.5 * w.sum())])
+
+
+def settle_scales(fits, window=SCALE_WINDOW, off=SCALE_OFF):
+    """Each keyframe's scale from its own fit and its stretch of the walk.
+
+    fits: (scale or None, supporting anchors) per keyframe, in walk order.
+    Returns (scales, metre, left_out): a scale per keyframe (None for one left
+    out), the support-weighted median scale (COLMAP units per metre), and the
+    indices of keyframes whose own fit disagrees with their neighbours'."""
+    logs = np.array([np.log(s) if s else np.nan for s, _ in fits])
+    support = np.array([n if s else 0 for s, n in fits], float)
+    fitted = np.isfinite(logs)
+    if not fitted.any():
+        return [None] * len(fits), None, []
+    metre_log = weighted_median(logs[fitted], support[fitted])
+    scales, left_out = [], []
+    for i in range(len(fits)):
+        near = [j for j in range(max(0, i - window), min(len(fits), i + window + 1)) if j != i and fitted[j]]
+        # Neighbours that themselves sit far off are not trusted as a reference.
+        near = [j for j in near if abs(logs[j] - metre_log) < 2 * off] or near
+        reference = weighted_median(logs[near], support[near]) if near else metre_log
+        if not fitted[i]:
+            scales.append(float(np.exp(reference)))
+            continue
+        if abs(logs[i] - reference) > off:
+            scales.append(None)
+            left_out.append(i)
+            continue
+        weight_near = 0.5 * support[near].sum() / max(1, len(near)) if near else 0.0
+        blended = (support[i] * logs[i] + weight_near * reference) / (support[i] + weight_near)
+        scales.append(float(np.exp(blended)))
+    return scales, float(np.exp(metre_log)), left_out
+
+
+def vote_labels(points, labels, frame_of, voxel):
+    """Labels decided by the keyframes that see each small cube of space.
+
+    In a cube that several keyframes see, every labelled point takes the name
+    most of those keyframes give there (each keyframe one vote), and an
+    unlabelled point takes it too when at least VOTE_SHARE of them give it.
+    Returns the new labels and how many points changed."""
+    labels = labels.copy()
+    cells = np.floor(points / voxel).astype(np.int64)
+    _, cell = np.unique(cells, axis=0, return_inverse=True)
+    cell = cell.ravel()
+    # One vote per (cube, keyframe, label).
+    votes = np.unique(np.column_stack([cell, frame_of, labels]), axis=0)
+    frames_per_cell = np.bincount(np.unique(votes[:, :2], axis=0)[:, 0], minlength=cell.max() + 1)
+    named = votes[votes[:, 2] > 0]
+    if not len(named):
+        return labels, 0
+    pair, count = np.unique(named[:, [0, 2]], axis=0, return_counts=True)
+    order = np.lexsort((-count, pair[:, 0]))
+    pair, count = pair[order], count[order]
+    first = np.r_[True, pair[1:, 0] != pair[:-1, 0]]
+    winner = np.zeros(cell.max() + 1, np.int64)
+    support = np.zeros(cell.max() + 1, np.int64)
+    winner[pair[first, 0]] = pair[first, 1]
+    support[pair[first, 0]] = count[first]
+    contested = frames_per_cell[cell] >= 2
+    new = labels.copy()
+    labelled = (labels > 0) & contested & (winner[cell] > 0)
+    new[labelled] = winner[cell][labelled]
+    unlabelled = (labels == 0) & contested & (support[cell] >= VOTE_SHARE * frames_per_cell[cell])
+    new[unlabelled] = winner[cell][unlabelled]
+    return new.astype(labels.dtype), int((new != labels).sum())
+
+
+def seen_through(world, others):
+    """Which world points a neighbouring keyframe looks straight through.
+
+    others: (info, cam, depth map at working size, k, scale) per neighbour; the
+    depth map is in the depth network's units, so scale * depth is the solve's."""
+    hit = np.zeros(len(world), bool)
+    for info, cam, depth, k, scale in others:
+        cam_pts = (info["R"] @ world.T).T + info["t"]
+        z = cam_pts[:, 2]
+        front = z > 0.05
+        if not front.any():
+            continue
+        u, v = lens.project(lens.from_colmap(cam), cam_pts[front, 0] / z[front], cam_pts[front, 1] / z[front])
+        rows, cols = depth.shape
+        r, c = (v * k).astype(int), (u * k).astype(int)
+        inside = np.isfinite(u) & (r >= 0) & (r < rows) & (c >= 0) & (c < cols)
+        idx = np.flatnonzero(front)[inside]
+        surface = scale * depth[r[inside], c[inside]]
+        ok = np.isfinite(surface) & (surface > 0)
+        hit[idx[ok]] |= z[idx[ok]] < SEE_THROUGH * surface[ok]
+    return hit
 
 
 def depth_edges(depth, threshold=0.05):
@@ -404,9 +521,11 @@ def main():
             if len(px) >= MIN_ANCHORS:
                 sy = np.minimum((py * k).astype(int), depth.shape[0] - 1)
                 sx = np.minimum((px * k).astype(int), depth.shape[1] - 1)
-                s = fit_scale(depth[sy, sx], depth_true)
+                s, support = fit_scale(depth[sy, sx], depth_true, with_support=True)
+            else:
+                support = 0
             frames.append({
-                "id": image_id, "depth": depth, "k": k, "s": s, "normal": normal,
+                "id": image_id, "depth": depth, "k": k, "s": s, "support": support, "normal": normal,
                 "detections": [],
                 "cap": np.percentile(depth_true, 98) * 3 if len(px) >= MIN_ANCHORS else None,
             })
@@ -530,7 +649,11 @@ def main():
         if len(fitted) == 0:
             sys.exit("No keyframe sees enough sparse points to fix the scale; "
                      "check the COLMAP model (reconstruct.py) and retry.")
-        s_med = float(np.median(fitted))
+        # Keyframes in walk order, each scaled with its stretch of the walk.
+        frames.sort(key=lambda f: images[f["id"]]["name"])
+        settled, s_med, left_out = settle_scales([(f["s"], f["support"]) for f in frames])
+        for f, s in zip(frames, settled):
+            f["scale"] = s
         spread = float(np.subtract(*np.percentile(fitted, [75, 25])) / s_med)
         caps = [f["cap"] for f in frames if f["cap"] is not None]
         default_cap = float(np.median(caps)) if caps else np.inf
@@ -541,26 +664,52 @@ def main():
                   "camera model is probably inconsistent (pieces joined at "
                   "different scales). Rerun reconstruct.py with --mapper incremental.")
 
-        # Pass 2: back-project. A frame without a trustworthy fit (none, or
-        # more than 25% off the median) uses the median scale.
-        on_median = 0
+        if left_out:
+            print("Left out (depth disagrees with its neighbours' scale): " + ", ".join(
+                f"{images[frames[i]['id']]['name']} ({frames[i]['s']:.2f} against about "
+                f"{np.exp(np.median([np.log(f['scale']) for f in frames if f['scale']])):.2f})" for i in left_out))
+        on_median = sum(1 for f in frames if f["s"] is None)
+
+        # Pass 2a: mirrors, windows and screens stood on their planes first, so
+        # the free-space check below compares against the corrected surfaces.
         for f in frames:
+            f["filled_map"], f["fill_records"] = None, []
+            if f["scale"] is None or label_index is None or args.no_mirror_planes or not f["detections"]:
+                continue
+            camera = lens.from_colmap(cameras[images[f["id"]]["camera_id"]])
+            f["depth"], f["normal"], f["filled_map"], f["fill_records"] = fill_unreliable(
+                f["depth"], f["k"], f["detections"], set(vocabulary.unreliable),
+                (camera["fx"], camera["fy"], camera["cx"], camera["cy"]), f["normal"], camera["distortion"])
+        # What a keyframe is checked against: its depth, without the mirrors,
+        # windows and screens that could not be stood on a plane (their depth
+        # is the reflection or the view outside, which every wall is in front of).
+        for f in frames:
+            f["check_depth"] = f["depth"]
+            if label_index is None or f["scale"] is None:
+                continue
+            doubtful = [d for d in f["detections"] if d["label"] in vocabulary.unreliable]
+            if doubtful:
+                f["check_depth"] = f["depth"].copy()
+                for d in doubtful:
+                    m = mask_at(d, f["depth"].shape, f["k"])
+                    if f["filled_map"] is not None:
+                        m &= ~f["filled_map"]
+                    f["check_depth"][m] = np.nan
+        kept = [f for f in frames if f["scale"] is not None]
+        seen_through_total = 0
+
+        # Pass 2b: back-project.
+        for at_frame, f in enumerate(kept):
             info = images[f["id"]]
             cam = cameras[info["camera_id"]]
             img = Image.open(workspace / "images" / info["name"])
-            s = f["s"]
-            if s is None or abs(np.log(s / s_med)) > np.log(1.25):
-                s, on_median = s_med, on_median + 1
+            s = f["scale"]
             depth, k, normal = f["depth"], f["k"], f["normal"]
             # A mirror's depth is its reflection's, a window's the view
             # outside: give each the plane of what surrounds it (the wall,
             # the wardrobe it is a door of) instead of dropping it.
-            filled_map = None
-            if label_index is not None and not args.no_mirror_planes and f["detections"]:
-                camera = lens.from_colmap(cam)
-                depth, normal, filled_map, records = fill_unreliable(
-                    depth, k, f["detections"], set(vocabulary.unreliable),
-                    (camera["fx"], camera["fy"], camera["cx"], camera["cy"]), normal, camera["distortion"])
+            filled_map, records = f["filled_map"], f["fill_records"]
+            if records:
                 for r in records:
                     fills.setdefault(r["label"], []).append(r)
                 done = ", ".join(f"{r['label']} {r['filled']:,} px at {r['plane_depth_m']} m"
@@ -583,6 +732,16 @@ def main():
                 n_at=(lambda us, vs: normal[pixel(us, vs)]) if normal is not None else None,
             )
             without_ray.append(no_ray)
+            # Points the neighbouring keyframes look straight through are floaters.
+            others = [(images[g["id"]], cameras[images[g["id"]]["camera_id"]], g["check_depth"], g["k"], g["scale"])
+                      for g in kept[max(0, at_frame - CHECK_NEIGHBOURS):at_frame + CHECK_NEIGHBOURS + 1] if g is not f]
+            through = seen_through(pts.astype(np.float64), others) if others else np.zeros(len(pts), bool)
+            if through.any():
+                keep_pts = ~through
+                pts, rgb, us, vs = pts[keep_pts], rgb[keep_pts], us[keep_pts], vs[keep_pts]
+                if nrm is not None:
+                    nrm = nrm[keep_pts]
+                seen_through_total += int(through.sum())
             labels = None
             if label_index is not None:
                 labels = pixel_labels(us, vs, f["detections"], label_index,
@@ -610,10 +769,14 @@ def main():
             all_cols.append(rgb)
             all_norms.append(nrm)
             all_labels.append(labels)
-        print(f"Fused {len(frames)} keyframes ({on_median} on the median scale)")
+        print(f"Fused {len(kept)} keyframes ({on_median} without their own scale fit, "
+              f"{len(left_out)} left out); {seen_through_total:,} points another keyframe sees through dropped")
         meta.update({"colmap_units_per_metre": s_med, "scale_spread": spread,
                      "scale_inconsistent": spread > 0.3,
-                     "frames_on_median_scale": on_median})
+                     "frames_on_median_scale": on_median,
+                     "scale_method": "support-weighted, smoothed along the walk",
+                     "frames_left_out": [images[frames[i]["id"]]["name"] for i in left_out],
+                     "points_seen_through": seen_through_total})
 
     meta["pixels_without_ray"] = round(float(np.mean(without_ray)), 4) if without_ray else 0.0
     if meta["pixels_without_ray"] > 0:
@@ -628,6 +791,12 @@ def main():
         if all_norms and all(n is not None for n in all_norms) else None
     labels = np.concatenate(all_labels) \
         if all_labels and all(l is not None for l in all_labels) else None
+    if labels is not None and meta.get("colmap_units_per_metre") and len(all_pts) > 1:
+        frame_of = np.concatenate([np.full(len(p), i) for i, p in enumerate(all_pts)])
+        labels, changed = vote_labels(np.vstack(all_pts), labels, frame_of,
+                                      VOTE_VOXEL_M * meta["colmap_units_per_metre"])
+        meta["labels_changed_by_vote"] = changed
+        print(f"Labels voted across keyframes: {changed:,} points changed")
     cloud = PointCloud(np.vstack(all_pts), np.vstack(all_cols), normals, labels,
                        label_names if labels is not None else None)
     print(f"Fused: {len(cloud):,} points; cleaning up")
