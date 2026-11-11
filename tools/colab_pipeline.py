@@ -91,11 +91,17 @@ REMOTE_VIDEOS = "/content/videos"
 REMOTE_WORK = "/content/oasis-run"
 RELAY = "/content/claude-relay"
 PART_BYTES = 20 * 1024 * 1024
+# Jobs run below the kernel's priority: stage 1 decoding a 4K video took every CPU, the
+# kernel stopped answering this Mac for half an hour and Colab dropped the session.
+JOB_NICENESS = 10
 UPLOAD_ATTEMPTS = 8              # a part's upload is tried this often, waiting longer each time
 INSTALL_CELLS = ["install-colmap", "install-python", "install-blender", "install-opensplat", "install-mapanything",
                  "install-anysplat", "install-trellis"]
 # What the notebook's helper cell sets before running the agent.
 REMOTE_ENV = {
+    # Output reaches this Mac as it is printed (the "vm |" lines), not in 8 KB lumps:
+    # a VM that dies mid-stage then leaves its last step on record.
+    "PYTHONUNBUFFERED": "1",
     "BLENDER": "/opt/blender/blender",
     "OPENSPLAT": "/content/OpenSplat/build/opensplat",
     "OASIS_RENDER_ENGINE": "CYCLES",
@@ -250,7 +256,8 @@ class Colab:
                     f"os.makedirs('{REMOTE_WORK}', exist_ok=True)\n"
                     f"exit_file = '{REMOTE_WORK}/{name}.exit'\n"
                     f"os.path.exists(exit_file) and os.remove(exit_file)\n"
-                    f"p = subprocess.Popen(['bash', '-c', {wrapped!r}], stdin=subprocess.DEVNULL, "
+                    f"p = subprocess.Popen(['nice', '-n', '{JOB_NICENESS}', 'bash', '-c', {wrapped!r}], "
+                    f"stdin=subprocess.DEVNULL, "
                     f"stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, "
                     f"cwd='/content')\n"
                     f"open('{REMOTE_WORK}/{name}.pid', 'w').write(str(p.pid))\n"
