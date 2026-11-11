@@ -681,6 +681,25 @@ def run_stage(vm: Colab, video_remote: str, name: str, step: str, extra: list[st
     return gate
 
 
+def again(stages: str) -> str:
+    """The command to carry on: the one this run was started with (its --gpu,
+    --video-url, --wait-gpu and the rest kept), with --stages set to `stages`."""
+    args, skip = [], False
+    for a in sys.argv[1:]:
+        if skip:
+            if a.startswith("-"):
+                skip = False
+            else:
+                continue
+        if a == "--stages":
+            skip = True
+            continue
+        if a.startswith("--stages="):
+            continue
+        args.append(a)
+    return "python3 tools/colab_pipeline.py " + " ".join(shlex.quote(a) for a in args) + f" --stages {stages}"
+
+
 def main() -> None:
     # A stopped driver still runs its finally blocks (the relay is stopped with it).
     signal.signal(signal.SIGTERM, lambda *_: sys.exit("stopped"))
@@ -769,12 +788,12 @@ def main() -> None:
             log(f"  fetched {fetch_space(vm, args.name)} new or changed file(s) into spaces/{args.name}")
             if gate.get("status") == "stop":
                 rest = " ".join(args.stages[args.stages.index(step):])
-                sys.exit(f"{step} stopped; fix it, then run again with --stages {rest}")
+                sys.exit(f"{step} stopped; fix it, then run again:\n  {again(rest)}")
             done_steps.append(step)
     except SessionEnded as exc:
         rest = " ".join(s for s in args.stages if s not in done_steps)
         sys.exit(f"{exc}. Everything fetched so far is in spaces/{args.name}; carry on with:\n"
-                 f"  python3 tools/colab_pipeline.py {args.video} --name {args.name} --stages {rest}")
+                 f"  {again(rest)}")
     finally:
         relay.terminate()
 
