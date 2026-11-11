@@ -208,6 +208,119 @@ Not adopting: FLUX Fill/Kontext, Hunyuan3D, Difix3D+, SpatialLM, DA3 Large and
 Giant (all licence), VGGT-class solvers (no gain over what runs), Depth
 Anything V4 (withdrawn).
 
+## 8. What practitioners say (Reddit, X)
+
+Read 11 Nov 2026: r/GaussianSplatting, r/computervision, r/StableDiffusion,
+r/comfyui, r/TopologyAI, r/aigamedev, and X search. Reddit threads were read
+through a public archive, so vote counts are approximate. These are opinions
+and single reports, not benchmarks; each line says what it changes for us.
+
+### Camera solve
+
+- **"Nothing beats a successful COLMAP alignment"** is the top-voted answer in
+  the home-interiors pipeline thread; RealityScan is the usual second choice
+  (free, closed, Windows only, so not for us). Feed-forward solvers are
+  mentioned for speed, never for accuracy. Keeps our choice.
+- **The global mapper can silently corrupt intrinsics.** One r/computervision
+  report: same matches, only the mapper swapped, and render quality fell from
+  28 to 16 dB because the focal lengths drifted (fx/fy ratio 2.36 on square
+  pinhole images) while every camera still registered. We use the global
+  mapper by default. I checked the bedroom solve: fx 3226, fy 3221, small
+  distortion, so it is healthy. **Add a guard:** after the solve, fail over to
+  the incremental mapper when fx and fy differ by more than about 2% or the
+  focal length is far from the phone's known lens.
+- The bedroom solve also left **14 frames in a second, separate model** (166
+  in the main one). Those frames are unused today; registering them into the
+  main model, or MapAnything gap fill, would recover that part of the walk.
+- Speed tips repeated across threads: cap SIFT features, vocabulary-tree or
+  sequential matching, JPEG frames at reduced size, and pick sharp frames
+  (the "Sharp Frames" tool; we already choose frames by sharpness).
+- **ARKit poses and LiDAR depth at capture** (Splatcam, 111 votes; Scaniverse)
+  skip the solve entirely on Pro iPhones, with some drift. For the phone app:
+  record ARKit poses and LiDAR depth when the phone has them and use them as
+  priors and as real metric scale. This would remove our scale problem on
+  those phones outright.
+
+### Splat training
+
+- What people actually run: **LichtFeld Studio** (GPLv3, NVIDIA only),
+  **Brush** (Apache, any GPU, Mac) and, newest, **Spirula Studio** (GPLv3;
+  Vulkan so it runs on NVIDIA, AMD, Intel and Apple; built-in fast SfM, depth
+  and normal priors, exposure correction, meshing, a CLI, 10 million Gaussians
+  in 8 GB). Spirula is the most recommended tool in the "hidden gems" thread,
+  though one user got worse rooms from it than from commercial tools.
+- For us: GPL is acceptable for a tool we run as a separate program on our own
+  servers, unlike AGPL OpenSplat, but **gsplat and Brush (Apache) stay the
+  default**. Spirula is worth one trial run on the bedroom because it trains
+  on a Mac and uses depth and normals out of the box.
+- The most repeated advice is not a tool: **better capture beats every
+  trainer.** Blur in, blur out; slow movement, good light, overlap. This
+  argues for capture guidance in the app over any model swap.
+- **SplatAnything** (X, Nov 2026): feed-forward splats from posed images, no
+  per-scene training. The licence is contradictory (Apache on the model card,
+  a Tencent licence excluding the EU, UK and South Korea in the repo). Do not
+  use until that is settled.
+
+### Furniture models
+
+- One user's test on an RTX 4090, about 40 models: Hi3DGen 8.5 s (clean mesh,
+  no texture), TRELLIS v1 21 s (textured, small), TRELLIS.2 168 s (best
+  textures, heavy files), Hunyuan3D-2 239 s. Community builds are reported to
+  run TRELLIS.2 on 6 GB in about 7 minutes.
+- Consensus: **TRELLIS.2 is the strongest open model**; the "better" ones
+  named in threads are closed (Meshy 6, Hunyuan 3.x) or geometry-only refiners
+  (UltraShape). Pixal3D gets mixed reports ("always gives me mush").
+- For us: because we scale the model to a measured box, **geometry first,
+  texture second** is fine: Hi3DGen or TripoSG for shape in seconds, TRELLIS.2
+  texturing only for pieces the user keeps. TRELLIS v1 stays a good fast
+  default.
+
+### Removing furniture from images
+
+- Qwen-Image-Edit does remove furniture well (examples in the thread), but it
+  is **fragile**: the same "remove x" prompt silently did nothing on one
+  version until the workflow was rebuilt, and editors skip objects they cannot
+  name (an odd-shaped bag would not go).
+- For us: always give the editor **the mask as well as the words** (we have
+  SAM outlines), and **check every fill**: Claude compares before and after
+  and rejects a fill where the piece is still there. This supports the ladder
+  in section 4b and the rule that no fill is used unchecked.
+
+### Segmentation
+
+- SAM 3.1 is used on X exactly as we plan to use it: masks for named objects,
+  then calibrated depth to turn them into 3D measurements, and as the masking
+  step before removal. No reports of it failing on furniture; little
+  independent accuracy data yet.
+
+### An agent that builds the room
+
+- **HARMONY** (arXiv 2609.26793, open source, Sept 2026): a vision-language
+  agent rebuilds an indoor scene in a fixed order: room structure and camera
+  first, then wall-mounted objects, then free-standing furniture, then things
+  resting on furniture. After each stage it **renders its scene, compares the
+  render with the photo, and corrects** before moving on, so errors do not
+  pile up. It works from one image; we have a whole video and measurements.
+- This is the closest published work to our agent, and two ideas transfer:
+  1. **Fixed order**: walls and outline, then mounted pieces, then floor
+     furniture, then small things. Our review does these in one pass.
+  2. **Render and compare**: show Claude the room model drawn over the same
+     keyframe after each edit. We score edits numerically today; a side by
+     side picture lets the model see a wrong box the score misses.
+  Its 300-scene benchmark (HARMONY300) could sit beside ARKitScenes for
+  testing.
+
+### Changes to the order of work (section 7)
+
+- Add to step 1: the intrinsics guard and recovering the 14 unregistered
+  frames.
+- New step after 4: staged review with render-and-compare (HARMONY's two
+  ideas).
+- Step 7: try Spirula once alongside gsplat.
+- Step 8: mask plus words, and a Claude check on every fill.
+- Phone app: record ARKit poses and LiDAR depth where available; capture
+  guidance.
+
 ## Sources
 
 - MoGe: github.com/microsoft/MoGe
@@ -220,3 +333,11 @@ Anything V4 (withdrawn).
 - TRELLIS.2: github.com/microsoft/TRELLIS.2; TripoSG: github.com/VAST-AI-Research/TripoSG
 - gsplat: github.com/nerfstudio-project/gsplat; Brush: github.com/ArthurBrussee/brush
 - Kaggle, Lightning AI, Modal, Hugging Face: each service's pricing page
+- Reddit: r/GaussianSplatting 1snq9do, 1wi8erv, 1r19kh9, 1rwi7h7, 1q5vdqj;
+  r/computervision 1t3p1gg; r/StableDiffusion 1q3ijwo; r/TopologyAI 1w1xbt1;
+  r/aigamedev 1xg65e8; r/comfyui 1pul8b3, 1ov7r6l, 1sak81w
+- X: SplatAnything (HuggingPapers, Nov 2026), HARMONY (sofine_sun, Sept 2026),
+  SAM 3.1 usage posts (Nov 2026)
+- HARMONY: cwchenwang.github.io/harmony; Spirula Studio:
+  github.com/harry7557558/spirula-studio; LichtFeld Studio:
+  github.com/MrNeRF/LichtFeld-Studio
