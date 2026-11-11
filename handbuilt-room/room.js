@@ -8,7 +8,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-const W = 3.1, L = 3.6, H = 2.75;
+// Walls and ceiling from the camera solve of the same video (spaces/bedroom/shapes.json).
+const W = 2.82, L = 3.27, H = 2.63;
 const params = new URLSearchParams(location.search);
 if (params.has("shot")) document.body.classList.add("shot");
 
@@ -109,7 +110,7 @@ function box(x, y, z, w, h, d, material, parent = room) {
 // One-sided surface, so the room can be looked into from outside.
 function surface(w, h, material, position, rotation) {
   const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), material);
-  m.position.set(...position); m.rotation.set(...rotation); m.receiveShadow = true; room.add(m); return m;
+  m.position.set(...position); m.rotation.set(...rotation); m.receiveShadow = true; m.userData.shell = true; room.add(m); return m;
 }
 
 // ---------- shell ----------
@@ -269,4 +270,11 @@ setView(params.get("view") || "Dollhouse");
 addEventListener("resize", () => { renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
 renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+// The model's boxes in plan coordinates, for tools/ scripts that project video frames onto it.
+room.updateMatrixWorld(true);
+window.roomBoxes = room.children.filter((m) => m.isMesh && !m.userData.shell).map((m) => {
+  const b = new THREE.Box3().setFromObject(m);
+  return { min: [W - b.max.x, b.min.y, b.min.z], max: [W - b.min.x, b.max.y, b.max.z], detail: m.userData.detail || null };
+});
+window.roomSize = { W, L, H };
 window.roomReady = true;

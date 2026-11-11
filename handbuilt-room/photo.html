@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bedroom, photo textured</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #15171a; color: #e8eaed; overflow: hidden;
+               font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  canvas { display: block; touch-action: none; }
+  #bar { position: fixed; top: 12px; left: 12px; right: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+  button { font: inherit; color: inherit; background: rgba(24,27,31,.92); border: 1px solid #2c3138;
+           border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  button:hover { border-color: #6fb3ff; }
+  #note { position: fixed; bottom: 12px; left: 12px; right: 12px; text-align: center; color: #9aa1ab; font-size: 13px; }
+  body.shot #bar, body.shot #note { display: none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../scene-viewer/vendor/three/build/three.module.js",
+               "three/addons/": "../scene-viewer/vendor/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="bar"></div>
+<div id="note">Geometry placed by hand, walls from the camera solve, every surface coloured from the video frames. Grey or plain areas were never filmed.</div>
+<script type="module" src="./photo.js"></script>
+</body>
+</html>

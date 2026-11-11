@@ -1,0 +1,21 @@
+{
+ "floor": 0.046,
+ "ceiling": 0.536,
+ "wall-wardrobe": 0.159,
+ "wall-curtain": 0.844,
+ "wall-headboard": 0.744,
+ "wall-desk": 0.798,
+ "wardrobe-front": 0.701,
+ "wardrobe-side": 0.004,
+ "loft-front": 0.99,
+ "loft-under": 0.903,
+ "bed-top": 1.0,
+ "bed-foot": 0.0,
+ "bed-side": 0.0,
+ "desk-top": 0.851,
+ "desk-front": 0.795,
+ "desk-end": 1.0,
+ "bench-top": 0.861,
+ "bench-front": 0.0,
+ "bench-end": 0.0
+}
