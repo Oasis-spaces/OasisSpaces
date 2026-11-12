@@ -55,7 +55,8 @@ def main():
     names = vocabulary.with_role("furniture", "storage", "fixture", "hanging", "unreliable")
     record = {"frames": len(frames), "every": args.every, "gpu": torch.cuda.get_device_name(0), "names": {}}
     started = time.time()
-    predictor = build_sam3_multiplex_video_predictor()
+    import torch as _t
+    predictor = build_sam3_multiplex_video_predictor(use_fa3=_t.cuda.get_device_capability()[0] >= 9)   # FlashAttention 3 is Hopper-only
     record["load_seconds"] = round(time.time() - started, 1)
     # Meta's start_session passes offload_state_to_cpu, which the multiplex model's
     # init_state does not take (sam3 main, Nov 2026): drop it there.

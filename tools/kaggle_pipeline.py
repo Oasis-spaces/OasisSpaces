@@ -74,8 +74,8 @@ JOBS = {
     "densify": {
         "inputs": ["objects.json", "workspace/images/*.jpg", "workspace/sparse/0/*",
                    "workspace/claude-marks/marks.json", "workspace/dropped-frames.json"],
-        "install": [INSTALL_PYTHON],
-        "run": ['python3 pipeline/densify.py "$SPACE" --detector claude --track on --tracker sam3'],
+        "install": [INSTALL_PYTHON, INSTALL_SAM31],      # SAM 3.1 first, SAM 3 if it will not load
+        "run": ['python3 pipeline/densify.py "$SPACE" --detector claude --track on --tracker auto'],
         # SAM 3 tracks the whole walk in chunks (pipeline/tracking.py); both T4s are not needed.
     },
     # The two newer depth networks on the same keyframes, beside the MoGe-2 cloud,

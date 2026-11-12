@@ -241,21 +241,22 @@ def test_auto_falls_back_to_sam2_when_sam3_will_not_load_and_sam3_alone_says_why
             calls.append(sorted({d["label"] for dets in to_track.values() for d in dets}))
             return tracking.Tracks(frames, (W, H), [], {})
 
-    saved = tracking.Sam3Tracker, tracking.Tracker
-    tracking.Sam3Tracker, tracking.Tracker = Gated, FakeSam2
+    saved = tracking.Sam31Tracker, tracking.Sam3Tracker, tracking.Tracker
+    tracking.Sam31Tracker, tracking.Sam3Tracker, tracking.Tracker = Gated, Gated, FakeSam2
     said = []
     try:
         tracks, rest = tracking.track(Path("."), FRAMES, prompts, vocabulary, "auto", log=said.append)
         assert calls == [["bed"]] and tracks.model == tracking.SEGMENTER_ID
         assert [d["label"] for d in rest[FRAMES[0]]] == ["shirt"]
-        assert said[0].startswith("SAM 3 not available (You are trying to access a gated repo.)")
+        assert said[0].startswith("SAM 3.1 not available (You are trying to access a gated repo.)")
+        assert said[1].startswith("SAM 3 not available (You are trying to access a gated repo.)")
         try:
             tracking.track(Path("."), FRAMES, prompts, vocabulary, "sam3", log=said.append)
             raise AssertionError("--tracker sam3 must not fall back")
         except OSError:
             pass
     finally:
-        tracking.Sam3Tracker, tracking.Tracker = saved
+        tracking.Sam31Tracker, tracking.Sam3Tracker, tracking.Tracker = saved
 
 
 if __name__ == "__main__":

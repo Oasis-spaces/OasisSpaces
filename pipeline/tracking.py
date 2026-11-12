@@ -62,6 +62,8 @@ from semantics import SEGMENTER_ID, default_device  # noqa: E402
 MASK_SIZE = 256           # the model's own mask raster, kept as the stored one
 SAM3_ID = "facebook/sam3"   # gated on Hugging Face: request access, then log in
 SAM3_WORK = 1008          # SAM 3's own input size: frames go to it at this longest side
+SAM31_ID = "facebook/sam3.1"   # gated like SAM 3; Meta's sam3 package (not transformers) runs it
+SAM31_ID_STRIDE = 100000      # object ids of each name's pass are kept apart by this
 SAM3_CHUNK = 48           # frames tracked in one session (memory grows with every frame held)
 SAM3_OVERLAP = 6          # frames two chunks share, where their objects are linked
 SAM3_LINK_IOU = 0.5       # outlines agreeing this well on the shared frames: one object
@@ -557,7 +559,8 @@ def release(torch) -> None:
         torch.cuda.empty_cache()
 
 
-def sam3_tracks(outputs, frames: list[str], size: tuple[int, int], scale: float, log=print) -> Tracks:
+def sam3_tracks(outputs, frames: list[str], size: tuple[int, int], scale: float, log=print,
+                model: str = SAM3_ID) -> Tracks:
     """SAM 3's processed outputs, (frame index, {object_ids, scores, boxes, masks,
     prompt_to_obj_ids}) per frame at `scale` of the frames' size, as Tracks.
 
@@ -586,10 +589,105 @@ def sam3_tracks(outputs, frames: list[str], size: tuple[int, int], scale: float,
             seen["frames"][f] = ([float(v) / scale for v in box], round(float(score), 3))
             square = Image.fromarray(mask.astype(np.uint8) * 255).resize((MASK_SIZE, MASK_SIZE), Image.NEAREST)
             masks[Tracks.key(obj_id, frames[f])] = np.packbits(np.asarray(square) > 0)
-    return Tracker.finish(objects, masks, frames, width, height, log, model=SAM3_ID)
+    return Tracker.finish(objects, masks, frames, width, height, log, model=model)
 
 
-TRACKERS = ("auto", "sam3", "sam2")
+class Sam31Tracker:
+    """SAM 3.1 (Object Multiplex, Mar 2026): Meta's sam3 package, which tracks
+    many objects in shared memory. Each of the room's names is one text prompt
+    and one pass through the video (the predictor takes one text prompt per
+    session state); the passes' objects become the same records as SAM 3's, so
+    Tracker.finish merges and names them the same way.
+
+    Needs the sam3 package (pip install git+https://github.com/facebookresearch/sam3.git),
+    a CUDA GPU, and access to facebook/sam3.1 on Hugging Face. FlashAttention 3
+    is used only on a Hopper GPU (H100); elsewhere (a T4) PyTorch's attention."""
+
+    model = SAM31_ID
+
+    def __init__(self, device: str | None = None):
+        import torch
+        from sam3.model_builder import build_sam3_multiplex_video_predictor
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("SAM 3.1 needs a CUDA GPU")
+        self.torch = torch
+        self.device = "cuda"
+        self.dtype = "bfloat16 (autocast)" if torch.cuda.get_device_capability()[0] >= 8 else "float32"
+        hopper = torch.cuda.get_device_capability()[0] >= 9
+        self.predictor = build_sam3_multiplex_video_predictor(use_fa3=hopper)
+        # sam3 main (Nov 2026) passes offload_state_to_cpu to start_session's
+        # init_state, which the multiplex model does not take.
+        init_state = self.predictor.model.init_state
+
+        def init_without_offload(*a, **kw):
+            kw.pop("offload_state_to_cpu", None)
+            return init_state(*a, **kw)
+
+        self.predictor.model.init_state = init_without_offload
+
+    def run(self, image_dir: Path, frames: list[str], names: list[str], log=print) -> Tracks:
+        import tempfile
+
+        from PIL import Image
+
+        image_dir = Path(image_dir)
+        width, height = Image.open(image_dir / frames[0]).size
+        scale = min(1.0, SAM3_WORK / max(width, height))
+        size = (round(width * scale), round(height * scale))
+        folder = Path(tempfile.mkdtemp(prefix="sam31-frames-"))
+        for i, f in enumerate(frames):           # the predictor reads frames named by their index
+            Image.open(image_dir / f).convert("RGB").resize(size, Image.BILINEAR).save(folder / f"{i:05d}.jpg", quality=92)
+        started = time.time()
+        session = self.predictor.handle_request(request=dict(type="start_session", resource_path=str(folder)))["session_id"]
+        per_frame: dict[int, dict] = {}
+        for n, name in enumerate(names):
+            t = time.time()
+            self.predictor.handle_request(request=dict(type="reset_session", session_id=session))
+            self.predictor.handle_request(request=dict(type="add_prompt", session_id=session, frame_index=0, text=name))
+            found = set()
+            with self.torch.no_grad():
+                for response in self.predictor.handle_stream_request(
+                        request=dict(type="propagate_in_video", session_id=session)):
+                    f, out = int(response["frame_index"]), response["outputs"]
+                    ids = as_numpy(out.get("out_obj_ids", [])).ravel()
+                    if not len(ids):
+                        continue
+                    masks = as_numpy(out["out_binary_masks"]).reshape(len(ids), *size[::-1])
+                    probs = as_numpy(out.get("out_probs", np.ones(len(ids)))).ravel()
+                    boxes = as_numpy(out.get("out_boxes_xywh", np.zeros((len(ids), 4)))).reshape(-1, 4).astype(float)
+                    if boxes.size and boxes.max() <= 1.5:             # normalised to the frame
+                        boxes *= [size[0], size[1], size[0], size[1]]
+                    xyxy = np.column_stack([boxes[:, 0], boxes[:, 1], boxes[:, 0] + boxes[:, 2], boxes[:, 1] + boxes[:, 3]])
+                    gid = [n * SAM31_ID_STRIDE + int(i) for i in ids]
+                    found |= set(gid)
+                    entry = per_frame.setdefault(f, {"object_ids": [], "scores": [], "boxes": [], "masks": [],
+                                                     "prompt_to_obj_ids": {}})
+                    entry["object_ids"] += gid
+                    entry["scores"] += probs.tolist()
+                    entry["boxes"] += xyxy.tolist()
+                    # Outlines kept at a quarter of the work size: only their area
+                    # share and their MASK_SIZE square are used.
+                    entry["masks"] += [m[::4, ::4] for m in masks]
+                    entry["prompt_to_obj_ids"].setdefault(name, []).extend(gid)
+            log(f"  {name}: {len(found)} object(s), {time.time() - t:.0f} s "
+                f"({n + 1} of {len(names)} names, about {(time.time() - started) / (n + 1) * (len(names) - n - 1) / 60:.0f} min to go)")
+        self.predictor.handle_request(request=dict(type="close_session", session_id=session))
+
+        def outputs():
+            for f in sorted(per_frame):
+                e = per_frame[f]
+                yield f, {"object_ids": np.array(e["object_ids"]), "scores": np.array(e["scores"]),
+                          "boxes": np.array(e["boxes"]), "masks": np.array(e["masks"]),
+                          "prompt_to_obj_ids": {k: np.array(v) for k, v in e["prompt_to_obj_ids"].items()}}
+
+        tracks = sam3_tracks(outputs(), frames, (width, height), scale, log, model=SAM31_ID)
+        log(f"  tracked {len(tracks.tracks)} objects through {len(frames)} frames "
+            f"in {(time.time() - started) / 60:.1f} min")
+        return tracks
+
+
+TRACKERS = ("auto", "sam31", "sam3", "sam2")
 
 
 def track(image_dir: Path, frames: list[str], prompts: dict[str, list[dict]], vocabulary,
@@ -601,6 +699,18 @@ def track(image_dir: Path, frames: list[str], prompts: dict[str, list[dict]], vo
     when its weights load (access granted, logged in) and SAM 2.1 otherwise."""
     tracked = tracked_names(vocabulary)
     to_track, rest = split_prompts(prompts, tracked)
+    if choice in ("auto", "sam31"):
+        names = [n for n in vocabulary.names if n in tracked]
+        try:
+            tracker = Sam31Tracker(device)
+        except Exception as exc:     # no sam3 package, no GPU, or no access to facebook/sam3.1
+            if choice == "sam31":
+                raise
+            log(f"SAM 3.1 not available ({str(exc).strip().splitlines()[0][:160]}); trying SAM 3")
+        else:
+            log(f"Object tracking: {SAM31_ID} (video, multiplex) on cuda ({tracker.dtype}), "
+                f"{len(frames)} frames; finding and tracking " + ", ".join(names))
+            return tracker.run(image_dir, frames, names, log), rest
     if choice in ("auto", "sam3"):
         names = [n for n in vocabulary.names if n in tracked]
         try:

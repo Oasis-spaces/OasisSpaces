@@ -554,6 +554,8 @@ def clear_the_walk(boxes: list[dict], cameras, room: dict, size, units_per_metre
         name = names[i] if names else f"box {i}"
         if b.get("mounted") or b.get("role") in ("fixture", "hanging"):
             continue                                           # on the wall (above the walk, or a door in it)
+        if b.get("hold_place"):
+            continue                                           # the review saw it stands where it was measured
         for _ in range(4):                                     # one side at a time
             lo, hi = b["min"], b["max"]
             r, e = (reach, reach), reach * 1.001           # a camera just cut to the edge's reach is not inside
@@ -604,6 +606,8 @@ def contain_furniture(walls: list[dict], boxes: list[dict], room: dict, size) ->
                      + ", ".join(b.get("label", "furniture") for b, _ in poking)
                      + " stays inside")
         for b, beyond in poking:
+            if b.get("hold_place"):
+                continue                                       # confirmed where measured: the wall gives way, not it
             if beyond > push + 1e-9 and trim_box(b, room, w, sign):
                 notes.append(f"trimmed {size(beyond - push)} off the {b.get('label')} "
                              f"where it still went through {name}")

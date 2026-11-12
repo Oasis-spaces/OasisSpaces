@@ -112,7 +112,8 @@ def inside_polygons(polygons, x, y) -> np.ndarray:
     return inside
 
 
-def grid(surface: dict, scene: np.ndarray, colours: np.ndarray, cell: float, near: float, labels=None):
+def grid(surface: dict, scene: np.ndarray, colours: np.ndarray, cell: float, near: float, labels=None,
+         in_front=()):
     """The surface's colour image (rows: v, cols: u), the cells seen, the cells
     that are part of the surface, and the in-plane coordinates of each cell."""
     w, h = surface["size"]
@@ -130,9 +131,16 @@ def grid(surface: dict, scene: np.ndarray, colours: np.ndarray, cell: float, nea
     seen = count > 0
     image[seen] /= count[seen][:, None]
     named = np.zeros((rows, cols))
+    front = np.zeros((rows, cols))
     if labels is not None:
         named = np.bincount(flat, weights=(labels[on] > 0).astype(float), minlength=rows * cols).reshape(rows, cols)
+        if len(in_front):
+            front = np.bincount(flat, weights=np.isin(labels[on], in_front).astype(float),
+                                minlength=rows * cols).reshape(rows, cols)
     surface["named_share"] = np.where(seen, named / np.maximum(count, 1), 0.0)
+    # A cell whose points are mostly a piece standing in front (the headboard, a
+    # wardrobe's doors, clothes) shows that piece, not this surface: unseen.
+    seen = seen & ~(front > 0.5 * np.maximum(count, 1))
     uu, vv = np.meshgrid((np.arange(cols) + 0.5) * cell, (np.arange(rows) + 0.5) * cell)
     if "polygons" in surface:
         world = surface["origin"][:2] + uu[..., None] * surface["u"][:2] + vv[..., None] * surface["v"][:2]
@@ -293,6 +301,152 @@ def fill(image: np.ndarray, seen: np.ndarray, todo: np.ndarray, pu, pv, ok=None)
     return out, copied
 
 
+def tile_grid(image: np.ndarray, ok: np.ndarray, period_u: int, period_v: int) -> dict | None:
+    """Fit a tile grid of the given period to what was seen: the phase whose
+    grout lines (darker or lighter than the tiles) best match the seen cells,
+    the grout's contrast, and each tile's colour where it was seen."""
+    lum = image @ np.array([0.299, 0.587, 0.114], np.float32)
+    if ok.sum() < 30:
+        return None
+    rows, cols = ok.shape
+    rr, cc = np.mgrid[0:rows, 0:cols]
+    best = None
+    for pu in range(period_u):
+        for pv in range(period_v):
+            line = (((cc - pu) % period_u) == 0) | (((rr - pv) % period_v) == 0)
+            on, off = ok & line, ok & ~line
+            if on.sum() < 5 or off.sum() < 5:
+                continue
+            contrast = float(np.median(lum[on]) - np.median(lum[off]))
+            if best is None or abs(contrast) > abs(best["contrast"]):
+                best = {"phase": (pu, pv), "contrast": contrast}
+    if best is None:
+        return None
+    best["period"] = (period_u, period_v)
+    return best
+
+
+def tile_fill(base: np.ndarray, grid_fit: dict, todo: np.ndarray, seen_contrast: bool) -> np.ndarray:
+    """Tiles laid into `todo` on the fitted grid: the surface's shading as the
+    tile, the grout lines darkened or lightened by the measured contrast."""
+    out = base.copy()
+    rows, cols = todo.shape
+    rr, cc = np.mgrid[0:rows, 0:cols]
+    (pu, pv), (fu, fv) = grid_fit["phase"], grid_fit["period"]
+    line = (((cc - pu) % fu) == 0) | (((rr - pv) % fv) == 0)
+    contrast = grid_fit["contrast"] if seen_contrast else -12.0     # faint grout when none measured
+    tile_id = ((cc - pu) // fu) * 1000 + ((rr - pv) // fv)
+    rng = np.random.default_rng(3)
+    jitter = {t: rng.normal(0, 3.0) for t in np.unique(tile_id[todo])}  # tiles are never all one shade
+    shade = np.vectorize(lambda t: jitter.get(t, 0.0))(tile_id)
+    out[todo] = base[todo] + shade[todo][:, None]
+    grout = todo & line
+    out[grout] = base[grout] + contrast
+    return out
+
+
+def along_rows(image: np.ndarray, ok: np.ndarray, todo: np.ndarray) -> np.ndarray:
+    """A wall's colour carried across each gap along its own row, between the
+    bare cells either side: a skirting, a painted band, a change of paint
+    continues at its height. Rows with no bare cell on both sides keep NaN."""
+    out = np.full(image.shape, np.nan, np.float32)
+    for r in np.nonzero(todo.any(1))[0]:
+        cols = np.nonzero(ok[r])[0]
+        if len(cols) < 2:
+            continue
+        gap = np.nonzero(todo[r])[0]
+        inside = (gap > cols[0]) & (gap < cols[-1])
+        for k in range(3):
+            out[r, gap[inside], k] = np.interp(gap[inside], cols, image[r, cols, k])
+    return out
+
+
+def dominant(image: np.ndarray, ok: np.ndarray) -> np.ndarray:
+    """The bare cells in the surface's main colour: the largest of a few colour
+    clusters, so a laminate, a shadow or a scuff seen on it is not copied."""
+    import cv2
+
+    if ok.sum() < 30:
+        return ok
+    data = image[ok].astype(np.float32)
+    k = 3
+    _, labels, centres = cv2.kmeans(data, k, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5),
+                                    3, cv2.KMEANS_PP_CENTERS)
+    main = np.bincount(labels.ravel(), minlength=k).argmax()
+    out = np.zeros_like(ok)
+    out[ok] = labels.ravel() == main
+    return out
+
+
+def guided_fill(image: np.ndarray, seen: np.ndarray, todo: np.ndarray, ok: np.ndarray, guide: dict,
+                kind: str, cell_m: float, metre_rows: float) -> tuple[np.ndarray, str]:
+    """A refill that follows what Claude saw: tiles of the size it named, fitted
+    to the seen part; a wall's bands at their heights; the wall's own colour
+    carried along each row; then the bare surface's fine texture."""
+    how = []
+    flat = guide.get("finish") in ("flat", "plain") or (not guide.get("tiles_cm") and guide.get("fill_matches") is False)
+    if flat:
+        # Claude saw a plain surface: only its main colour, shaded gently,
+        # nothing copied, and the seam with the seen part blended.
+        ok = dominant(image, ok)
+        how.append("plain, from its main colour only")
+    base = smooth_over(image, ok, SHADING_CELLS * (2 if flat else 1))
+    if kind == "wall" and not flat:
+        rows_fill = along_rows(smooth_over(image, ok, 3), ok, todo)
+        have = ~np.isnan(rows_fill[..., 0])
+        base[have] = 0.5 * base[have] + 0.5 * rows_fill[have]
+        how.append("carried along rows")
+        for band in guide.get("bands") or []:
+            try:
+                lo, hi = float(band["from_m"]), float(band["to_m"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            r0, r1 = int(lo / cell_m), int(np.ceil(hi / cell_m))
+            rows = slice(max(0, r0), min(image.shape[0], r1))
+            seen_band = seen[rows]
+            if seen_band.sum() >= 10:
+                colour = np.median(image[rows][seen_band], axis=0)
+                band_todo = np.zeros_like(todo)
+                band_todo[rows] = todo[rows]
+                base[band_todo] = colour
+                how.append(f"{band.get('what') or 'band'} at {lo:.2f}-{hi:.2f} m")
+    out = image.copy()
+    tiles = guide.get("tiles_cm")
+    if tiles and isinstance(tiles, (list, tuple)) and len(tiles) == 2:
+        try:
+            fu, fv = (max(2, int(round(float(t) / 100 / cell_m))) for t in tiles)
+        except (TypeError, ValueError):
+            fu = fv = None
+        if fu:
+            fit = tile_grid(image, ok, fu, fv)
+            if fit:
+                seen_contrast = abs(fit["contrast"]) >= 4
+                out = tile_fill(base, fit, todo, seen_contrast)
+                out[~todo] = image[~todo]
+                how.append(f"{tiles[0]} x {tiles[1]} cm tiles fitted to the seen part"
+                           + ("" if seen_contrast else ", faint grout"))
+                return out, "; ".join(how)
+    texture = np.zeros_like(image)
+    patches = [] if flat else seen_patches(ok)
+    if patches and todo.any():
+        detail = image - smooth_over(image, ok, PATCH_CELLS / 2)
+        rng = np.random.default_rng(0)
+        rr, cc = np.nonzero(todo)
+        for r0 in range(rr.min() - rr.min() % PATCH_CELLS, rr.max() + 1, PATCH_CELLS):
+            for c0 in range(cc.min() - cc.min() % PATCH_CELLS, cc.max() + 1, PATCH_CELLS):
+                block = texture[r0:r0 + PATCH_CELLS, c0:c0 + PATCH_CELLS]
+                pr, pc = patches[rng.integers(len(patches))]
+                block[...] = detail[pr:pr + block.shape[0], pc:pc + block.shape[1]]
+    out[todo] = base[todo] + TEXTURE_STRENGTH * texture[todo]
+    if flat:
+        import cv2
+        # Blend a band of filled cells along the seam into the seen colour.
+        edge = cv2.dilate(seen.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool) & todo
+        soft = smooth_over(np.where(todo[..., None], out, image), seen | todo, 3)
+        out[edge] = soft[edge]
+    return out, "; ".join(how) or "shading and texture"
+
+
 # ---------------------------------------------------------------- Claude
 def picture(surface: dict, image, seen, part, gaps, filled, path: Path, cell: float):
     """Two panels: the surface as seen with each gap outlined and numbered
@@ -362,9 +516,17 @@ The gaps:
 For each gap decide whether the filled-in version is what is really there, as far as you can tell:
 - "fill": the surface simply continues there (floor under a bed, wall behind a wardrobe, paint or tiles the phone missed). Filled points are always shown as inferred, never as measured.
 - "open": it is not this surface there (a doorway or window, a mirror, a niche, a room beyond), so leave it empty.
-Also say, in a few words, what the {kind} looks like (its pattern or finish: "beige 60 cm square tiles", "plain white paint", "textured white plaster"), and whether the fill on the right matches it.
+Also say, in a few words, what the {kind} looks like (its pattern or finish: "beige 60 cm square tiles", "plain white paint", "textured white plaster"), and whether the fill on the right matches it. Describe its structure so the fill can follow it:
+- "finish": "flat" for plain paint or plaster of one colour (only soft shading), "textured" for a visible texture, "tiled" for tiles or panels.
+- "tiles_cm": the size of one tile or panel, [along, across] in centimetres, when the {kind} is tiled or panelled (judge it from the frames, using the door, about 80 x 205 cm, and the furniture for scale); null when it is not.
+- "bands" (walls only): horizontal bands that run along the wall at a fixed height, as [{{"from_m": height above the floor, "to_m": ..., "what": "skirting" or "dado" or ...}}]; leave out objects that only cover part of the wall (a pinboard, a picture).
+- "fix": when the fill does not match, what is wrong with it, in a few words.
 
-Reply as JSON: {{"pattern": "...", "fill_matches": true or false, "gaps": [{{"id": 1, "decision": "fill" or "open", "what": "..."}}], "record": {{"doubts": [...]}}}}"""
+Reply as JSON: {{"pattern": "...", "fill_matches": true or false, "finish": "flat" or "textured" or "tiled", "tiles_cm": [60, 60] or null, "bands": [], "fix": "...", "gaps": [{{"id": 1, "decision": "fill" or "open", "what": "..."}}], "record": {{"doubts": [...]}}}}"""
+
+RECHECK = """This is the {name} again ({kind}). You said the earlier fill did not match ({fix}). It has been filled again following what you described: {how}. The first image is the {kind} as seen (left) and as filled now (right); the others are frames facing it.
+
+Does the fill now match what the {kind} really looks like, as far as a fill of unseen parts can? Reply as JSON: {{"fill_matches": true or false, "fix": "what is still wrong, if anything"}}"""
 
 
 def ask_claude(space: Path, surface: dict, gaps: list[dict], image, seen, part, filled, world, metre, cell,
@@ -378,7 +540,7 @@ def ask_claude(space: Path, surface: dict, gaps: list[dict], image, seen, part, 
     w, h = (s / metre for s in surface["size"])
     note = f"; it repeats every {pattern}, and the fill copies that repeat" if pattern else ""
     return advisor.ask_json(PROMPT.format(name=surface["name"], kind=surface["kind"], w=w, h=h, gaps=listing,
-                                          pattern_note=note), [pic, *frames], max_tokens=1500)
+                                          pattern_note=note), [pic, *frames], max_tokens=2000)
 
 
 # ---------------------------------------------------------------- main
@@ -399,10 +561,17 @@ def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print)
         if not advisor.available:
             log(f"Claude is not available ({advisor.reason}); gaps are filled without its check")
             advisor = None
+    # Labels of things that stand in front of a surface rather than being part
+    # of it (furniture, storage, what sits on them, belongings).
+    from semantics import planned_vocabulary
+    vocabulary = planned_vocabulary(space)
+    names = cloud.label_names or []
+    in_front = np.array([i for i, n in enumerate(names)
+                         if vocabulary.role(n) in ("furniture", "storage", "on_furniture", "loose")], int)
     record = {"cell_m": cell_m, "surfaces": []}
     new_points, new_colours, new_normals = [], [], []
     for surface in surfaces(shapes, metre):
-        image, seen, part, uv = grid(surface, scene, colours, cell, near, cloud.labels)
+        image, seen, part, uv = grid(surface, scene, colours, cell, near, cloud.labels, in_front)
         ok = bare(image, seen, surface["named_share"])
         holes, closed, _ = find_gaps(seen, part, cell)
         covered = cover(surface, pieces, uv, metre, cell, seen.shape)
@@ -468,12 +637,26 @@ def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print)
             elif g["kind"] == "opening":
                 keep |= g["mask"]
                 filled, _ = fill(filled, seen | keep & ~g["mask"], g["mask"], pu, pv, ok)
-        if verdict and verdict.get("fill_matches") is False and (pu or pv):
-            # Claude saw the copied pattern does not match: fill plainly instead.
-            filled, _ = fill(image, seen | (closed & ~holes), keep, None, None, ok)
-            pattern_used = "plain (Claude: the repeat did not match)"
-        else:
-            pattern_used = pattern or "plain"
+        pattern_used = pattern or "plain"
+        fill_matches = (verdict or {}).get("fill_matches")
+        tiles_named = bool((verdict or {}).get("tiles_cm"))
+        if verdict and (fill_matches is False or tiles_named):
+            # Fill again following the structure Claude saw: the tile size it
+            # named, fitted to the part that was seen (the unseen rest of an
+            # under-filmed floor takes the same grid), a wall's bands at their
+            # heights, its colour along each row. Then Claude looks again.
+            filled, how = guided_fill(image, seen, keep, ok, verdict, surface["kind"], cell_m, cell_m)
+            pattern_used = how
+            if fill_matches is False:
+                pic = picture(surface, image, seen, part, shown, filled,
+                              space / "gaps" / f"{surface['name'].replace(' ', '-')}-refill.jpg", cell)
+                frames = facing_frames(space, surface, world, metre, SHOW_FRAMES)
+                again = advisor.ask_json(RECHECK.format(name=surface["name"], kind=surface["kind"],
+                                                        fix=verdict.get("fix") or "no reason given", how=how),
+                                         [pic, *frames], max_tokens=600)
+                if again is not None:
+                    fill_matches = again.get("fill_matches")
+                    verdict["fix_after_refill"] = again.get("fix")
         rr, cc = np.nonzero(keep)
         uu, vv = uv
         pos = surface["origin"] + uu[rr, cc, None] * surface["u"] + vv[rr, cc, None] * surface["v"]
@@ -485,7 +668,9 @@ def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print)
                  "seen_share": round(float((seen & part).sum() / max(part.sum(), 1)), 3),
                  "filled_m2": round(len(rr) * cell_m ** 2, 2), "pattern_measured": pattern,
                  "pattern_used": pattern_used, "pattern_claude": (verdict or {}).get("pattern"),
-                 "fill_matches": (verdict or {}).get("fill_matches"),
+                 "fill_matches": fill_matches, "fill_matched_first": (verdict or {}).get("fill_matches"),
+                 "tiles_cm": (verdict or {}).get("tiles_cm"), "bands": (verdict or {}).get("bands"),
+                 "fix": (verdict or {}).get("fix"), "fix_after_refill": (verdict or {}).get("fix_after_refill"),
                  "gaps": [{"id": g["id"], "area_m2": round(g["area"] / metre ** 2, 2), "kind": g["kind"],
                            "behind": g.get("behind"), "decision": g.get("decision"), "what": g.get("what")}
                           for g in shown]}
