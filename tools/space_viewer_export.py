@@ -103,6 +103,11 @@ def export(space: Path, max_points: int = 450_000) -> Path:
             g_scene, g_cols = g_scene[pick], filled.colors[pick]
         else:
             g_cols = filled.colors
+        # The ceiling is left out (it would hide the room from above), and the
+        # points are shaken within their 2 cm cells so the grid does not show.
+        below = g_scene[:, 2] < level["floor_z"] + 0.92 * level["height"]
+        g_scene, g_cols = g_scene[below], g_cols[below]
+        g_scene = g_scene + np.random.default_rng(2).uniform(-0.01, 0.01, g_scene.shape) * metre
         guessed = len(g_scene)
         scene = np.vstack([scene, g_scene])
         colours = np.vstack([colours, g_cols])
