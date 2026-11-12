@@ -627,6 +627,11 @@ class Sam31Tracker:
         self.predictor.model.init_state = init_without_offload
 
     def run(self, image_dir: Path, frames: list[str], names: list[str], log=print) -> Tracks:
+        """Every name tracked through the walk, in chunks of SAM3_CHUNK frames
+        overlapping by SAM3_OVERLAP, the frames kept in memory, not on the GPU
+        (one session over the bedroom's 186 frames ran a T4 out of memory). An
+        object of a chunk is the same as one of the chunk before when, under the
+        same name, their outlines agree on the shared frames."""
         import tempfile
 
         from PIL import Image
@@ -635,44 +640,70 @@ class Sam31Tracker:
         width, height = Image.open(image_dir / frames[0]).size
         scale = min(1.0, SAM3_WORK / max(width, height))
         size = (round(width * scale), round(height * scale))
-        folder = Path(tempfile.mkdtemp(prefix="sam31-frames-"))
-        for i, f in enumerate(frames):           # the predictor reads frames named by their index
-            Image.open(image_dir / f).convert("RGB").resize(size, Image.BILINEAR).save(folder / f"{i:05d}.jpg", quality=92)
         started = time.time()
-        session = self.predictor.handle_request(request=dict(type="start_session", resource_path=str(folder)))["session_id"]
         per_frame: dict[int, dict] = {}
-        for n, name in enumerate(names):
-            t = time.time()
-            self.predictor.handle_request(request=dict(type="reset_session", session_id=session))
-            self.predictor.handle_request(request=dict(type="add_prompt", session_id=session, frame_index=0, text=name))
-            found = set()
-            with self.torch.no_grad():
-                for response in self.predictor.handle_stream_request(
-                        request=dict(type="propagate_in_video", session_id=session)):
-                    f, out = int(response["frame_index"]), response["outputs"]
-                    ids = as_numpy(out.get("out_obj_ids", [])).ravel()
-                    if not len(ids):
-                        continue
-                    masks = as_numpy(out["out_binary_masks"]).reshape(len(ids), *size[::-1])
-                    probs = as_numpy(out.get("out_probs", np.ones(len(ids)))).ravel()
-                    boxes = as_numpy(out.get("out_boxes_xywh", np.zeros((len(ids), 4)))).reshape(-1, 4).astype(float)
-                    if boxes.size and boxes.max() <= 1.5:             # normalised to the frame
-                        boxes *= [size[0], size[1], size[0], size[1]]
-                    xyxy = np.column_stack([boxes[:, 0], boxes[:, 1], boxes[:, 0] + boxes[:, 2], boxes[:, 1] + boxes[:, 3]])
-                    gid = [n * SAM31_ID_STRIDE + int(i) for i in ids]
-                    found |= set(gid)
-                    entry = per_frame.setdefault(f, {"object_ids": [], "scores": [], "boxes": [], "masks": [],
-                                                     "prompt_to_obj_ids": {}})
-                    entry["object_ids"] += gid
-                    entry["scores"] += probs.tolist()
-                    entry["boxes"] += xyxy.tolist()
-                    # Outlines kept at a quarter of the work size: only their area
-                    # share and their MASK_SIZE square are used.
-                    entry["masks"] += [m[::4, ::4] for m in masks]
-                    entry["prompt_to_obj_ids"].setdefault(name, []).extend(gid)
-            log(f"  {name}: {len(found)} object(s), {time.time() - t:.0f} s "
-                f"({n + 1} of {len(names)} names, about {(time.time() - started) / (n + 1) * (len(names) - n - 1) / 60:.0f} min to go)")
-        self.predictor.handle_request(request=dict(type="close_session", session_id=session))
+        starts = list(range(0, max(1, len(frames) - SAM3_OVERLAP), SAM3_CHUNK - SAM3_OVERLAP))
+        next_id = 0
+        overlap: dict[str, dict[int, dict[int, np.ndarray]]] = {}       # name -> frame -> global id -> outline
+        for c, start in enumerate(starts):
+            end = min(len(frames), start + SAM3_CHUNK)
+            folder = Path(tempfile.mkdtemp(prefix="sam31-frames-"))
+            for i, f in enumerate(frames[start:end]):    # the predictor reads frames named by their index
+                Image.open(image_dir / f).convert("RGB").resize(size, Image.BILINEAR).save(folder / f"{i:05d}.jpg", quality=92)
+            session = self.predictor.handle_request(request=dict(
+                type="start_session", resource_path=str(folder), offload_video_to_cpu=True))["session_id"]
+            for name in names:
+                self.predictor.handle_request(request=dict(type="reset_session", session_id=session))
+                self.predictor.handle_request(request=dict(type="add_prompt", session_id=session, frame_index=0, text=name))
+                local: dict[int, list] = {}
+                with self.torch.no_grad():
+                    for response in self.predictor.handle_stream_request(
+                            request=dict(type="propagate_in_video", session_id=session)):
+                        f, out = start + int(response["frame_index"]), response["outputs"]
+                        ids = as_numpy(out.get("out_obj_ids", [])).ravel()
+                        if not len(ids):
+                            continue
+                        masks = as_numpy(out["out_binary_masks"]).reshape(len(ids), *size[::-1])[:, ::4, ::4] > 0
+                        probs = as_numpy(out.get("out_probs", np.ones(len(ids)))).ravel()
+                        boxes = as_numpy(out.get("out_boxes_xywh", np.zeros((len(ids), 4)))).reshape(-1, 4).astype(float)
+                        if boxes.size and boxes.max() <= 1.5:         # normalised to the frame
+                            boxes *= [size[0], size[1], size[0], size[1]]
+                        xyxy = np.column_stack([boxes[:, 0], boxes[:, 1], boxes[:, 0] + boxes[:, 2],
+                                                boxes[:, 1] + boxes[:, 3]])
+                        local[f] = [(int(i), float(p), b.tolist(), m) for i, p, b, m in zip(ids, probs, xyxy, masks)]
+                # Link to the previous chunk's objects of this name on the shared frames.
+                mapping: dict[int, int] = {}
+                votes: dict[tuple[int, int], list[float]] = {}
+                for f, objs in local.items():
+                    for i, _, _, m in objs:
+                        for gid, other in overlap.get(name, {}).get(f, {}).items():
+                            votes.setdefault((i, gid), []).append((m & other).sum() / max((m | other).sum(), 1))
+                for (i, gid), ious in sorted(votes.items(), key=lambda kv: -np.mean(kv[1])):
+                    if np.mean(ious) >= SAM3_LINK_IOU and i not in mapping and gid not in mapping.values():
+                        mapping[i] = gid
+                kept_overlap: dict[int, dict[int, np.ndarray]] = {}
+                for f, objs in local.items():
+                    for i, p, b, m in objs:
+                        if i not in mapping:
+                            mapping[i], next_id = next_id, next_id + 1
+                        gid = mapping[i]
+                        if f >= end - SAM3_OVERLAP:
+                            kept_overlap.setdefault(f, {})[gid] = m
+                        if c and f < start + SAM3_OVERLAP:
+                            continue                  # a shared frame: the previous chunk gave it
+                        entry = per_frame.setdefault(f, {"object_ids": [], "scores": [], "boxes": [], "masks": [],
+                                                         "prompt_to_obj_ids": {}})
+                        entry["object_ids"].append(gid)
+                        entry["scores"].append(p)
+                        entry["boxes"].append(b)
+                        entry["masks"].append(m)
+                        entry["prompt_to_obj_ids"].setdefault(name, []).append(gid)
+                overlap[name] = kept_overlap
+            self.predictor.handle_request(request=dict(type="close_session", session_id=session))
+            release(self.torch)
+            rate = (time.time() - started) / max(1, end)
+            log(f"  frames {start + 1}-{end} of {len(frames)}: {next_id} objects so far, {rate:.1f} s a frame "
+                f"for {len(names)} names, about {rate * (len(frames) - end) / 60:.0f} min to go")
 
         def outputs():
             for f in sorted(per_frame):
@@ -710,7 +741,15 @@ def track(image_dir: Path, frames: list[str], prompts: dict[str, list[dict]], vo
         else:
             log(f"Object tracking: {SAM31_ID} (video, multiplex) on cuda ({tracker.dtype}), "
                 f"{len(frames)} frames; finding and tracking " + ", ".join(names))
-            return tracker.run(image_dir, frames, names, log), rest
+            try:
+                return tracker.run(image_dir, frames, names, log), rest
+            except Exception as exc:  # out of memory, an API change in sam3
+                if choice == "sam31":
+                    raise
+                log(f"SAM 3.1 failed ({str(exc).strip().splitlines()[0][:160]}); trying SAM 3")
+                del tracker
+                import torch
+                release(torch)
     if choice in ("auto", "sam3"):
         names = [n for n in vocabulary.names if n in tracked]
         try:
