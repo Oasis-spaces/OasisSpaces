@@ -52,6 +52,7 @@ MOGE3_CHECKPOINT = "Ruicheng/moge-3-vitl"
 # units; metres come from an earlier MoGe reading of the same space.
 DA3_CHECKPOINT = "depth-anything/DA3-BASE"
 DA3_RESOLUTION = 504
+DA3_GROUP = 8                 # keyframes the network sees together
 MIN_ANCHORS = 12
 # Scale. One monocular depth map is right up to a scale, and every keyframe's
 # scale is fitted to the solve's points it sees. Along a walk the fits drift a
@@ -392,10 +393,18 @@ class DA3Depth:
             extrinsics.append(w2c)
             fx, fy, cx, cy = cam["params"][:4]
             intrinsics.append(np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], float))
-        prediction = self.model.inference([str(p) for p in paths], extrinsics=np.array(extrinsics, np.float32),
-                                          intrinsics=np.array(intrinsics, np.float32),
-                                          align_to_input_ext_scale=True, process_res=DA3_RESOLUTION)
-        for path, depth in zip(paths, prediction.depth):
+        # All keyframes at once attend across every frame (13 GB at 24 frames on a
+        # T4): they go in groups, each with its solved cameras, so every group's
+        # depth is in the solve's units and the groups agree.
+        depths = []
+        for start in range(0, len(paths), DA3_GROUP):
+            part = slice(start, start + DA3_GROUP)
+            prediction = self.model.inference([str(p) for p in paths[part]],
+                                              extrinsics=np.array(extrinsics[part], np.float32),
+                                              intrinsics=np.array(intrinsics[part], np.float32),
+                                              align_to_input_ext_scale=True, process_res=DA3_RESOLUTION)
+            depths += list(prediction.depth)
+        for path, depth in zip(paths, depths):
             depth = np.asarray(depth, np.float32)
             depth[~np.isfinite(depth)] = 0.0
             depth[depth_edges(depth)] = 0.0

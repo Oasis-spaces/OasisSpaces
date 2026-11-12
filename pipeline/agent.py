@@ -1202,6 +1202,7 @@ class Agent:
                                **({"from_floor": [size(b["min"][2] - floor_z), size(b["max"][2] - floor_z)]}
                                   if floor_z is not None else {}),
                                "points": b["points"], "built": b.get("build", True),
+                               **({"fitting": True} if b.get("role") in ("fixture", "hanging") else {}),
                                "check": b.get("reason")})
         sheet = self.space / "object-frames.png"
         picked = self.safe(draw_object_frames, self.space, sheet, default={}) or {}
@@ -1239,9 +1240,13 @@ class Agent:
             + "You may drop a wall that duplicates another wall or is "
             "not a wall (for example a wardrobe front), drop a box that is not a real "
             "object, or relabel a built box as one of: bed, seat, table, wardrobe, block. "
-            "Boxes are built as free-standing furniture, so drop any box that is part of "
-            "the room or of another object: a door, a door frame or jamb, a curtain, a "
-            "wall patch, or a fragment of a bigger piece of furniture. Fitted units that "
+            "Every real object is its own piece. Boxes marked fitting (a door, a loft "
+            "cabinet, a wall shelf, a curtain, an air conditioner, a pinboard, a lamp) are "
+            "the room's own fittings: keep each one that is a real object of its own, as it "
+            "is, even when it is flat or fixed to a wall; they are not furniture and are "
+            "never stood on the floor. Drop a box only when it is not a real object of its "
+            "own: a door frame or jamb, a wall patch, a fold of bedding, or a fragment of a "
+            "bigger piece. Fitted units that "
             "stand on the floor (kitchen base units, a vanity, a kitchen island) count as "
             "furniture here, not as part of the room. Relabel only boxes "
             "that are a whole piece of furniture of their own; 'block' is for real "

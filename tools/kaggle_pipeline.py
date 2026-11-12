@@ -57,7 +57,7 @@ pip -q install --no-deps \\
 # MoGe-3 needs MoGe's current code (it keeps v2 too) and FlexGEMM; Depth Anything 3
 # is installed without its long dependency list (xformers would replace PyTorch).
 INSTALL_DEPTH_NEW = """
-pip -q install click scipy trimesh einops omegaconf safetensors imageio e3nn addict \
+pip -q install click scipy trimesh einops omegaconf safetensors imageio e3nn addict pycolmap evo \
   "utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git@62f09d58509485564e24d5d9f6aac9ee9ebc0c37" \
   "pipeline @ git+https://github.com/EasternJournalist/pipeline.git@1c511390d90226c00c101f34b84df26a0f8789b4" \
   "flex-gemm @ git+https://github.com/JeffreyXiang/FlexGEMM.git@b2fadb29d41846c7981ade6801ffc689fae119cf"
@@ -86,6 +86,11 @@ JOBS = {
         "run": ['python3 pipeline/densify.py "$SPACE" --depth-model moge3 --no-semantics --output "$SPACE/cloud-moge3.ply"; '
                 'python3 pipeline/densify.py "$SPACE" --depth-model da3 --no-semantics --output "$SPACE/cloud-da3.ply"; '
                 'ls "$SPACE"/cloud-*.ply'],
+    },
+    "depth-da3": {
+        "inputs": ["objects.json", "densify.json", "workspace/images/*.jpg", "workspace/sparse/0/*"],
+        "install": [INSTALL_PYTHON, INSTALL_DEPTH_NEW],
+        "run": ['python3 pipeline/densify.py "$SPACE" --depth-model da3 --no-semantics --output "$SPACE/cloud-da3.ply"'],
     },
     "sam31-test": {
         "inputs": ["objects.json", "workspace/images/*.jpg"],

@@ -11,10 +11,14 @@ step of the same job, on the same room.
 The room is right when a person who lives there would recognise it and could
 rearrange it without surprises:
 
-1. **Every real piece of furniture is one box**, at its true place and size, named
-   for what it is. Not two boxes for one wardrobe, not one box for a wardrobe and
-   the loft cabinet above it, not a box for a curtain, a door, a poster or a pile
-   of clothes.
+1. **Every real object is its own piece**, at its true place and size, named for
+   what it is. Not two boxes for one wardrobe, not one box for a wardrobe and the
+   loft cabinet above it, not a box for a pile of clothes or a fold of bedding.
+   The room's fittings are pieces too, each its own box marked as a fitting: a
+   door stays in its wall, a loft cabinet, wall shelf, air conditioner, pinboard
+   or lamp on the wall at its height, a curtain where it hangs. A fitting is not
+   furniture: it is never stood on the floor and never dropped for being flat
+   or fixed.
 2. **Walls stand where the real walls are.** The room's outline follows its real
    shape: an L, an alcove, a step behind a curtain. It does not run on into the
    next room seen through a door, and it does not stop short at the front of a
@@ -26,6 +30,11 @@ rearrange it without surprises:
 5. **Nothing is invented.** What was not seen is either inferred and marked as a
    guess (a wall nobody faced) or left out. Generated content is always labelled
    as generated and never treated as measured.
+6. **No holes where the room obviously continues.** Floor under the bed, wall
+   behind the wardrobe, ceiling the phone never looked up at: each is filled from
+   the surface around it (its tiles, its paint, its texture) and marked as
+   inferred. An opening (a doorway, a window, a balcony door behind a curtain)
+   stays open.
 
 ## How the pipeline works, and where it goes wrong
 
@@ -55,7 +64,13 @@ rearrange it without surprises:
 - **Finish (rules).** These run before you see the room. Boxes are stood on the
   floor and kept inside the walls. A box is trimmed where the walk ran over it.
   The outline is moved onto the walls behind tall furniture. Missing sides get
-  inferred walls.
+  inferred walls. Fittings are left where they were measured.
+- **Gaps (you, at the end of stage 3).** Each wall, the floor and the ceiling is
+  mapped from the points and its gaps found: behind or under a piece, at an
+  opening, or never filmed. Each is filled from the surface around it, and you
+  are shown each surface as seen and as filled, with frames facing it: you say
+  what the surface really looks like, and for each gap whether it continues
+  (fill) or is an opening (leave open).
 - **The score (room_score).** It measures the room you approve:
   - how well each piece's box covers that object's outlines in the frames;
   - minus overlapping pieces;
