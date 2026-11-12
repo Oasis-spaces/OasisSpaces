@@ -45,6 +45,8 @@ from semantics import Vocabulary, room_vocabulary  # noqa: E402
 # --------------------------------------------------------------------------
 HORIZONTAL_MAX_TILT_DEG = 25.0   # normal within this angle of +Z  -> horizontal
 VERTICAL_MIN_TILT_DEG = 65.0     # normal at least this far from +Z -> vertical
+OFF_AXIS_MAX_DEG = 15.0          # a wall further than this from both of the room's directions ...
+OFF_AXIS_MAX_SHARE = 0.3         # ... with under this share of the main wall's points is not a wall
 
 FLOOR_AREA_MIN_FRAC = 0.40       # floor candidate: area >= this frac of largest horizontal plane
 FLOOR_LEVEL_TOL_FRAC = 0.25      # floor candidate: at most this * H above the wall-bottom estimate...
@@ -1048,11 +1050,28 @@ def classify_planes(planes: list[dict], units_per_metre: float | None = None
     if densities:
         ref_density = median(densities)
 
+    # The room's walls run along two directions at right angles, set by its
+    # biggest vertical plane. A small vertical plane at an odd angle to both is
+    # the side of a piece or a fragment, not a wall: the bedroom's run built one
+    # 28 degrees off, standing across the room in front of the bed.
+    verticals = [p for p, o in zip(planes, orient) if o == "vertical"]
+    main = max(verticals, key=lambda p: p["points"]) if verticals else None
+    main_angle = math.atan2(main["normal"][1], main["normal"][0]) if main else 0.0
+
+    def off_axis(plane):
+        a = math.degrees(math.atan2(plane["normal"][1], plane["normal"][0]) - main_angle) % 90.0
+        return min(a, 90.0 - a)
+
     labels, reasons = [], []
     for i, (plane, o) in enumerate(zip(planes, orient)):
         tilt = plane_tilt_deg(plane)
         z = plane["center"][2]
-        if o == "vertical":
+        if (o == "vertical" and main is not None and plane is not main
+                and off_axis(plane) > OFF_AXIS_MAX_DEG and plane["points"] < OFF_AXIS_MAX_SHARE * main["points"]):
+            labels.append("surface")
+            reasons.append(f"vertical but {off_axis(plane):.0f} deg off the room's walls, with "
+                           f"{plane['points'] / main['points']:.0%} of the main wall's points: a piece's side")
+        elif o == "vertical":
             labels.append("wall")
             reasons.append(f"vertical (tilt {tilt:.1f} deg)")
         elif o == "slanted":
