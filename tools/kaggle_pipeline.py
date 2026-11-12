@@ -49,7 +49,7 @@ MAX_HOURS = 9                     # Kaggle ends a GPU session after 9 hours
 
 # What every job installs: the notebook's Python cell (MoGe-2 pinned) without Colab's magics.
 INSTALL_PYTHON = """
-pip -q install 'numpy>=2.3' 'transformers>=5' plyfile
+pip -q install 'numpy>=2.3' 'transformers>=5' plyfile kernels   # kernels: SAM 3's mask clean-up
 pip -q install --no-deps \\
   "git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183" \\
   "git+https://github.com/microsoft/MoGe.git@925b8ed835a7a9cdb7578ba15c658a0afc969030"
@@ -66,6 +66,7 @@ pip -q install --no-deps --ignore-requires-python "git+https://github.com/ByteDa
 """
 INSTALL_SAM31 = """
 pip -q install einops 'git+https://github.com/facebookresearch/sam3.git'
+pip -q install 'numpy>=2.3'     # sam3 pulls numpy 1.26, which the rest no longer builds against
 """
 
 # Each job: the space's files it needs (globs under spaces/<name>), what it installs,

@@ -64,6 +64,10 @@ SAM3_ID = "facebook/sam3"   # gated on Hugging Face: request access, then log in
 SAM3_WORK = 1008          # SAM 3's own input size: frames go to it at this longest side
 SAM31_ID = "facebook/sam3.1"   # gated like SAM 3; Meta's sam3 package (not transformers) runs it
 SAM31_ID_STRIDE = 100000      # object ids of each name's pass are kept apart by this
+# SAM 3.1 propagates a whole chunk at once: without FlashAttention (a T4) 48
+# frames asked for 25.6 GB. Short chunks, linked over two shared frames.
+SAM31_CHUNK = 8
+SAM31_OVERLAP = 2
 SAM3_CHUNK = 48           # frames tracked in one session (memory grows with every frame held)
 SAM3_OVERLAP = 6          # frames two chunks share, where their objects are linked
 SAM3_LINK_IOU = 0.5       # outlines agreeing this well on the shared frames: one object
@@ -627,8 +631,8 @@ class Sam31Tracker:
         self.predictor.model.init_state = init_without_offload
 
     def run(self, image_dir: Path, frames: list[str], names: list[str], log=print) -> Tracks:
-        """Every name tracked through the walk, in chunks of SAM3_CHUNK frames
-        overlapping by SAM3_OVERLAP, the frames kept in memory, not on the GPU
+        """Every name tracked through the walk, in chunks of SAM31_CHUNK frames
+        overlapping by SAM31_OVERLAP, the frames kept in memory, not on the GPU
         (one session over the bedroom's 186 frames ran a T4 out of memory). An
         object of a chunk is the same as one of the chunk before when, under the
         same name, their outlines agree on the shared frames."""
@@ -642,11 +646,11 @@ class Sam31Tracker:
         size = (round(width * scale), round(height * scale))
         started = time.time()
         per_frame: dict[int, dict] = {}
-        starts = list(range(0, max(1, len(frames) - SAM3_OVERLAP), SAM3_CHUNK - SAM3_OVERLAP))
+        starts = list(range(0, max(1, len(frames) - SAM31_OVERLAP), SAM31_CHUNK - SAM31_OVERLAP))
         next_id = 0
         overlap: dict[str, dict[int, dict[int, np.ndarray]]] = {}       # name -> frame -> global id -> outline
         for c, start in enumerate(starts):
-            end = min(len(frames), start + SAM3_CHUNK)
+            end = min(len(frames), start + SAM31_CHUNK)
             folder = Path(tempfile.mkdtemp(prefix="sam31-frames-"))
             for i, f in enumerate(frames[start:end]):    # the predictor reads frames named by their index
                 Image.open(image_dir / f).convert("RGB").resize(size, Image.BILINEAR).save(folder / f"{i:05d}.jpg", quality=92)
@@ -687,9 +691,9 @@ class Sam31Tracker:
                         if i not in mapping:
                             mapping[i], next_id = next_id, next_id + 1
                         gid = mapping[i]
-                        if f >= end - SAM3_OVERLAP:
+                        if f >= end - SAM31_OVERLAP:
                             kept_overlap.setdefault(f, {})[gid] = m
-                        if c and f < start + SAM3_OVERLAP:
+                        if c and f < start + SAM31_OVERLAP:
                             continue                  # a shared frame: the previous chunk gave it
                         entry = per_frame.setdefault(f, {"object_ids": [], "scores": [], "boxes": [], "masks": [],
                                                          "prompt_to_obj_ids": {}})

@@ -54,7 +54,7 @@ def main():
     frames = [f"frame_{i:05d}.jpg" for i in range(100)]
     for f in frames:
         Image.new("RGB", (W, H)).save(folder / f)
-    starts = iter(range(0, 100, tracking.SAM3_CHUNK - tracking.SAM3_OVERLAP))
+    starts = iter(range(0, 100, tracking.SAM31_CHUNK - tracking.SAM31_OVERLAP))
     real_mkdtemp = tempfile.mkdtemp
     def chunk_folder(prefix=""):              # the folder's name tells the stand-in which chunk it plays
         path = Path(real_mkdtemp(prefix=prefix)) / f"chunk-{next(starts)}"
