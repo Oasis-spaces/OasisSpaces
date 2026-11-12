@@ -406,7 +406,7 @@ class ClaudeDetector:
                         + " (marked earlier)")
                 continue
             if not self.advisor.available:
-                log("  Claude is not available here and these frames were not marked earlier: "
+                log(f"  Claude is not available ({self.advisor.reason}) and these frames were not marked earlier: "
                     + ", ".join(p.name for p in batch))
                 for p in batch:
                     found[p.name] = []
@@ -416,7 +416,9 @@ class ClaudeDetector:
                 g, size = self.gridded(p, work / f"{p.stem}-grid.jpg")
                 shown.append(g)
                 sizes.append(size)
-            answer = self.advisor.ask_json(self.prompt(len(batch)), shown, max_tokens=4000) or {}
+            answer = self.advisor.ask_json(self.prompt(len(batch)), shown, max_tokens=4000)
+            failed = answer is None          # no answer at all: not kept, so a later run asks again
+            answer = answer or {}
             by_image = {}
             for entry in answer.get("frames") or []:
                 try:
@@ -439,7 +441,8 @@ class ClaudeDetector:
                     dets.append({"label": label, "score": CLAUDE_SCORE,
                                  "box": [x0 / 100 * w, y0 / 100 * h, x1 / 100 * w, y1 / 100 * h]})
                 found[p.name] = dets
-                kept[p.name] = dets
+                if not failed:
+                    kept[p.name] = dets
                 log(f"  {p.name}: " + (", ".join(sorted({d['label'] for d in dets})) or "nothing marked"))
             record.write_text(json.dumps({"vocabulary": names, "frames": kept}) + "\n")
         return found

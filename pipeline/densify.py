@@ -407,6 +407,9 @@ def main():
                         help="who marks the room's objects on the keyframes: claude (the room's own understanding; "
                              "SAM cuts the outlines), dino (GroundingDINO, matching the object list's words), auto "
                              "(Claude when reachable, GroundingDINO otherwise)")
+    parser.add_argument("--marks-only", action="store_true",
+                        help="only have Claude mark the objects on the frames a GPU run with tracking will use, "
+                             "kept in workspace/claude-marks/marks.json for that run (which then needs no Claude)")
     parser.add_argument("--no-semantics", action="store_true",
                         help="skip object detection: no labels on the cloud, and no "
                              "filtering of mirrors, windows and screens")
@@ -457,6 +460,16 @@ def main():
     keys = pick_keyframes(images, keyframes)
     print(f"{len(images)} registered frames; densifying {len(keys)} keyframes, "
           f"every {args.stride}th pixel")
+    if args.marks_only:
+        # The frames the detector is asked about with tracking on (a GPU run).
+        key_names = sorted(images[k]["name"] for k in keys)
+        all_names = sorted(p.name for p in (workspace / "images").glob("*.jpg"))
+        prompt_names = prompt_frames(all_names, key_names, args.prompt_frames or PROMPT_FRAMES)
+        detector = ClaudeDetector(planned_vocabulary(space), work_dir=workspace / "claude-marks")
+        print(f"Claude marks {len(prompt_names)} frames for a run with tracking")
+        detector.detect_many([workspace / "images" / n for n in prompt_names])
+        print(f"Marks kept in {workspace / 'claude-marks' / 'marks.json'}")
+        return
 
     import torch
     from PIL import Image
