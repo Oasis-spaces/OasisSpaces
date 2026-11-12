@@ -54,6 +54,16 @@ pip -q install --no-deps \\
   "git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183" \\
   "git+https://github.com/microsoft/MoGe.git@925b8ed835a7a9cdb7578ba15c658a0afc969030"
 """
+# MoGe-3 needs MoGe's current code (it keeps v2 too) and FlexGEMM; Depth Anything 3
+# is installed without its long dependency list (xformers would replace PyTorch).
+INSTALL_DEPTH_NEW = """
+pip -q install click scipy trimesh einops omegaconf safetensors imageio e3nn addict \
+  "utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git@62f09d58509485564e24d5d9f6aac9ee9ebc0c37" \
+  "pipeline @ git+https://github.com/EasternJournalist/pipeline.git@1c511390d90226c00c101f34b84df26a0f8789b4" \
+  "flex-gemm @ git+https://github.com/JeffreyXiang/FlexGEMM.git@b2fadb29d41846c7981ade6801ffc689fae119cf"
+pip -q install --no-deps --force-reinstall "git+https://github.com/microsoft/MoGe.git"
+pip -q install --no-deps --ignore-requires-python "git+https://github.com/ByteDance-Seed/Depth-Anything-3.git"   # it declares python <= 3.13, which pip reads as 3.13.0
+"""
 INSTALL_SAM31 = """
 pip -q install einops 'git+https://github.com/facebookresearch/sam3.git'
 """
@@ -66,6 +76,16 @@ JOBS = {
                    "workspace/claude-marks/marks.json", "workspace/dropped-frames.json"],
         "install": [INSTALL_PYTHON],
         "run": ['python3 pipeline/densify.py "$SPACE" --detector claude --track on --tracker sam3'],
+        # SAM 3 tracks the whole walk in chunks (pipeline/tracking.py); both T4s are not needed.
+    },
+    # The two newer depth networks on the same keyframes, beside the MoGe-2 cloud,
+    # for tools/wall_thickness.py to compare. No labels: depth only.
+    "depth-compare": {
+        "inputs": ["objects.json", "densify.json", "workspace/images/*.jpg", "workspace/sparse/0/*"],
+        "install": [INSTALL_PYTHON, INSTALL_DEPTH_NEW],
+        "run": ['python3 pipeline/densify.py "$SPACE" --depth-model moge3 --no-semantics --output "$SPACE/cloud-moge3.ply"; '
+                'python3 pipeline/densify.py "$SPACE" --depth-model da3 --no-semantics --output "$SPACE/cloud-da3.ply"; '
+                'ls "$SPACE"/cloud-*.ply'],
     },
     "sam31-test": {
         "inputs": ["objects.json", "workspace/images/*.jpg"],

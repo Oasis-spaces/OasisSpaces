@@ -62,6 +62,9 @@ from semantics import SEGMENTER_ID, default_device  # noqa: E402
 MASK_SIZE = 256           # the model's own mask raster, kept as the stored one
 SAM3_ID = "facebook/sam3"   # gated on Hugging Face: request access, then log in
 SAM3_WORK = 1008          # SAM 3's own input size: frames go to it at this longest side
+SAM3_CHUNK = 48           # frames tracked in one session (memory grows with every frame held)
+SAM3_OVERLAP = 6          # frames two chunks share, where their objects are linked
+SAM3_LINK_IOU = 0.5       # outlines agreeing this well on the shared frames: one object
 # The names worth carrying through the video: the pieces, the surfaces and the
 # openings a room model is made of. Clothes, bags and brushes are labelled per
 # keyframe as before; tracking costs frames x objects, and a walkthrough with
@@ -441,36 +444,95 @@ class Sam3Tracker:
 
         self.torch = torch
         self.device = device or default_device()
-        # SAM 3 is trained in bfloat16; a T4 has none, and float16 overflows, so float32 there.
-        self.dtype = (torch.bfloat16 if self.device == "cuda" and torch.cuda.is_bf16_supported()
-                      else torch.float32)
+        # SAM 3 is trained in bfloat16, which needs an Ampere GPU or newer (8.0+).
+        # A T4 (7.5) reports bfloat16 "supported" but emulates it, about 27 s a
+        # frame on the bedroom; float16 overflows, so float32 there.
+        native_bf16 = (self.device == "cuda" and torch.cuda.get_device_capability()[0] >= 8)
+        self.dtype = torch.bfloat16 if native_bf16 else torch.float32
         self.processor = Sam3VideoProcessor.from_pretrained(SAM3_ID)
         self.model = Sam3VideoModel.from_pretrained(SAM3_ID, dtype=self.dtype).to(self.device).eval()
 
     def run(self, image_dir: Path, frames: list[str], names: list[str], log=print) -> Tracks:
-        """Find and track every object named in `names` through `frames`."""
+        """Find and track every object named in `names` through `frames`.
+
+        One session over a whole walk keeps every frame's memory on the GPU and
+        ran a 15 GB T4 out of memory about 100 frames into the bedroom's 186. So
+        the walk is tracked in chunks of SAM3_CHUNK frames that overlap by
+        SAM3_OVERLAP; an object of a new chunk is the same object as one of the
+        chunk before when their outlines agree on the shared frames (same name,
+        IoU >= SAM3_LINK_IOU), and the GPU is emptied between chunks."""
         from PIL import Image
 
         image_dir = Path(image_dir)
         width, height = Image.open(image_dir / frames[0]).size
         scale = min(1.0, SAM3_WORK / max(width, height))
         size = (round(width * scale), round(height * scale))
-        video = [Image.open(image_dir / f).convert("RGB").resize(size, Image.BILINEAR) for f in frames]
-        session = self.processor.init_video_session(video=video, inference_device=self.device,
-                                                    processing_device="cpu", video_storage_device="cpu",
-                                                    dtype=self.dtype)
-        self.processor.add_text_prompt(inference_session=session, text=list(names))
         started = time.time()
+        starts = list(range(0, max(1, len(frames) - SAM3_OVERLAP), SAM3_CHUNK - SAM3_OVERLAP))
+        next_id = [0]
+        previous_overlap: dict[int, dict[int, tuple[str, np.ndarray]]] = {}   # frame -> global id -> (name, mask)
 
-        def outputs():
+        def chunk_outputs(start):
+            end = min(len(frames), start + SAM3_CHUNK)
+            video = [Image.open(image_dir / f).convert("RGB").resize(size, Image.BILINEAR) for f in frames[start:end]]
+            session = self.processor.init_video_session(video=video, inference_device=self.device,
+                                                        processing_device="cpu", video_storage_device="cpu",
+                                                        dtype=self.dtype)
+            self.processor.add_text_prompt(inference_session=session, text=list(names))
             with self.torch.no_grad():
                 for out in self.model.propagate_in_video_iterator(inference_session=session):
                     result = self.processor.postprocess_outputs(session, out)
-                    if out.frame_idx and out.frame_idx % 25 == 0:
-                        rate = (time.time() - started) / out.frame_idx
-                        log(f"  {frames[out.frame_idx]}: {len(result['object_ids'])} objects, {rate:.1f} s a frame, "
-                            f"about {rate * (len(frames) - out.frame_idx) / 60:.0f} min to go")
-                    yield out.frame_idx, result
+                    yield start + out.frame_idx, {k: (as_numpy(v) if k != "prompt_to_obj_ids" else
+                                                      {n: as_numpy(ids) for n, ids in v.items()})
+                                                  for k, v in result.items()}
+            del session
+            release(self.torch)
+            return end
+
+        def outputs():
+            for c, start in enumerate(starts):
+                end = min(len(frames), start + SAM3_CHUNK)
+                local = list(chunk_outputs(start))
+                # Link this chunk's objects to the previous chunk's on the shared frames.
+                mapping: dict[int, int] = {}
+                if c:
+                    votes: dict[tuple[int, int], list[float]] = {}
+                    for f, result in local:
+                        if f not in previous_overlap:
+                            continue
+                        prompt_of = {int(i): n for n, ids in result["prompt_to_obj_ids"].items() for i in ids.ravel()}
+                        for obj_id, mask in zip(result["object_ids"].ravel(), result["masks"]):
+                            mask = np.asarray(mask) > 0
+                            for gid, (name, other) in previous_overlap[f].items():
+                                if name != prompt_of.get(int(obj_id)):
+                                    continue
+                                iou = (mask & other).sum() / max((mask | other).sum(), 1)
+                                votes.setdefault((int(obj_id), gid), []).append(iou)
+                    for (obj_id, gid), ious in sorted(votes.items(), key=lambda kv: -np.mean(kv[1])):
+                        if np.mean(ious) >= SAM3_LINK_IOU and obj_id not in mapping and gid not in mapping.values():
+                            mapping[obj_id] = gid
+                overlap_from = end - SAM3_OVERLAP
+                previous_overlap.clear()
+                for f, result in local:
+                    ids = result["object_ids"].ravel()
+                    for obj_id in ids:
+                        if int(obj_id) not in mapping:
+                            mapping[int(obj_id)] = next_id[0]
+                            next_id[0] += 1
+                    remapped = dict(result)
+                    remapped["object_ids"] = np.array([mapping[int(i)] for i in ids])
+                    remapped["prompt_to_obj_ids"] = {n: np.array([mapping[int(i)] for i in v.ravel() if int(i) in mapping])
+                                                     for n, v in result["prompt_to_obj_ids"].items()}
+                    if f >= overlap_from:
+                        prompt_of = {int(i): n for n, v in remapped["prompt_to_obj_ids"].items() for i in v.ravel()}
+                        previous_overlap[f] = {int(g): (prompt_of.get(int(g)), np.asarray(m) > 0)
+                                               for g, m in zip(remapped["object_ids"], result["masks"])}
+                    if c and f < start + SAM3_OVERLAP:
+                        continue          # shared frame: the previous chunk already gave it
+                    yield f, remapped
+                rate = (time.time() - started) / max(1, end)
+                log(f"  frames {start + 1}-{end} of {len(frames)}: {len(set(mapping.values()))} objects so far, "
+                    f"{rate:.1f} s a frame, about {rate * (len(frames) - end) / 60:.0f} min to go")
 
         tracks = sam3_tracks(outputs(), frames, (width, height), scale, log)
         log(f"  tracked {len(tracks.tracks)} objects through {len(frames)} frames "
@@ -479,11 +541,20 @@ class Sam3Tracker:
 
 
 def as_numpy(value) -> np.ndarray:
-    """A tensor or a list as a numpy array (bfloat16 has no numpy type)."""
+    """A model output (a tensor on any device, a list, an array) as a numpy array."""
     if hasattr(value, "detach"):
-        value = value.detach().float().cpu() if value.is_floating_point() else value.detach().cpu()
+        value = value.detach().float().cpu() if value.dtype.is_floating_point else value.detach().cpu()
         return value.numpy()
     return np.asarray(value)
+
+
+def release(torch) -> None:
+    """Hand the GPU's cached memory back between chunks."""
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def sam3_tracks(outputs, frames: list[str], size: tuple[int, int], scale: float, log=print) -> Tracks:

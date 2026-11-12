@@ -510,7 +510,7 @@ def main():
         print(f"  plane: {kind}, {len(idx):,} pts, "
               f"{2*half[0]:.1f} x {2*half[1]:.1f} units")
 
-    def add_box(members, source, detected=None):
+    def add_box(members, source, detected=None, role=None):
         lo, hi = np.percentile(P[members], [2, 98], axis=0)
         thin = hi - lo < extent * 0.01
         if thin.sum() > 1 or (thin.any() and source != "detected"):
@@ -528,6 +528,8 @@ def main():
                "color": cols[members].mean(axis=0).astype(int).tolist()}
         if detected:
             box["detected"] = detected
+        if role:
+            box["role"] = role
         shapes["boxes"].append(box)
         print(f"  box ({source}): {detected or 'unlabelled'}, {len(members):,} pts, "
               f"size {np.round(hi - lo, 1).tolist()}")
@@ -553,6 +555,22 @@ def main():
                     continue
                 counts = np.bincount(point_labels[members], minlength=len(names))
                 add_box(members, "detected", names[int(np.argmax(counts))])
+
+        # The room's own fittings are pieces too, each its own box: a door, the
+        # loft cabinet over the wardrobe, a wall shelf, a curtain, the AC. They
+        # keep their role, so the finish leaves a mounted one on its wall and a
+        # door on its wall, and the score does not count them as furniture.
+        for name in vocabulary.with_role("fixture", "hanging"):
+            if name not in names:
+                continue
+            idx = np.where(point_labels == names.index(name))[0]
+            if len(idx) < min_points // 2:
+                continue
+            groups = cluster_grid(P[idx], cell=extent * 0.02)
+            for group in np.unique(groups):
+                members = idx[groups == group]
+                if len(members) >= min_points // 2:
+                    add_box(members, "detected", name, role=vocabulary.role(name))
 
     # Whatever the planes and the detector left over, grouped geometrically.
     leftover = np.where(remaining)[0]

@@ -77,6 +77,8 @@ WARDROBE_WALL_CLEARANCE_FRAC = 0.10  # of sqrt(floor area)
 
 NEAR_FLOOR_MAX_GAP_FRAC = 0.20   # bottom within this * H above floor counts as "on the floor"
 NEAR_FLOOR_MIN_GAP_FRAC = -0.25  # tolerate the box sinking slightly below the floor fit
+FITTING_MIN_M = 0.15             # a fitting narrower than this in its two larger sizes is a fragment
+FITTING_OUTSIDE_MARGIN = 3       # how much further past the walls a fitting may reach than furniture
 FLOATING_MIN_GAP_FRAC = 0.35     # bottom higher than this * H above floor -> floating clutter
 LOW_DENSITY_MAX_REL = 0.10       # box surface density below 10% of scene density -> clutter
 OVERSIZE_HEIGHT_FRAC = 1.10      # taller than the room itself -> not furniture
@@ -197,8 +199,17 @@ def outline_margin(outline: dict, units_per_metre: float | None) -> float:
 
 
 def near_outline(outline: dict, x: float, y: float, margin: float) -> bool:
-    return any(inside_outline(outline["polygons"], x + dx, y + dy)
-               for dx, dy in ((0, 0), (margin, 0), (-margin, 0), (0, margin), (0, -margin)))
+    """Inside the outline, or within `margin` of its edge in any direction
+    (diagonally past a corner too: the bedroom's doors stand in its corners)."""
+    if inside_outline(outline["polygons"], x, y):
+        return True
+    for poly in outline["polygons"]:
+        for (ax, ay), (bx, by) in zip(poly, poly[1:] + poly[:1]):
+            dx, dy = bx - ax, by - ay
+            t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / max(dx * dx + dy * dy, 1e-12)))
+            if math.hypot(ax + t * dx - x, ay + t * dy - y) <= margin:
+                return True
+    return False
 
 
 def wall_near_outline(plane: dict, outline: dict, margin: float) -> bool:
@@ -541,8 +552,8 @@ def clear_the_walk(boxes: list[dict], cameras, room: dict, size, units_per_metre
     notes = []
     for i, b in enumerate(boxes):
         name = names[i] if names else f"box {i}"
-        if b.get("mounted"):
-            continue                                           # on the wall above the walk: the phone passed under it
+        if b.get("mounted") or b.get("role") in ("fixture", "hanging"):
+            continue                                           # on the wall (above the walk, or a door in it)
         for _ in range(4):                                     # one side at a time
             lo, hi = b["min"], b["max"]
             r, e = (reach, reach), reach * 1.001           # a camera just cut to the edge's reach is not inside
@@ -838,6 +849,9 @@ def finish_room(data: dict, units_per_metre: float | None = None,
     index = {id(p): i for i, p in measured}
     for w in walls:
         w["index"] = index[id(w["plane"])]
+    # Fittings (doors, a loft cabinet, curtains) belong to the walls: they neither
+    # push a wall out nor get backed onto one, turned, or cut where the phone went.
+    built = [(i, b) for i, b in built if b.get("role") not in ("fixture", "hanging")]
     furniture = [b for _, b in built]
     join_corners(walls, room)
     for end, w, cut in trim_past_walls(walls, room, data.get("cameras")):
@@ -1305,7 +1319,14 @@ def main(argv: list[str] | None = None) -> int:
     box_results = []
     for box in boxes:
         label, why, metrics = classify_box(box, ctx)
-        if box_outside(box, ctx.room, outline, margin):
+        fitting = box.get("role") in ("fixture", "hanging")
+        if fitting and units_per_metre and sorted(box_size(box))[1] < FITTING_MIN_M * units_per_metre:
+            box_results.append(("clutter", f"detected {box.get('detected')}, but under "
+                                f"{100 * FITTING_MIN_M:.0f} cm across: a handle or a corner of it", metrics))
+            continue
+        # A door stands in its wall, so it reaches a little past it: a fitting is
+        # outside only when it is well beyond the walls.
+        if box_outside(box, ctx.room, outline, margin * (FITTING_OUTSIDE_MARGIN if fitting else 1)):
             box_results.append(("clutter", "outside the room the walls enclose: part of "
                                 "a neighbouring space seen through a door", metrics))
             continue
@@ -1314,7 +1335,13 @@ def main(argv: list[str] | None = None) -> int:
             # An object detector saw a real thing here, so keep its identity;
             # the sanity gates still decide whether the box is worth building.
             gap = (box["min"][2] - ctx.floor_z) / ctx.room_height
-            if label == "clutter":
+            if box.get("role") in ("fixture", "hanging") and not why.startswith(("implausibly", "sparse")):
+                # A fitting of the room (door, loft cabinet, shelf, curtain, AC): kept
+                # as its own piece; one that starts up the wall stays there.
+                label = "block"
+                why = f"detected {detected}, a fitting of the room"
+                box["mounted"] = gap > NEAR_FLOOR_MAX_GAP_FRAC
+            elif label == "clutter":
                 why = f"detected {detected}, but {why}"
             elif (vocabulary.role(detected) == "floor_covering"
                   and gap > NEAR_FLOOR_MAX_GAP_FRAC):

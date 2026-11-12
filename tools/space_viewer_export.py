@@ -38,6 +38,8 @@ PIECE_MARGIN_M = 0.03
 FLOOR_BAND_M = 0.03
 KEEP_BEYOND_M = 1.0          # points this far past the room's rectangle are another space: left out
 MAX_PIECES = 250
+GUESSED = 255                # piece index of the points that fill gaps (inferred)
+MAX_GUESSED = 150_000
 
 
 def name_of(box: dict) -> str:
@@ -90,6 +92,22 @@ def export(space: Path, max_points: int = 450_000) -> Path:
                        "min": corners.min(axis=0).round(4).tolist(), "max": corners.max(axis=0).round(4).tolist(),
                        "mounted": bool(b.get("mounted")), "points": int(inside.sum())})
 
+    # Gaps the stage filled (pipeline/gaps.py): inferred, so marked with GUESSED.
+    guessed = 0
+    gaps_path = space / "cloud-gaps.ply"
+    if gaps_path.exists():
+        filled = load_ply(gaps_path)
+        g_scene = filled.points.astype(np.float64) @ world.T
+        if len(g_scene) > MAX_GUESSED:
+            pick = np.sort(np.random.default_rng(1).choice(len(g_scene), MAX_GUESSED, replace=False))
+            g_scene, g_cols = g_scene[pick], filled.colors[pick]
+        else:
+            g_cols = filled.colors
+        guessed = len(g_scene)
+        scene = np.vstack([scene, g_scene])
+        colours = np.vstack([colours, g_cols])
+        piece_of = np.concatenate([piece_of, np.full(guessed, GUESSED, np.uint8)])
+
     floor = (np.abs(scene[:, 2] - level["floor_z"]) < FLOOR_BAND_M * metre) & (piece_of == 0)
     floor_colour = (np.median(colours[floor], axis=0) if floor.any() else np.array([180, 170, 160])).astype(int)
 
@@ -119,7 +137,7 @@ def export(space: Path, max_points: int = 450_000) -> Path:
         f.write(np.ascontiguousarray(colours, np.uint8).tobytes())
         f.write(piece_of.tobytes())
     (out / "room.json").write_text(json.dumps({
-        "space": space.name, "count": int(len(pts)),
+        "space": space.name, "count": int(len(pts)), "guessed": guessed,
         # "video": metres from monocular depth; "measured": set from a real length (set_real_scale.py)
         "scaleSource": "measured" if meta.get("scale_measured") else "video",
         "scaleMeasured": meta.get("scale_measured"), "height": round(level["height"] / metre, 3),

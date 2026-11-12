@@ -2415,6 +2415,11 @@ class Agent:
         if measured:
             self.decide("shapes", "score", room_score.describe(measured), measured)
             measured = self.safe(self.measured_rechecks, measured, default=measured)
+        # The surfaces' gaps: found, sorted by cause, filled from the pattern
+        # around them, each decided by Claude (pipeline/gaps.py).
+        self.run([sys.executable, str(ROOT / "pipeline/gaps.py"), str(self.space)]
+                 + ([] if self.advisor.available else ["--no-claude"]),
+                 "gaps", "fill the walls', floor's and ceiling's gaps from what surrounds them")
         metrics = self.shape_metrics()
         self.decide("shapes", "accept",
                     f"{metrics.get('walls', 0)} walls"

@@ -44,6 +44,14 @@ from mirrors import fill_unreliable, mask_at
 import lens
 
 MOGE_CHECKPOINT = "Ruicheng/moge-2-vitl-normal"
+# MoGe-3 (Jul 2026): much finer point-map detail; needs MoGe's current code and
+# FlexGEMM (Triton), so a CUDA machine (Linux), not a Mac.
+MOGE3_CHECKPOINT = "Ruicheng/moge-3-vitl"
+# Depth Anything 3, Base (Apache-2.0): all keyframes in one pass with the solve's
+# cameras, so their depths agree by construction. Its depth is in the solve's
+# units; metres come from an earlier MoGe reading of the same space.
+DA3_CHECKPOINT = "depth-anything/DA3-BASE"
+DA3_RESOLUTION = 504
 MIN_ANCHORS = 12
 # Scale. One monocular depth map is right up to a scale, and every keyframe's
 # scale is fitted to the solve's points it sees. Along a walk the fits drift a
@@ -349,6 +357,55 @@ class MoGeDepth:
         return depth, scale, normal
 
 
+class MoGe3Depth(MoGeDepth):
+    """MoGe-3: the same interface as MoGe-2, sharper."""
+
+    def __init__(self, device, work_size):
+        import torch
+        from moge.model.v3 import MoGeModel
+
+        self.torch = torch
+        self.model = MoGeModel.from_pretrained(MOGE3_CHECKPOINT).to(device).eval()
+        self.device = device
+        self.work_size = work_size
+        self.fp16 = device != "cpu"
+
+
+class DA3Depth:
+    """Depth Anything 3 over all keyframes at once, given the solve's cameras.
+
+    prepare() runs the network on the keyframes with their solved poses and
+    intrinsics; calling it then answers one keyframe at a time like MoGeDepth,
+    with depth in the solve's own units (so each keyframe's scale fit is about 1)."""
+
+    def __init__(self, device):
+        from depth_anything_3.api import DepthAnything3
+
+        self.model = DepthAnything3.from_pretrained(DA3_CHECKPOINT).to(device=device).eval()
+        self.depth: dict[str, np.ndarray] = {}
+
+    def prepare(self, paths, infos, cams):
+        extrinsics, intrinsics = [], []
+        for info, cam in zip(infos, cams):
+            w2c = np.eye(4)
+            w2c[:3, :3], w2c[:3, 3] = info["R"], info["t"]
+            extrinsics.append(w2c)
+            fx, fy, cx, cy = cam["params"][:4]
+            intrinsics.append(np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], float))
+        prediction = self.model.inference([str(p) for p in paths], extrinsics=np.array(extrinsics, np.float32),
+                                          intrinsics=np.array(intrinsics, np.float32),
+                                          align_to_input_ext_scale=True, process_res=DA3_RESOLUTION)
+        for path, depth in zip(paths, prediction.depth):
+            depth = np.asarray(depth, np.float32)
+            depth[~np.isfinite(depth)] = 0.0
+            depth[depth_edges(depth)] = 0.0
+            self.depth[Path(path).name] = depth
+
+    def __call__(self, img, fx):
+        depth = self.depth[Path(img.filename).name]
+        return depth, depth.shape[1] / img.size[0], None
+
+
 def release_model_memory(torch) -> None:
     """Give a freed model's memory back before the next model loads."""
     import gc
@@ -399,7 +456,7 @@ def main():
     parser.add_argument("--stride", type=int, default=None,
                         help="back-project every Nth pixel of the full frame (default 4 "
                              "for 12 keyframes, wider with more so the cloud keeps its size)")
-    parser.add_argument("--depth-model", choices=["moge", "da2"], default="moge",
+    parser.add_argument("--depth-model", choices=["moge", "moge3", "da3", "da2"], default="moge",
                         help="monocular depth network (default moge)")
     parser.add_argument("--work-size", type=int, default=1280,
                         help="longest side, in pixels, that MoGe predicts at (default 1280)")
@@ -475,9 +532,25 @@ def main():
     from PIL import Image
 
     device = default_device()
+    metre_from = None
     if args.depth_model == "moge":
         predictor = MoGeDepth(device, args.work_size)
         print(f"MoGe-2 ({MOGE_CHECKPOINT}) on {device}")
+    elif args.depth_model == "moge3":
+        predictor = MoGe3Depth(device, args.work_size)
+        print(f"MoGe-3 ({MOGE3_CHECKPOINT}) on {device}")
+    elif args.depth_model == "da3":
+        earlier = space / "densify.json"
+        metre_from = json.loads(earlier.read_text()).get("colmap_units_per_metre") if earlier.exists() else None
+        if not metre_from:
+            sys.exit("Depth Anything 3 gives depth in the solve's units: run densify with MoGe first, "
+                     "so the space knows its metres (densify.json).")
+        predictor = DA3Depth(device)
+        ordered = sorted(keys, key=lambda k: images[k]["name"])
+        predictor.prepare([workspace / "images" / images[k]["name"] for k in ordered],
+                          [images[k] for k in ordered], [cameras[images[k]["camera_id"]] for k in ordered])
+        print(f"Depth Anything 3 ({DA3_CHECKPOINT}) on {device}, {len(ordered)} keyframes with their solved cameras; "
+              f"metres from the earlier MoGe reading (1 m = {metre_from:.4f} units)")
     else:
         from transformers import pipeline as hf_pipeline
         predictor = hf_pipeline(
@@ -486,7 +559,7 @@ def main():
         )
         print(f"Depth Anything V2 (small) on {device}")
 
-    use_detector = args.depth_model == "moge" and not args.no_semantics
+    use_detector = args.depth_model != "da2" and not args.no_semantics
     label_index, label_names, unreliable_ids, yielding = None, None, np.zeros(0, int), set()
 
     all_pts, all_cols, all_norms, all_labels = [], [], [], []
@@ -665,9 +738,13 @@ def main():
         # Keyframes in walk order, each scaled with its stretch of the walk.
         frames.sort(key=lambda f: images[f["id"]]["name"])
         settled, s_med, left_out = settle_scales([(f["s"], f["support"]) for f in frames])
+        depth_unit = s_med
+        if metre_from:
+            # The network's unit is the solve's; a metre is what MoGe measured before.
+            s_med = metre_from
         for f, s in zip(frames, settled):
             f["scale"] = s
-        spread = float(np.subtract(*np.percentile(fitted, [75, 25])) / s_med)
+        spread = float(np.subtract(*np.percentile(fitted, [75, 25])) / depth_unit)
         caps = [f["cap"] for f in frames if f["cap"] is not None]
         default_cap = float(np.median(caps)) if caps else np.inf
         print(f"Scale: 1 m = {s_med:.4f} COLMAP units "

@@ -48,6 +48,7 @@ pathGroup.visible = false;
 let room = null;
 let points = null;
 const hidden = new Float32Array(MAX_PIECES + 1);
+const GUESSED = 255;           // the piece index of points that fill a gap (inferred, not measured)
 const pieces = new Map();      // id -> {info, box (helper), pick (invisible mesh), fill, removed}
 const added = new Map();       // id -> {group, source, name}
 let selected = null;
@@ -68,15 +69,22 @@ addEventListener("resize", resize);
 // ------------------------------------------------------------------ the cloud
 function pointsMaterial() {
   return new THREE.ShaderMaterial({
-    uniforms: { size: { value: 0.012 }, scale: { value: 1 }, hidden: { value: hidden } },
+    uniforms: { size: { value: 0.012 }, scale: { value: 1 }, hidden: { value: hidden },
+                showGuess: { value: 1 }, markGuess: { value: 0 } },
     vertexShader: `
       attribute vec3 color; attribute float piece;
       uniform float size; uniform float scale; uniform float hidden[${MAX_PIECES + 1}];
+      uniform float showGuess; uniform float markGuess;
       varying vec3 vColor; varying float vHide;
       void main() {
         vColor = color;
         int p = int(piece + 0.5);
         vHide = (p > 0 && p <= ${MAX_PIECES}) ? hidden[p] : 0.0;
+        // ${GUESSED}: a gap in a wall, the floor or the ceiling filled from what surrounds it.
+        if (p == ${GUESSED}) {
+          vHide = showGuess > 0.5 ? 0.0 : 1.0;
+          if (markGuess > 0.5) vColor = mix(color, vec3(1.0, 0.54, 0.24), 0.6);
+        }
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
         gl_PointSize = max(1.0, size * scale / -mv.z);
         gl_Position = projectionMatrix * mv;
@@ -194,6 +202,7 @@ function setRemoved(id, removed, save = true) {
 
 function highlightFilled(on) {
   for (const mesh of fillGroup.children) mesh.material.color.copy(on ? new THREE.Color(0xff8a3d) : mesh.userData.baseColor);
+  if (points) points.material.uniforms.markGuess.value = on ? 1 : 0;
 }
 
 // ------------------------------------------------------------------ adding furniture
@@ -581,6 +590,7 @@ async function restore() {
 $("show-model").onchange = (e) => { modelGroup.visible = e.target.checked; };
 $("show-path").onchange = (e) => { pathGroup.visible = e.target.checked; };
 $("show-filled").onchange = (e) => highlightFilled(e.target.checked);
+$("show-guess").onchange = (e) => { if (points) points.material.uniforms.showGuess.value = e.target.checked ? 1 : 0; };
 $("point-size").oninput = (e) => { points.material.uniforms.size.value = e.target.value / 1000; };
 $("scale").oninput = (e) => {
   const a = added.get(selected);
