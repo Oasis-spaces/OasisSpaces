@@ -188,8 +188,9 @@ CUDA_VISIBLE_DEVICES=0 python3 pipeline/splat_gsplat.py train "$SPACE" --steps 3
 rm -f "$SPACE"/splat-gsplat-30k_*.ply
 wait
 tail -3 "$SPACE/baseline-heldout.log"
-python3 pipeline/splat_gsplat.py eval "$SPACE" splat-quick.ply splat-long.ply splat-quick-heldout.ply \
-  splat-long-heldout.ply splat-gsplat.ply splat-gsplat-30k.ply splat-gsplat-30k.ply:dc splat-gsplat-30k.ply:dc300k
+HELD=""; for f in splat-quick-heldout.ply splat-long-heldout.ply; do [ -f "$SPACE/$f" ] && HELD="$HELD $f"; done
+python3 pipeline/splat_gsplat.py eval "$SPACE" splat-quick.ply splat-long.ply $HELD splat-gsplat.ply \
+  splat-gsplat-30k.ply splat-gsplat-30k.ply:dc splat-gsplat-30k.ply:dc300k
 python3 pipeline/splat_gsplat.py novel "$SPACE" splat-gsplat-30k.ply splat-gsplat-30k.ply:dc splat-gsplat-30k.ply:dc300k
 """],
     },
