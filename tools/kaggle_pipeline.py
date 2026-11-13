@@ -76,8 +76,15 @@ if [ ! -x /kaggle/temp/OpenSplat/build/opensplat ]; then
   export PATH=/usr/local/cuda/bin:$PATH
   TORCH_PREFIX=$(python -c "import torch; print(torch.utils.cmake_prefix_path)")
   ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+  # The driver's libcuda.so.1 is there, but not the plain libcuda.so the linker asks for.
+  mkdir -p /kaggle/temp/cudalink
+  CUDA_LIB=$(ldconfig -p | sed -n 's/.*libcuda\\.so\\.1 .*=> //p' | head -1)
+  [ -n "$CUDA_LIB" ] || CUDA_LIB=$(find /usr/local/cuda* -name 'libcuda.so' -path '*stubs*' 2>/dev/null | head -1)
+  ln -sf "$CUDA_LIB" /kaggle/temp/cudalink/libcuda.so
+  export LIBRARY_PATH=/kaggle/temp/cudalink:$LIBRARY_PATH
   mkdir -p build && cd build
   cmake -DCMAKE_PREFIX_PATH="$TORCH_PREFIX" -DGPU_RUNTIME=CUDA \\
+        -DCMAKE_EXE_LINKER_FLAGS="-L/kaggle/temp/cudalink" \\
         -DCMAKE_CUDA_ARCHITECTURES="$ARCH" -DCMAKE_BUILD_TYPE=Release .. > cmake.log 2>&1 || { tail -40 cmake.log; exit 1; }
   echo "Building OpenSplat (about 10 minutes)..."
   make -j"$(nproc)" opensplat > make.log 2>&1 || { tail -60 make.log; exit 1; }
