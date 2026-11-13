@@ -78,7 +78,7 @@ if [ ! -x /kaggle/temp/OpenSplat/build/opensplat ]; then
   ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
   # The driver's libcuda.so.1 is there, but not the plain libcuda.so the linker asks for.
   mkdir -p /kaggle/temp/cudalink
-  CUDA_LIB=$(ldconfig -p | sed -n 's/.*libcuda\\.so\\.1 .*=> //p' | head -1)
+  CUDA_LIB=$(ldconfig -p | grep 'libcuda.so.1 ' | awk '{print $NF}' | head -1)
   [ -n "$CUDA_LIB" ] || CUDA_LIB=$(find /usr/local/cuda* -name 'libcuda.so' -path '*stubs*' 2>/dev/null | head -1)
   ln -sf "$CUDA_LIB" /kaggle/temp/cudalink/libcuda.so
   export LIBRARY_PATH=/kaggle/temp/cudalink:$LIBRARY_PATH
