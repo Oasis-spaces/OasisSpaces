@@ -175,20 +175,21 @@ JOBS = {
                    "splat-quick.ply", "splat-long.ply", "splat-gsplat.ply", "splat-gsplat.json",
                    "tools-cache/opensplat"],
         "install": [INSTALL_PYTHON, INSTALL_GSPLAT, INSTALL_OPENSPLAT],
-        "run": ["""set -x
+        "run": ["""set -ex
 python3 pipeline/splat_seed.py "$SPACE"
 python3 pipeline/splat_seed.py "$SPACE" --hold-out "$SPACE/splat-gsplat.json"
 OPENSPLAT=/kaggle/temp/OpenSplat/build/opensplat
 ( CUDA_VISIBLE_DEVICES=1 $OPENSPLAT "$SPACE/splat-project-heldout" -n 10000 -d 4 -o "$SPACE/splat-quick-heldout.ply" \
   && CUDA_VISIBLE_DEVICES=1 $OPENSPLAT "$SPACE/splat-project-heldout" -n 30000 -d 2 -o "$SPACE/splat-long-heldout.ply" ) \
   > "$SPACE/baseline-heldout.log" 2>&1 &
+BASELINE=$!
 CUDA_VISIBLE_DEVICES=0 python3 pipeline/splat_gsplat.py train "$SPACE" --steps 30000 --resume splat-gsplat.ply \
   --start-step $(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['steps'])" "$SPACE/splat-gsplat.json") \
   --output splat-gsplat-30k.ply --minutes 330
 rm -f "$SPACE"/splat-gsplat-30k_*.ply
-wait
+wait $BASELINE || echo "the held-out baselines failed; scoring without them"
 tail -3 "$SPACE/baseline-heldout.log"
-HELD=""; for f in splat-quick-heldout.ply splat-long-heldout.ply; do [ -f "$SPACE/$f" ] && HELD="$HELD $f"; done
+HELD=""; for f in splat-quick-heldout.ply splat-long-heldout.ply; do if [ -f "$SPACE/$f" ]; then HELD="$HELD $f"; fi; done
 python3 pipeline/splat_gsplat.py eval "$SPACE" splat-quick.ply splat-long.ply $HELD splat-gsplat.ply \
   splat-gsplat-30k.ply splat-gsplat-30k.ply:dc splat-gsplat-30k.ply:dc300k
 python3 pipeline/splat_gsplat.py novel "$SPACE" splat-gsplat-30k.ply splat-gsplat-30k.ply:dc splat-gsplat-30k.ply:dc300k
@@ -205,6 +206,7 @@ KERNEL_SCRIPT = r'''
 import glob, os, subprocess, sys, tarfile, time
 from pathlib import Path
 JOB = {job!r}
+STAMP = {stamp!r}
 NAME = {name!r}
 INSTALL = {install!r}
 RUN = {run!r}
@@ -226,6 +228,11 @@ def unpack(stem, dataset, into):
 unpack("code", "oasis-code", repo)
 space = repo / "spaces" / NAME; space.mkdir(parents=True, exist_ok=True)
 unpack("space", "oasis-space-" + NAME, space)
+for folder in (repo, space):
+    got = (folder / "upload-stamp.txt").read_text().strip() if (folder / "upload-stamp.txt").exists() else None
+    if got != STAMP:
+        raise SystemExit(f"{{folder}} holds upload {{got}}, not {{STAMP}}: Kaggle mounted an older version")
+print("inputs are this upload's", STAMP)
 try:
     from kaggle_secrets import UserSecretsClient
     os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
@@ -269,14 +276,25 @@ def code_files() -> list[Path]:
     return [ROOT / f for f in listed if f and not f.startswith(skip) and (ROOT / f).is_file()]
 
 
-def pack(files: list[Path], base: Path, out: Path) -> None:
+STAMP = "upload-stamp.txt"        # in every archive: the notebook checks it got this upload, not the last
+
+
+def pack(files: list[Path], base: Path, out: Path, stamp: str | None = None) -> None:
     with tarfile.open(out, "w:gz") as t:
         for f in files:
             t.add(f, arcname=str(f.relative_to(base)))
+        if stamp:
+            data = stamp.encode()
+            info = tarfile.TarInfo(STAMP)
+            info.size, info.mtime = len(data), int(time.time())
+            t.addfile(info, __import__("io").BytesIO(data))
 
 
 def publish_dataset(slug: str, title: str, archive: Path, stem: str) -> None:
-    """Create or version a private dataset holding one archive; wait until Kaggle has it ready."""
+    """Create or version a private dataset holding one archive; wait until Kaggle has
+    this version ready. "ready" alone describes the dataset, which the last version
+    already is, so the wait is for this upload's stamp file to be listed as new."""
+    uploaded = time.time() - 60
     with tempfile.TemporaryDirectory() as folder:
         folder = Path(folder)
         shutil.copy2(archive, folder / f"{stem}.tar.gz")
@@ -288,11 +306,20 @@ def publish_dataset(slug: str, title: str, archive: Path, stem: str) -> None:
                          "--dir-mode", "skip").splitlines()[-1])
         else:
             print(kaggle("datasets", "create", "-p", str(folder)).splitlines()[-1])
-    for _ in range(120):
+    for _ in range(180):
         time.sleep(10)
-        if "ready" in kaggle("datasets", "status", slug, check=False).lower():
-            return
-    raise SystemExit(f"dataset {slug} did not become ready")
+        if "ready" not in kaggle("datasets", "status", slug, check=False).lower():
+            continue
+        for line in kaggle("datasets", "files", slug, "--page-size", "1000", check=False).splitlines():
+            parts = line.split()
+            if parts and parts[0] == STAMP and len(parts) >= 4:
+                try:
+                    when = __import__("calendar").timegm(time.strptime(f"{parts[2]} {parts[3][:8]}", "%Y-%m-%d %H:%M:%S"))
+                except ValueError:
+                    continue
+                if when >= uploaded:
+                    return
+    raise SystemExit(f"dataset {slug}: this upload did not become ready in 30 minutes")
 
 
 def run_job(space: Path, job: str, user: str, keep: Path) -> int:
@@ -306,8 +333,9 @@ def run_job(space: Path, job: str, user: str, keep: Path) -> int:
     with tempfile.TemporaryDirectory(dir=keep) as tmp:
         tmp = Path(tmp)
         code = code_files()
-        pack(code, ROOT, tmp / "code.tar.gz")
-        pack(inputs, space, tmp / "space.tar.gz")
+        stamp = f"{job}-{time.time():.0f}"
+        pack(code, ROOT, tmp / "code.tar.gz", stamp)
+        pack(inputs, space, tmp / "space.tar.gz", stamp)
         print(f"Uploading the code ({len(code)} files) and {name}'s inputs for {job} "
               f"({len(inputs)} files, {(tmp / 'space.tar.gz').stat().st_size / 1e6:.0f} MB)")
         publish_dataset(f"{user}/oasis-code", "oasis code", tmp / "code.tar.gz", "code")
@@ -315,7 +343,7 @@ def run_job(space: Path, job: str, user: str, keep: Path) -> int:
         kernel = tmp / "kernel"
         kernel.mkdir()
         (kernel / "job.py").write_text(KERNEL_SCRIPT.format(job=job, name=name, install=spec["install"],
-                                                            run=spec["run"]))
+                                                            run=spec["run"], stamp=stamp))
         # Every job runs as the one notebook whose secrets hold HF_TOKEN: Kaggle
         # attaches a secret to a notebook by hand, and the API cannot.
         slug = f"{user}/{KERNEL}"
