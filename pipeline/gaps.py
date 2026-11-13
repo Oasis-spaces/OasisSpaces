@@ -1,28 +1,38 @@
 #!/usr/bin/env python3
-"""Find the gaps in a room's surfaces and fill them from the pattern around them.
+"""Find the gaps in a room's surfaces, and fill them only with what the video saw.
 
 After stage 3 the room has its walls, floor and ceiling as planes, but the cloud
-on them has holes: floor the phone never pointed at, wall behind the wardrobe,
-ceiling filmed in scraps. A person opening the room sees those holes, and taking
-a piece out shows nothing behind it. This step:
+on them has holes. Some are holes only in the cloud: the dense cloud is built
+from a few dozen keyframes, and other frames of the walk did see that floor or
+wall. Others nobody filmed: the floor under the bed, the wall behind the
+wardrobe, the corner the phone never turned to.
+
+Nothing here is invented. This step:
 
   1. maps each surface (the floor and ceiling inside the room's outline, every
      built wall from floor to ceiling) on a 2 cm grid from the dense cloud, and
-     marks what no frame saw;
+     marks what the cloud does not cover;
   2. sorts each gap by what explains it: hidden behind or under a piece, an
      opening (a door in that wall), or simply never filmed;
-  3. fills it from its surroundings. A surface with a repeating pattern (floor
-     tiles, panels) has its period measured from what was seen, and a gap
-     takes the colour one or more periods away; a plain one is inpainted;
-  4. shows Claude each surface, as seen and as filled, with the frames that
-     face it, and Claude decides per gap: fill it (and say what the pattern
-     is), or leave it open (a doorway, an opening, a mirror). Claude's
-     answers go into the room record.
+  3. recovers what it can from the frames themselves: each gap cell is
+     projected into every solved frame; a frame counts only where nothing
+     nearer stands in the way (the dense cloud's own depth, and the tracked
+     masks of furniture and belongings), it faces the surface, and at least
+     MIN_VIEWS frames from different places agree on the colour. Agreement
+     from different viewpoints is what tells a surface apart from something
+     standing in front of it;
+  4. closes the cloud's own sampling gaps (a few centimetres between measured
+     points) by interpolating the measured colours around them;
+  5. leaves everything else unseen. It is written as unseen, not painted;
+  6. shows Claude each surface: as measured, and with the recovered cells,
+     beside frames that face it. Claude checks per gap that what was
+     recovered is this surface (not clothes, a bed edge or a reflection), and
+     which gaps are openings that must stay open.
 
-Filled points are written apart from the measured ones, as cloud-gaps.ply, and
-every one is inferred: tools/space_viewer_export.py marks them so the viewer can
-show them as filled in. gaps.json records each surface's coverage, its pattern,
-each gap and Claude's decision.
+cloud-gaps.ply holds the recovered and interpolated points (real pixels, but
+not measured by the dense cloud, so the viewer can mark them); cloud-unseen.ply
+holds the cells nothing saw, for the viewer to show as unknown. gaps.json
+records each surface's coverage and each gap with Claude's decision.
 
     python3 pipeline/gaps.py spaces/<name> [--no-claude] [--cell 0.02]
 """
@@ -42,17 +52,31 @@ from pointcloud import PointCloud, load_ply, save_ply  # noqa: E402
 CELL_M = 0.02                 # grid cell on each surface, metres
 NEAR_SURFACE_M = 0.05         # points this close to a surface belong to it
 CLOSE_CELLS = 3               # seen cells closed over this many cells: sparse sampling is not a gap
-MIN_GAP_M2 = 0.02             # smaller holes are filled without being reported
+MIN_GAP_M2 = 0.02             # smaller holes are not shown to Claude
 IN_FRONT_M = 0.9              # a piece this close in front of a wall hides it
-PERIOD_RANGE_M = (0.15, 1.3)  # tile and panel sizes looked for
-PERIOD_MIN_CORR = 0.3         # autocorrelation peak that counts as a repeating pattern
 MAX_SHOWN = 8                 # gaps per surface Claude decides on, largest first
-SHADING_CELLS = 15            # blur, in cells, that separates a surface's shading from its texture
-TEXTURE_STRENGTH = 0.5         # how much of the copied fine texture is laid on the shading
-PATCH_CELLS = 12              # texture patches laid into large gaps (24 cm at 2 cm cells)
 SHOW_FRAMES = 3               # frames shown to Claude per surface
 GAP_KINDS = {"hidden": "behind or under a piece", "opening": "an opening (a door in this wall)",
-             "unfilmed": "never filmed"}
+             "unfilmed": "never filmed by the dense cloud's frames"}
+# Recovering from frames
+FRAME_REDUCE = 4              # frames read at 1/4 size for colour
+DEPTH_REDUCE = 8              # the cloud's depth drawn at 1/8 size, to test what is in the way
+DEPTH_VOXEL_M = 0.01          # the cloud thinned to this before drawing its depth
+DEPTH_WIDEN = 3               # each depth pixel takes the nearest of this many around it: closes the
+                              # spaces between the cloud's points so no view slips through a piece
+IN_THE_WAY_M = 0.04           # something this much nearer than the cell hides it (plus 3% of the distance)
+MIN_FACING = 0.3              # cosine between the view ray and the surface normal
+MIN_VIEWS = 2                 # frames that must see a cell
+GAIN_MIN_CELLS = 150          # measured cells a frame needs to have its exposure corrected
+REFERENCE_CELLS = 4000        # measured cells per surface that give each frame's exposure
+PERIOD_RANGE_M = (0.15, 1.3)  # tile and panel sizes looked for
+PERIOD_MIN_CORR = 0.3         # autocorrelation peak that counts as a repeating pattern
+PERIOD_MIN_CONTRAST = 20.0    # measured luminance spread (0..255) below which a surface is plain
+PERIOD_REPEAT_SHARE = 0.5     # the second repeat must keep this share of the first's correlation
+MIN_PATCH_M2 = 0.01           # recovered cells must form patches this large: lone cells are chance agreement
+MIN_BASELINE_M = 0.15         # and stand at least this far apart
+MAX_SPREAD = 18.0             # their brightness may differ this much (median absolute, 0..255)
+UNSEEN_COLOUR = (128, 128, 128)
 
 
 # ---------------------------------------------------------------- surfaces
@@ -190,13 +214,218 @@ def cover(surface: dict, boxes: list[dict], uv, metre: float, cell: float, shape
     return covered
 
 
+# ---------------------------------------------------------------- frames
+def project(points: np.ndarray, view: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Pixels (full-size, distorted as the frame was taken) and camera depth of
+    solve-frame points."""
+    cam = points @ view["R"].T + view["t"]
+    z = cam[:, 2]
+    zs = np.where(z > 1e-6, z, 1e-6)
+    x, y = cam[:, 0] / zs, cam[:, 1] / zs
+    k1, k2, p1, p2 = view["dist"]
+    r2 = x * x + y * y
+    radial = 1 + k1 * r2 + k2 * r2 * r2
+    xd = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+    yd = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+    K = view["K"]
+    return np.column_stack([K[0, 0] * xd + K[0, 2], K[1, 1] * yd + K[1, 2]]), z
+
+
+def load_views(space: Path, metre: float, mask_names: list[str], log=print) -> list[dict]:
+    """Every solved frame: pose, lens, the frame at 1/FRAME_REDUCE, and the
+    tracked masks of the pieces and belongings that stand in front of
+    surfaces."""
+    import cv2
+    from densify import read_cameras_bin, read_images_bin
+    from splat_gsplat import lens
+
+    model = space / "workspace" / "sparse" / "0"
+    cameras = read_cameras_bin(model / "cameras.bin")
+    images = read_images_bin(model / "images.bin")
+    masks = {}
+    for name in mask_names:
+        path = space / "workspace" / "masks" / f"{name.replace(' ', '-')}.v3.npz"
+        if path.exists():
+            with np.load(path) as m:
+                for frame in m.files:
+                    masks[frame] = masks[frame] | m[frame] if frame in masks else m[frame].copy()
+    views = []
+    for info in sorted(images.values(), key=lambda i: i["name"]):
+        cam = cameras[info["camera_id"]]
+        K, dist = lens(cam)
+        img = cv2.imread(str(space / "workspace" / "images" / info["name"]),
+                         {4: cv2.IMREAD_REDUCED_COLOR_4, 2: cv2.IMREAD_REDUCED_COLOR_2}.get(FRAME_REDUCE,
+                                                                                         cv2.IMREAD_COLOR))
+        if img is None:
+            continue
+        views.append({"name": info["name"], "R": info["R"], "t": info["t"], "K": K, "dist": dist,
+                      "size": (cam["width"], cam["height"]), "image": img[:, :, ::-1],
+                      "centre": -info["R"].T @ info["t"], "mask": masks.get(info["name"])})
+    log(f"  {len(views)} frames read to recover gaps from")
+    return views
+
+
+def occluders(cloud: PointCloud, metre: float, in_front_labels: set[int]) -> tuple[np.ndarray, np.ndarray]:
+    """The dense cloud thinned to DEPTH_VOXEL_M, and which of its points are
+    pieces or belongings (things that stand in front of surfaces)."""
+    pts = cloud.points.astype(np.float64)
+    keys = np.floor(pts / (DEPTH_VOXEL_M * metre)).astype(np.int64)
+    _, keep = np.unique(keys, axis=0, return_index=True)
+    front = (np.isin(cloud.labels[keep], list(in_front_labels)) if cloud.labels is not None and in_front_labels
+             else np.zeros(len(keep), bool))
+    return pts[keep], front
+
+
+def depth_buffer(px: np.ndarray, z: np.ndarray, front: np.ndarray, size) -> tuple[np.ndarray, np.ndarray]:
+    """The nearest depth per 1/DEPTH_REDUCE pixel of the points given, widened
+    by DEPTH_WIDEN so the spaces between points do not let a view through, and
+    whether that nearest thing is a piece or belonging."""
+    import cv2
+
+    w, h = size[0] // DEPTH_REDUCE, size[1] // DEPTH_REDUCE
+    ok = (z > 0) & np.isfinite(px).all(1)
+    q = np.where(ok[:, None], px / DEPTH_REDUCE, -1).astype(int)
+    ok &= (q[:, 0] >= 0) & (q[:, 0] < w) & (q[:, 1] >= 0) & (q[:, 1] < h)
+    flat, zz, ff = q[ok, 1] * w + q[ok, 0], z[ok], front[ok]
+    order = np.lexsort((zz, flat))
+    first = np.unique(flat[order], return_index=True)[1]
+    depth = np.full(h * w, np.inf, np.float32)
+    is_front = np.zeros(h * w, np.uint8)
+    depth[flat[order][first]] = zz[order][first]
+    is_front[flat[order][first]] = ff[order][first]
+    kernel = np.ones((DEPTH_WIDEN, DEPTH_WIDEN), np.uint8)
+    return cv2.erode(depth.reshape(h, w), kernel), cv2.dilate(is_front.reshape(h, w), kernel).astype(bool)
+
+
+def through_box(start: np.ndarray, ends: np.ndarray, lo: np.ndarray, hi: np.ndarray, stop: float) -> np.ndarray:
+    """Whether each segment from start to an end passes through the box,
+    leaving out the last `stop` of its length (the cell may sit on the box)."""
+    d = ends - start
+    length = np.linalg.norm(d, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t1 = (lo - start) / d
+        t2 = (hi - start) / d
+    t_near = np.nanmax(np.minimum(t1, t2), axis=1)
+    t_far = np.nanmin(np.maximum(t1, t2), axis=1)
+    t_end = 1 - stop / np.maximum(length, 1e-9)
+    return (t_near <= t_far) & (t_far > 0) & (t_near < t_end)
+
+
+def recover(targets: list[dict], views: list[dict], pts: np.ndarray, front: np.ndarray, metre: float,
+            boxes=(), world=None) -> None:
+    """Colour for each target's cells (solve frame) that frames saw with
+    nothing in the way, agreeing across viewpoints. A target is {cells,
+    normal, own}: `own` marks the occluder points on that surface itself,
+    which never count as being in its way. Nothing is seen through the
+    furniture's boxes either (`boxes`: (min, max) in the scene frame, `world`
+    the solve-to-scene rotation): the cloud of a bed has holes, the bed does
+    not. Adds `colours`, `ok` and `views` (how many frames saw each cell
+    clearly) to each target."""
+    found = [([], [], [], []) for _ in targets]
+    for vi, view in enumerate(views):
+        P, Z = project(pts, view)
+        W, H = view["size"]
+        centre_scene = view["centre"] @ world.T if world is not None else None
+        for t, (idx_all, rgb_all, centre_all, view_all) in zip(targets, found):
+            cells = t["cells"]
+            px, z = project(cells, view)
+            inside = (z > 0) & np.isfinite(px).all(1)
+            inside &= (px[:, 0] >= 0) & (px[:, 0] < W - 1) & (px[:, 1] >= 0) & (px[:, 1] < H - 1)
+            if not inside.any():
+                continue
+            ray = cells[inside] - view["centre"]
+            facing = -(ray @ t["normal"]) / np.maximum(np.linalg.norm(ray, axis=1), 1e-9)
+            idx = np.nonzero(inside)[0][facing >= MIN_FACING]
+            if not len(idx):
+                continue
+            others = ~t["own"]
+            depth, is_front = depth_buffer(P[others], Z[others], front[others], (W, H))
+            p, z_in = px[idx], z[idx]
+            q = np.minimum((p / DEPTH_REDUCE).astype(int), [depth.shape[1] - 1, depth.shape[0] - 1])
+            nearest = depth[q[:, 1], q[:, 0]]
+            margin = IN_THE_WAY_M * metre + 0.03 * z_in
+            clear = z_in <= nearest + margin                        # nothing nearer in the way
+            clear &= ~(is_front[q[:, 1], q[:, 0]] & (nearest < z_in + margin))   # nor a piece at the cell
+            m = view["mask"]
+            if m is not None:
+                mq = np.minimum((p * m.shape[0] / H).astype(int), [m.shape[1] - 1, m.shape[0] - 1])
+                clear &= ~m[mq[:, 1], mq[:, 0]]
+            idx, p = idx[clear], p[clear]
+            if len(idx) and len(boxes) and centre_scene is not None:
+                ends = cells[idx] @ world.T
+                blocked = np.zeros(len(idx), bool)
+                for lo, hi in boxes:
+                    blocked |= through_box(centre_scene, ends, lo, hi, NEAR_SURFACE_M * metre)
+                idx, p = idx[~blocked], p[~blocked]
+            if not len(idx):
+                continue
+            img = view["image"]
+            c = np.minimum((p / FRAME_REDUCE).astype(int), [img.shape[1] - 1, img.shape[0] - 1])
+            idx_all.append(idx)
+            rgb_all.append(img[c[:, 1], c[:, 0]].astype(np.float32))
+            centre_all.append(np.repeat(view["centre"][None], len(idx), 0))
+            view_all.append(np.full(len(idx), vi))
+    # Auto exposure and white balance change from frame to frame, so two frames that
+    # saw the same spot disagree on its colour. Each frame's gain per channel is
+    # measured against cells the dense cloud measured (targets with `truth`), then
+    # divided out of every sample before frames are compared.
+    gain = np.ones((len(views), 3), np.float32)
+    ratios = [[] for _ in views]
+    for t, (idx_all, rgb_all, _c, view_all) in zip(targets, found):
+        if "truth" in t and idx_all:
+            idx, rgb, vw = np.concatenate(idx_all), np.concatenate(rgb_all), np.concatenate(view_all)
+            ratio = t["truth"][idx] / np.maximum(rgb, 8.0)
+            for v in np.unique(vw):
+                ratios[v].append(ratio[vw == v])
+    for v, parts in enumerate(ratios):
+        if parts and sum(len(r) for r in parts) >= GAIN_MIN_CELLS:
+            gain[v] = np.clip(np.median(np.concatenate(parts), axis=0), 0.5, 2.0)
+    for t, (idx_all, rgb_all, centre_all, view_all) in zip(targets, found):
+        if "truth" in t:
+            continue
+        corrected = [r * gain[vw] for r, vw in zip(rgb_all, view_all)]
+        t["colours"], t["ok"], t["views"] = agree(len(t["cells"]), idx_all, corrected, centre_all, metre)
+    return gain
+
+
+def agree(n: int, idx_all, rgb_all, centre_all, metre: float):
+    """Per cell: the median colour of the frames that saw it, kept when
+    MIN_VIEWS frames at least MIN_BASELINE_M apart agree on its brightness."""
+    colours = np.zeros((n, 3), np.float32)
+    views_seen = np.zeros(n, int)
+    ok = np.zeros(n, bool)
+    if not idx_all:
+        return colours, ok, views_seen
+    idx = np.concatenate(idx_all)
+    rgb = np.concatenate(rgb_all)
+    centres = np.concatenate(centre_all)
+    order = np.argsort(idx, kind="stable")
+    idx, rgb, centres = idx[order], rgb[order], centres[order]
+    starts = np.r_[0, np.nonzero(np.diff(idx))[0] + 1]
+    ends = np.r_[starts[1:], len(idx)]
+    lum = rgb @ np.array([0.299, 0.587, 0.114], np.float32)
+    for a, b in zip(starts, ends):
+        cell = idx[a]
+        views_seen[cell] = b - a
+        if b - a < MIN_VIEWS:
+            continue
+        if np.linalg.norm(centres[a:b] - centres[a], axis=1).max() < MIN_BASELINE_M * metre:
+            continue
+        lv = lum[a:b]
+        if np.median(np.abs(lv - np.median(lv))) > MAX_SPREAD:
+            continue
+        colours[cell] = np.median(rgb[a:b], axis=0)
+        ok[cell] = True
+    return colours, ok, views_seen
+
+
 # ---------------------------------------------------------------- pattern
 def period(lum: np.ndarray, seen: np.ndarray, cell: float) -> tuple[int | None, int | None, float]:
     """The repeat along columns and along rows (in cells) of a pattern, from the
     masked autocorrelation of what was seen; None along an axis without one."""
     m = seen.astype(np.float64)
-    if m.sum() < 400:
-        return None, None, 0.0
+    if m.sum() < 400 or lum[seen].std() < PERIOD_MIN_CONTRAST:
+        return None, None, 0.0          # too little measured, or too plain to have a pattern
     x = np.where(seen, lum - lum[seen].mean(), 0.0)
     shape = [2 * s for s in x.shape]
     fx, fm = np.fft.rfft2(x, shape), np.fft.rfft2(m, shape)
@@ -213,7 +442,12 @@ def period(lum: np.ndarray, seen: np.ndarray, cell: float) -> tuple[int | None, 
             found.append(None)
             continue
         k = int(np.argmax(line))
-        if line[k] >= PERIOD_MIN_CORR and 0 < k < len(line) - 1 and line[k] >= line[k - 1] and line[k] >= line[k + 1]:
+        # A real pattern repeats: the second repeat must also correlate (checked when it lies in range).
+        twice = corr[0, 2 * (lo + k)] if axis == 1 and 2 * (lo + k) < corr.shape[1] else (
+            corr[2 * (lo + k), 0] if axis == 0 and 2 * (lo + k) < corr.shape[0] else None)
+        repeats = twice is None or twice >= PERIOD_REPEAT_SHARE * line[k]
+        if (line[k] >= PERIOD_MIN_CORR and repeats and 0 < k < len(line) - 1
+                and line[k] >= line[k - 1] and line[k] >= line[k + 1]):
             found.append(lo + k)
             strength.append(float(line[k]))
         else:
@@ -221,253 +455,61 @@ def period(lum: np.ndarray, seen: np.ndarray, cell: float) -> tuple[int | None, 
     return found[0], found[1], (min(strength) if strength else 0.0)
 
 
-def bare(image: np.ndarray, seen: np.ndarray, named_share: np.ndarray) -> np.ndarray:
-    """The cells that show the surface itself: mostly unnamed points (no piece,
-    pinboard or clothes there), in a colour near the surface's usual one."""
-    plain = seen & (named_share < 0.3)
-    if plain.sum() < 50:
-        return plain
-    median = np.median(image[plain], axis=0)
-    dist = np.linalg.norm(image - median, axis=-1)
-    spread = np.median(dist[plain]) + 1e-6
-    return plain & (dist < 3.0 * spread + 12)
+def pattern_text(pu, pv, cell_m: float) -> str | None:
+    found = [f"{p * cell_m * 100:.0f} cm" for p in (pu, pv) if p]
+    return " by ".join(found) if found else None
 
 
-def seen_patches(ok: np.ndarray) -> list[tuple[int, int]]:
-    """Top-left corners of PATCH_CELLS squares wholly bare surface, for texture."""
+def patches(mask: np.ndarray, min_cells: float) -> np.ndarray:
+    """The mask without its lone cells and specks: opened by a 3x3 square,
+    then only the connected patches of at least min_cells kept."""
     import cv2
 
-    whole = cv2.erode(ok.astype(np.uint8), np.ones((PATCH_CELLS, PATCH_CELLS), np.uint8),
-                      anchor=(0, 0), borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool)
-    rr, cc = np.nonzero(whole[:ok.shape[0] - PATCH_CELLS + 1, :ok.shape[1] - PATCH_CELLS + 1])
-    step = max(1, len(rr) // 4000)
-    return list(zip(rr[::step], cc[::step]))
+    opened = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    keep = np.zeros(count, bool)
+    keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_cells
+    return keep[labels] & mask
 
 
-def smooth_over(image: np.ndarray, ok: np.ndarray, sigma: float) -> np.ndarray:
-    """The surface's slow shading: a blur of the bare cells, normalised so the
-    gaps take the shading around them."""
+def interpolate(image: np.ndarray, seen: np.ndarray, todo: np.ndarray) -> np.ndarray:
+    """The measured colours carried a few cells into the cloud's own sampling
+    gaps (todo), nothing further."""
     import cv2
 
-    w = cv2.GaussianBlur(ok.astype(np.float32), (0, 0), sigma)
-    out = np.stack([cv2.GaussianBlur(np.where(ok, image[..., k], 0).astype(np.float32), (0, 0), sigma)
-                    for k in range(3)], -1)
-    base = out / np.maximum(w, 1e-4)[..., None]
-    if (w < 1e-3).any():                      # far beyond any bare cell: the surface's usual colour
-        base[w < 1e-3] = np.median(image[ok], axis=0) if ok.any() else 200
-    return base
+    src = np.clip(image, 0, 255).astype(np.uint8)
+    mask = (todo & ~seen).astype(np.uint8)
+    if not mask.any():
+        return image
+    out = cv2.inpaint(src, mask, CLOSE_CELLS, cv2.INPAINT_TELEA).astype(np.float32)
+    return np.where(seen[..., None], image, out)
 
 
-def fill(image: np.ndarray, seen: np.ndarray, todo: np.ndarray, pu, pv, ok=None) -> tuple[np.ndarray, int]:
-    """Colours for the cells in `todo`. Where the surface repeats (tiles), each
-    takes the bare cell one or more periods away. Elsewhere: the surface's
-    slow shading carried in from around the gap, with fine texture laid on it
-    from patches of bare surface (shading and texture apart, so patches do not
-    show as blocks)."""
-    out = image.copy()
-    ok = seen if ok is None else ok
-    rows, cols = seen.shape
-    copied = 0
-    if pu or pv:
-        rr, cc = np.nonzero(todo)
-        steps = sorted({(a, b) for a in range(-6, 7) for b in range(-6, 7) if (a or b)
-                        and (pv or a == 0) and (pu or b == 0)}, key=lambda ab: abs(ab[0]) + abs(ab[1]))
-        left = np.ones(len(rr), bool)
-        for a, b in steps:
-            r2, c2 = rr + a * (pv or 0), cc + b * (pu or 0)
-            hit = left & (r2 >= 0) & (r2 < rows) & (c2 >= 0) & (c2 < cols)
-            hit[hit] &= ok[r2[hit], c2[hit]]
-            out[rr[hit], cc[hit]] = image[r2[hit], c2[hit]]
-            left &= ~hit
-            if not left.any():
-                break
-        copied = int((~left).sum())
-        todo = todo.copy()
-        todo[rr[~left], cc[~left]] = False
-    if todo.any():
-        base = smooth_over(image, ok, SHADING_CELLS)
-        texture = np.zeros_like(image)
-        patches = seen_patches(ok)
-        if patches:
-            detail = image - smooth_over(image, ok, PATCH_CELLS / 2)
-            rng = np.random.default_rng(0)
-            rr, cc = np.nonzero(todo)
-            for r0 in range(rr.min() - rr.min() % PATCH_CELLS, rr.max() + 1, PATCH_CELLS):
-                for c0 in range(cc.min() - cc.min() % PATCH_CELLS, cc.max() + 1, PATCH_CELLS):
-                    block = texture[r0:r0 + PATCH_CELLS, c0:c0 + PATCH_CELLS]
-                    pr, pc = patches[rng.integers(len(patches))]
-                    block[...] = detail[pr:pr + block.shape[0], pc:pc + block.shape[1]]
-        out[todo] = base[todo] + TEXTURE_STRENGTH * texture[todo]
-    return out, copied
-
-
-def tile_grid(image: np.ndarray, ok: np.ndarray, period_u: int, period_v: int) -> dict | None:
-    """Fit a tile grid of the given period to what was seen: the phase whose
-    grout lines (darker or lighter than the tiles) best match the seen cells,
-    the grout's contrast, and each tile's colour where it was seen."""
-    lum = image @ np.array([0.299, 0.587, 0.114], np.float32)
-    if ok.sum() < 30:
-        return None
-    rows, cols = ok.shape
-    rr, cc = np.mgrid[0:rows, 0:cols]
-    best = None
-    for pu in range(period_u):
-        for pv in range(period_v):
-            line = (((cc - pu) % period_u) == 0) | (((rr - pv) % period_v) == 0)
-            on, off = ok & line, ok & ~line
-            if on.sum() < 5 or off.sum() < 5:
-                continue
-            contrast = float(np.median(lum[on]) - np.median(lum[off]))
-            if best is None or abs(contrast) > abs(best["contrast"]):
-                best = {"phase": (pu, pv), "contrast": contrast}
-    if best is None:
-        return None
-    best["period"] = (period_u, period_v)
-    return best
-
-
-def tile_fill(base: np.ndarray, grid_fit: dict, todo: np.ndarray, seen_contrast: bool) -> np.ndarray:
-    """Tiles laid into `todo` on the fitted grid: the surface's shading as the
-    tile, the grout lines darkened or lightened by the measured contrast."""
-    out = base.copy()
-    rows, cols = todo.shape
-    rr, cc = np.mgrid[0:rows, 0:cols]
-    (pu, pv), (fu, fv) = grid_fit["phase"], grid_fit["period"]
-    line = (((cc - pu) % fu) == 0) | (((rr - pv) % fv) == 0)
-    contrast = grid_fit["contrast"] if seen_contrast else -12.0     # faint grout when none measured
-    tile_id = ((cc - pu) // fu) * 1000 + ((rr - pv) // fv)
-    rng = np.random.default_rng(3)
-    jitter = {t: rng.normal(0, 3.0) for t in np.unique(tile_id[todo])}  # tiles are never all one shade
-    shade = np.vectorize(lambda t: jitter.get(t, 0.0))(tile_id)
-    out[todo] = base[todo] + shade[todo][:, None]
-    grout = todo & line
-    out[grout] = base[grout] + contrast
-    return out
-
-
-def along_rows(image: np.ndarray, ok: np.ndarray, todo: np.ndarray) -> np.ndarray:
-    """A wall's colour carried across each gap along its own row, between the
-    bare cells either side: a skirting, a painted band, a change of paint
-    continues at its height. Rows with no bare cell on both sides keep NaN."""
-    out = np.full(image.shape, np.nan, np.float32)
-    for r in np.nonzero(todo.any(1))[0]:
-        cols = np.nonzero(ok[r])[0]
-        if len(cols) < 2:
-            continue
-        gap = np.nonzero(todo[r])[0]
-        inside = (gap > cols[0]) & (gap < cols[-1])
-        for k in range(3):
-            out[r, gap[inside], k] = np.interp(gap[inside], cols, image[r, cols, k])
-    return out
-
-
-def dominant(image: np.ndarray, ok: np.ndarray) -> np.ndarray:
-    """The bare cells in the surface's main colour: the largest of a few colour
-    clusters, so a laminate, a shadow or a scuff seen on it is not copied."""
+def picture(surface: dict, image, seen, part, gaps, filled, known, path: Path, cell: float):
+    """Two panels: the surface as the cloud measured it, each gap outlined and
+    numbered (red never filmed, yellow behind a piece, blue an opening); and
+    with what was recovered from frames, unseen cells in a grey hatch."""
     import cv2
 
-    if ok.sum() < 30:
-        return ok
-    data = image[ok].astype(np.float32)
-    k = 3
-    _, labels, centres = cv2.kmeans(data, k, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5),
-                                    3, cv2.KMEANS_PP_CENTERS)
-    main = np.bincount(labels.ravel(), minlength=k).argmax()
-    out = np.zeros_like(ok)
-    out[ok] = labels.ravel() == main
-    return out
+    def panel(img, have):
+        p = np.clip(img, 0, 255).astype(np.uint8).copy()
+        rows, cols = np.indices(have.shape)
+        hatch = ((rows + cols) // 3) % 2 == 0
+        p[~have] = np.where(hatch[~have, None], 90, 60)
+        p[~part] = (25, 25, 25)
+        return cv2.cvtColor(p[::-1].copy(), cv2.COLOR_RGB2BGR)   # rows run up the surface
 
-
-def guided_fill(image: np.ndarray, seen: np.ndarray, todo: np.ndarray, ok: np.ndarray, guide: dict,
-                kind: str, cell_m: float, metre_rows: float) -> tuple[np.ndarray, str]:
-    """A refill that follows what Claude saw: tiles of the size it named, fitted
-    to the seen part; a wall's bands at their heights; the wall's own colour
-    carried along each row; then the bare surface's fine texture."""
-    how = []
-    flat = guide.get("finish") in ("flat", "plain") or (not guide.get("tiles_cm") and guide.get("fill_matches") is False)
-    if flat:
-        # Claude saw a plain surface: only its main colour, shaded gently,
-        # nothing copied, and the seam with the seen part blended.
-        ok = dominant(image, ok)
-        how.append("plain, from its main colour only")
-    base = smooth_over(image, ok, SHADING_CELLS * (2 if flat else 1))
-    if kind == "wall" and not flat:
-        rows_fill = along_rows(smooth_over(image, ok, 3), ok, todo)
-        have = ~np.isnan(rows_fill[..., 0])
-        base[have] = 0.5 * base[have] + 0.5 * rows_fill[have]
-        how.append("carried along rows")
-        for band in guide.get("bands") or []:
-            try:
-                lo, hi = float(band["from_m"]), float(band["to_m"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            r0, r1 = int(lo / cell_m), int(np.ceil(hi / cell_m))
-            rows = slice(max(0, r0), min(image.shape[0], r1))
-            seen_band = seen[rows]
-            if seen_band.sum() >= 10:
-                colour = np.median(image[rows][seen_band], axis=0)
-                band_todo = np.zeros_like(todo)
-                band_todo[rows] = todo[rows]
-                base[band_todo] = colour
-                how.append(f"{band.get('what') or 'band'} at {lo:.2f}-{hi:.2f} m")
-    out = image.copy()
-    tiles = guide.get("tiles_cm")
-    if tiles and isinstance(tiles, (list, tuple)) and len(tiles) == 2:
-        try:
-            fu, fv = (max(2, int(round(float(t) / 100 / cell_m))) for t in tiles)
-        except (TypeError, ValueError):
-            fu = fv = None
-        if fu:
-            fit = tile_grid(image, ok, fu, fv)
-            if fit:
-                seen_contrast = abs(fit["contrast"]) >= 4
-                out = tile_fill(base, fit, todo, seen_contrast)
-                out[~todo] = image[~todo]
-                how.append(f"{tiles[0]} x {tiles[1]} cm tiles fitted to the seen part"
-                           + ("" if seen_contrast else ", faint grout"))
-                return out, "; ".join(how)
-    texture = np.zeros_like(image)
-    patches = [] if flat else seen_patches(ok)
-    if patches and todo.any():
-        detail = image - smooth_over(image, ok, PATCH_CELLS / 2)
-        rng = np.random.default_rng(0)
-        rr, cc = np.nonzero(todo)
-        for r0 in range(rr.min() - rr.min() % PATCH_CELLS, rr.max() + 1, PATCH_CELLS):
-            for c0 in range(cc.min() - cc.min() % PATCH_CELLS, cc.max() + 1, PATCH_CELLS):
-                block = texture[r0:r0 + PATCH_CELLS, c0:c0 + PATCH_CELLS]
-                pr, pc = patches[rng.integers(len(patches))]
-                block[...] = detail[pr:pr + block.shape[0], pc:pc + block.shape[1]]
-    out[todo] = base[todo] + TEXTURE_STRENGTH * texture[todo]
-    if flat:
-        import cv2
-        # Blend a band of filled cells along the seam into the seen colour.
-        edge = cv2.dilate(seen.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool) & todo
-        soft = smooth_over(np.where(todo[..., None], out, image), seen | todo, 3)
-        out[edge] = soft[edge]
-    return out, "; ".join(how) or "shading and texture"
-
-
-# ---------------------------------------------------------------- Claude
-def picture(surface: dict, image, seen, part, gaps, filled, path: Path, cell: float):
-    """Two panels: the surface as seen with each gap outlined and numbered
-    (red never filmed, yellow behind a piece, blue an opening), and as filled."""
-    import cv2
-
-    def panel(img):
-        p = np.clip(img, 0, 255).astype(np.uint8)[::-1].copy()   # rows run up the surface: flip to look at it
-        p[~part[::-1]] = (40, 40, 40)
-        return cv2.cvtColor(p, cv2.COLOR_RGB2BGR)
-
-    left = panel(np.where(seen[..., None], image, 0))
-    right = panel(filled)
+    left = panel(image, seen)
+    right = panel(filled, known)
     colour = {"unfilmed": (60, 60, 255), "hidden": (0, 220, 255), "opening": (255, 140, 40)}
     for g in gaps:
         m = g["mask"][::-1].astype(np.uint8)
-        contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(left, contours, -1, colour[g["kind"]], 2)
-        ys, xs = np.nonzero(m)
-        cv2.putText(left, str(g["id"]), (int(xs.mean()), int(ys.mean())), 0, 0.8, (255, 255, 255), 3)
-        cv2.putText(left, str(g["id"]), (int(xs.mean()), int(ys.mean())), 0, 0.8, colour[g["kind"]], 2)
+        for side in (left, right):
+            contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(side, contours, -1, colour[g["kind"]], 2)
+            ys, xs = np.nonzero(m)
+            cv2.putText(side, str(g["id"]), (int(xs.mean()), int(ys.mean())), 0, 0.8, (255, 255, 255), 3)
+            cv2.putText(side, str(g["id"]), (int(xs.mean()), int(ys.mean())), 0, 0.8, colour[g["kind"]], 2)
     gap = np.full((left.shape[0], 12, 3), 255, np.uint8)
     both = np.hstack([left, gap, right])
     scale = min(1400 / both.shape[1], 900 / both.shape[0])      # large enough for Claude to read
@@ -506,45 +548,40 @@ def facing_frames(space: Path, surface: dict, world: np.ndarray, metre: float, c
     return [space / "workspace" / "images" / n for _, n in sorted(scored, reverse=True)[:count]]
 
 
-PROMPT = """You are finishing the room model of a real room filmed with a phone. This is the {name} ({kind}, {w:.2f} m x {h:.2f} m).
+PROMPT = """You are checking the room model of a real room filmed with a phone. Nothing in it may be invented: every colour must come from the video. This is the {name} ({kind}, {w:.2f} m x {h:.2f} m).
 
-The first image has two panels. Left: the {kind} as the video measured it, looking straight at it (for the floor and ceiling, from above), black where no frame saw it, dark grey outside the room. Each gap is outlined and numbered: red never filmed, yellow behind or under a piece of furniture, blue an opening (a door detected in this wall). Right: the same {kind} with every gap filled from what surrounds it{pattern_note}. The other images are frames of the video that face this {kind}; use them to see what it really looks like.
+The first image has two panels, looking straight at the {kind} (for the floor and ceiling, from above), dark outside the room. Left: what the dense cloud measured; grey hatching where it has nothing. Each gap is outlined and numbered: red not in the cloud's frames, yellow behind or under a piece of furniture, blue an opening (a door detected in this wall). Right: the same, with cells recovered from other frames of the video that saw that spot with nothing in the way and agreed on its colour; grey hatching is what no frame saw, which stays unknown. The other images are frames of the video that face this {kind}.
 
 The gaps:
 {gaps}
 
-For each gap decide whether the filled-in version is what is really there, as far as you can tell:
-- "fill": the surface simply continues there (floor under a bed, wall behind a wardrobe, paint or tiles the phone missed). Filled points are always shown as inferred, never as measured.
-- "open": it is not this surface there (a doorway or window, a mirror, a niche, a room beyond), so leave it empty.
-Also say, in a few words, what the {kind} looks like (its pattern or finish: "beige 60 cm square tiles", "plain white paint", "textured white plaster"), and whether the fill on the right matches it. Describe its structure so the fill can follow it:
-- "finish": "flat" for plain paint or plaster of one colour (only soft shading), "textured" for a visible texture, "tiled" for tiles or panels.
-- "tiles_cm": the size of one tile or panel, [along, across] in centimetres, when the {kind} is tiled or panelled (judge it from the frames, using the door, about 80 x 205 cm, and the furniture for scale); null when it is not.
-- "bands" (walls only): horizontal bands that run along the wall at a fixed height, as [{{"from_m": height above the floor, "to_m": ..., "what": "skirting" or "dado" or ...}}]; leave out objects that only cover part of the wall (a pinboard, a picture).
-- "fix": when the fill does not match, what is wrong with it, in a few words.
+For each gap decide:
+- "keep": what was recovered there is this {kind} as the frames show it (or nothing was recovered and the hatching is right).
+- "drop": what was recovered there is something else painted onto the {kind}: clothes, the side of the bed, a bag, a reflection, a shadow of a piece. It will be left unknown instead.
+- "open": it is not this surface (a doorway, window, mirror or niche, a room beyond), so it stays empty.
+Also say in a few words what the {kind} looks like in the frames ("beige 60 cm tiles", "plain white paint").
 
-Reply as JSON: {{"pattern": "...", "fill_matches": true or false, "finish": "flat" or "textured" or "tiled", "tiles_cm": [60, 60] or null, "bands": [], "fix": "...", "gaps": [{{"id": 1, "decision": "fill" or "open", "what": "..."}}], "record": {{"doubts": [...]}}}}"""
-
-RECHECK = """This is the {name} again ({kind}). You said the earlier fill did not match ({fix}). It has been filled again following what you described: {how}. The first image is the {kind} as seen (left) and as filled now (right); the others are frames facing it.
-
-Does the fill now match what the {kind} really looks like, as far as a fill of unseen parts can? Reply as JSON: {{"fill_matches": true or false, "fix": "what is still wrong, if anything"}}"""
+Reply as JSON: {{"looks": "...", "gaps": [{{"id": 1, "decision": "keep" or "drop" or "open", "why": "..."}}], "record": {{"doubts": [...]}}}}"""
 
 
-def ask_claude(space: Path, surface: dict, gaps: list[dict], image, seen, part, filled, world, metre, cell,
-               pattern: str | None, advisor) -> dict | None:
-    work = space / "gaps"
-    work.mkdir(exist_ok=True)
-    pic = picture(surface, image, seen, part, gaps, filled, work / f"{surface['name'].replace(' ', '-')}.jpg", cell)
+def ask_claude(space: Path, surface: dict, gaps: list[dict], pic: Path, world, metre, advisor,
+               pattern: str | None = None, pattern_after: str | None = None) -> dict | None:
     frames = facing_frames(space, surface, world, metre, SHOW_FRAMES)
     listing = "\n".join(f"{g['id']}: {g['area'] / metre ** 2:.2f} m², {GAP_KINDS[g['kind']]}"
-                        + (f" ({', '.join(g['behind'])})" if g.get("behind") else "") for g in gaps)
+                        + (f" ({', '.join(g['behind'])})" if g.get("behind") else "")
+                        + f"; {g['recovered_share']:.0%} recovered from frames" for g in gaps)
     w, h = (s / metre for s in surface["size"])
-    note = f"; it repeats every {pattern}, and the fill copies that repeat" if pattern else ""
-    return advisor.ask_json(PROMPT.format(name=surface["name"], kind=surface["kind"], w=w, h=h, gaps=listing,
-                                          pattern_note=note), [pic, *frames], max_tokens=2000)
+    note = ("Pattern recognition on the measured part: " + (f"it repeats every {pattern}" if pattern else "no repeating pattern")
+            + "; with the recovered cells added: " + (f"every {pattern_after}" if pattern_after else "none")
+            + ". A recovered patch that breaks a pattern the measured part clearly has is suspect.")
+    return advisor.ask_json(PROMPT.format(name=surface["name"], kind=surface["kind"], w=w, h=h, gaps=listing + "\n" + note),
+                            [pic, *frames], max_tokens=1500)
 
 
 # ---------------------------------------------------------------- main
 def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print) -> dict:
+    import cv2
+
     shapes = json.loads((space / "shapes.json").read_text())
     metre = json.loads((space / "densify.json").read_text())["colmap_units_per_metre"]
     world = np.array(shapes["world"], float)
@@ -559,20 +596,29 @@ def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print)
         from advisor import BRIEF_PATH, Advisor
         advisor = Advisor(system=BRIEF_PATH.read_text() if BRIEF_PATH.exists() else None)
         if not advisor.available:
-            log(f"Claude is not available ({advisor.reason}); gaps are filled without its check")
+            log(f"Claude is not available ({advisor.reason}); recovered cells are kept without its check")
             advisor = None
     # Labels of things that stand in front of a surface rather than being part
     # of it (furniture, storage, what sits on them, belongings).
     from semantics import planned_vocabulary
     vocabulary = planned_vocabulary(space)
     names = cloud.label_names or []
-    in_front = np.array([i for i, n in enumerate(names)
-                         if vocabulary.role(n) in ("furniture", "storage", "on_furniture", "loose")], int)
-    record = {"cell_m": cell_m, "surfaces": []}
-    new_points, new_colours, new_normals = [], [], []
+    front_roles = ("furniture", "storage", "on_furniture", "loose")
+    in_front = np.array([i for i, n in enumerate(names) if vocabulary.role(n) in front_roles], int)
+    masks_dir = space / "workspace" / "masks"
+    mask_names = sorted({p.name.split(".")[0].replace("-", " ") for p in masks_dir.glob("*.v3.npz")}
+                        if masks_dir.exists() else set())
+    front_masks = [n for n in mask_names if vocabulary.role(n) in front_roles]
+    views = load_views(space, metre, front_masks, log)
+    pts, front = occluders(cloud, metre, set(in_front.tolist()))
+    pts_scene = pts @ world.T
+    record = {"cell_m": cell_m, "rule": "only colours the video saw; the rest is unseen", "surfaces": []}
+    out = {"real": ([], [], []), "unseen": ([], [], [])}
+    work = space / "gaps"
+    work.mkdir(exist_ok=True)
+    states, references = [], []
     for surface in surfaces(shapes, metre):
         image, seen, part, uv = grid(surface, scene, colours, cell, near, cloud.labels, in_front)
-        ok = bare(image, seen, surface["named_share"])
         holes, closed, _ = find_gaps(seen, part, cell)
         covered = cover(surface, pieces, uv, metre, cell, seen.shape)
         # Each unseen cell takes its cause: an opening in the wall, the piece in
@@ -583,7 +629,6 @@ def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print)
             cause[holes & m & (cause == "")] = name
         cause[holes & (cause == "")] = "-"
         gaps = []
-        import cv2
         for name in sorted({c for c in cause.ravel() if c}):
             count, labels = cv2.connectedComponents((cause == name).astype(np.uint8), connectivity=8)
             for k in range(1, count):
@@ -598,97 +643,119 @@ def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print)
                 g["small"] = g["area"] < MIN_GAP_M2 * metre ** 2
                 gaps.append(g)
         gaps.sort(key=lambda g: -g["area"])
+        # Pattern recognition: the repeat (tiles, panels) of what was measured. It is
+        # an identifier, never a paint: it tells Claude what to expect and is
+        # checked against what the frames gave back.
         lum = image @ np.array([0.299, 0.587, 0.114], np.float32)
-        pu, pv, strength = period(lum, ok, cell_m)
-        pattern = None
-        if pu or pv:
-            pattern = " by ".join(f"{p * cell_m * 100:.0f} cm" for p in (pu, pv) if p)
-        todo = holes.copy()
-        # Openings stay open unless Claude says otherwise; small holes are filled.
+        pu, pv, strength = period(lum, seen & part, cell_m)
+        pattern = pattern_text(pu, pv, cell_m)
+        # The cloud's sampling gaps: measured colours carried a few cells.
+        between = closed & ~seen & part
+        filled = interpolate(image, seen, between)
+        # Real gaps: what other frames saw. Openings are not looked into.
+        look = holes.copy()
         for g in gaps:
             if g["kind"] == "opening":
-                todo &= ~g["mask"]
-        filled, copied = fill(image, seen | (closed & ~holes), todo | (closed & ~seen & part), pu, pv, ok)
-        shown = [g for g in gaps if not g.get("small")][:MAX_SHOWN]     # the rest are filled as they are
+                look &= ~g["mask"]
+        rr, cc = np.nonzero(look)
+        uu, vv = uv
+        scene_cells = surface["origin"] + uu[rr, cc, None] * surface["u"] + vv[rr, cc, None] * surface["v"]
+        rel = pts_scene - surface["origin"]
+        own = np.abs(rel @ surface["normal"]) < near
+        ref_r, ref_c = np.nonzero(seen & part)
+        if len(ref_r) > REFERENCE_CELLS:
+            pick = np.random.default_rng(0).choice(len(ref_r), REFERENCE_CELLS, replace=False)
+            ref_r, ref_c = ref_r[pick], ref_c[pick]
+        ref_cells = surface["origin"] + uu[ref_r, ref_c, None] * surface["u"] + vv[ref_r, ref_c, None] * surface["v"]
+        references.append({"cells": ref_cells @ world, "normal": surface["normal"] @ world,
+                           "own": np.abs((pts_scene - surface["origin"]) @ surface["normal"]) < near,
+                           "truth": image[ref_r, ref_c].astype(np.float32)})
+        states.append({"surface": surface, "image": image, "seen": seen, "part": part, "uv": uv,
+                       "gaps": gaps, "between": between, "filled": filled, "rr": rr, "cc": cc,
+                       "target": {"cells": scene_cells @ world, "normal": surface["normal"] @ world, "own": own}})
+    # Every built piece is solid except openings (a door or window is looked into, not through).
+    boxes = [(np.array(b["min"], float), np.array(b["max"], float)) for b in pieces
+             if b["name"] not in ("door", "window")]
+    gain = recover([st["target"] for st in states] + references, views, pts, front, metre, boxes, world)
+    log(f"  exposure corrected per frame: gain {np.percentile(gain, 5):.2f} to {np.percentile(gain, 95):.2f}")
+    for st in states:
+        surface, image, seen, part, uv = st["surface"], st["image"], st["seen"], st["part"], st["uv"]
+        gaps, between, filled, rr, cc = st["gaps"], st["between"], st["filled"], st["rr"], st["cc"]
+        uu, vv = uv
+        got, ok = st["target"]["colours"], st["target"]["ok"]
+        recovered = np.zeros(seen.shape, bool)
+        recovered[rr[ok], cc[ok]] = True
+        recovered = patches(recovered, MIN_PATCH_M2 / cell_m ** 2)
+        filled[rr[ok], cc[ok]] = got[ok]
+        for g in gaps:
+            g["recovered_share"] = float((recovered & g["mask"]).sum() / max(g["mask"].sum(), 1))
+        shown = [g for g in gaps if not g.get("small")][:MAX_SHOWN]
         for k, g in enumerate(shown, 1):
             g["id"] = k
+        known = seen | between | recovered
+        pu2, pv2, strength2 = period(image @ np.array([0.299, 0.587, 0.114], np.float32) * 0 + np.where(
+            recovered | seen, filled @ np.array([0.299, 0.587, 0.114], np.float32), 0), recovered | seen, cell_m)
+        pattern_after = pattern_text(pu2, pv2, cell_m)
+        pic = picture(surface, image, seen, part, shown, filled, known,
+                      work / f"{surface['name'].replace(' ', '-')}.jpg", cell)
         verdict = None
-        if advisor is None and shown:
-            (space / "gaps").mkdir(exist_ok=True)
-            picture(surface, image, seen, part, shown, filled,
-                    space / "gaps" / f"{surface['name'].replace(' ', '-')}.jpg", cell)
         if advisor is not None and shown:
-            verdict = ask_claude(space, surface, shown, image, seen, part, filled, world, metre, cell,
-                                 pattern, advisor)
+            verdict = ask_claude(space, surface, shown, pic, world, metre, advisor, pattern, pattern_after)
         decisions = {}
-        if verdict:
-            for d in verdict.get("gaps") or []:
-                try:
-                    decisions[int(d.get("id"))] = d
-                except (TypeError, ValueError):
-                    continue
-        keep = todo | (closed & ~seen & part)
-        for g in shown:
-            d = decisions.get(g["id"])
-            decision = (d or {}).get("decision") or ("open" if g["kind"] == "opening" else "fill")
-            g["decision"], g["what"] = decision, (d or {}).get("what")
+        for d in (verdict or {}).get("gaps") or []:
+            try:
+                decisions[int(d.get("id"))] = d
+            except (TypeError, ValueError):
+                continue
+        opened = np.zeros(seen.shape, bool)
+        for g in gaps:
+            d = decisions.get(g.get("id"), {}) if "id" in g else {}
+            decision = d.get("decision") or ("open" if g["kind"] == "opening" else "keep")
+            g["decision"], g["why"] = decision, d.get("why")
+            if decision in ("drop", "open"):
+                recovered &= ~g["mask"]
             if decision == "open":
-                keep &= ~g["mask"]
-            elif g["kind"] == "opening":
-                keep |= g["mask"]
-                filled, _ = fill(filled, seen | keep & ~g["mask"], g["mask"], pu, pv, ok)
-        pattern_used = pattern or "plain"
-        fill_matches = (verdict or {}).get("fill_matches")
-        tiles_named = bool((verdict or {}).get("tiles_cm"))
-        if verdict and (fill_matches is False or tiles_named):
-            # Fill again following the structure Claude saw: the tile size it
-            # named, fitted to the part that was seen (the unseen rest of an
-            # under-filmed floor takes the same grid), a wall's bands at their
-            # heights, its colour along each row. Then Claude looks again.
-            filled, how = guided_fill(image, seen, keep, ok, verdict, surface["kind"], cell_m, cell_m)
-            pattern_used = how
-            if fill_matches is False:
-                pic = picture(surface, image, seen, part, shown, filled,
-                              space / "gaps" / f"{surface['name'].replace(' ', '-')}-refill.jpg", cell)
-                frames = facing_frames(space, surface, world, metre, SHOW_FRAMES)
-                again = advisor.ask_json(RECHECK.format(name=surface["name"], kind=surface["kind"],
-                                                        fix=verdict.get("fix") or "no reason given", how=how),
-                                         [pic, *frames], max_tokens=600)
-                if again is not None:
-                    fill_matches = again.get("fill_matches")
-                    verdict["fix_after_refill"] = again.get("fix")
-        rr, cc = np.nonzero(keep)
-        uu, vv = uv
-        pos = surface["origin"] + uu[rr, cc, None] * surface["u"] + vv[rr, cc, None] * surface["v"]
-        new_points.append(pos)
-        new_colours.append(np.clip(filled[rr, cc], 0, 255))
-        new_normals.append(np.repeat(surface["normal"][None], len(pos), 0))
+                opened |= g["mask"]
+        real = (between | recovered) & part
+        unseen = part & ~seen & ~real & ~opened
+        for key, mask, colour in (("real", real, None), ("unseen", unseen, UNSEEN_COLOUR)):
+            r, c = np.nonzero(mask)
+            pos = surface["origin"] + uu[r, c, None] * surface["u"] + vv[r, c, None] * surface["v"]
+            out[key][0].append(pos)
+            out[key][1].append(np.clip(filled[r, c], 0, 255) if colour is None
+                               else np.tile(np.array(colour, float), (len(r), 1)))
+            out[key][2].append(np.repeat(surface["normal"][None], len(pos), 0))
         area = part.sum() * cell_m ** 2
+        m2 = lambda m: round(float((m & part).sum()) * cell_m ** 2, 2)   # noqa: E731
         entry = {"surface": surface["name"], "kind": surface["kind"], "area_m2": round(area, 2),
                  "seen_share": round(float((seen & part).sum() / max(part.sum(), 1)), 3),
-                 "filled_m2": round(len(rr) * cell_m ** 2, 2), "pattern_measured": pattern,
-                 "pattern_used": pattern_used, "pattern_claude": (verdict or {}).get("pattern"),
-                 "fill_matches": fill_matches, "fill_matched_first": (verdict or {}).get("fill_matches"),
-                 "tiles_cm": (verdict or {}).get("tiles_cm"), "bands": (verdict or {}).get("bands"),
-                 "fix": (verdict or {}).get("fix"), "fix_after_refill": (verdict or {}).get("fix_after_refill"),
+                 "measured_m2": m2(seen), "interpolated_m2": m2(between), "recovered_m2": m2(recovered),
+                 "unseen_m2": m2(unseen), "open_m2": m2(opened),
+                 "known_share": round(float(((seen | real) & part).sum() / max(part.sum(), 1)), 3),
+                 "looks": (verdict or {}).get("looks"), "pattern_measured": pattern,
+                 "pattern_with_recovered": pattern_after,
                  "gaps": [{"id": g["id"], "area_m2": round(g["area"] / metre ** 2, 2), "kind": g["kind"],
-                           "behind": g.get("behind"), "decision": g.get("decision"), "what": g.get("what")}
-                          for g in shown]}
-        record["surfaces"].append(entry)
+                           "behind": g.get("behind"), "recovered_share": round(g["recovered_share"], 3),
+                           "decision": g.get("decision"), "why": g.get("why")} for g in shown]}
         if verdict and (verdict.get("record") or {}).get("doubts"):
             entry["doubts"] = verdict["record"]["doubts"]
-        log(f"  {surface['name']}: {entry['seen_share']:.0%} seen, {entry['filled_m2']:.2f} m² filled"
-            f" ({pattern_used}); gaps: " + (", ".join(f"{g['id']} {g['kind']} {g['area_m2']} m² -> {g['decision']}"
-                                                   for g in entry["gaps"]) or "none"))
-    points = np.vstack(new_points) if new_points else np.zeros((0, 3))
-    inferred = PointCloud((points @ world).astype(np.float32),        # back to the solve's frame
-                          np.vstack(new_colours).astype(np.uint8) if new_colours else np.zeros((0, 3), np.uint8),
-                          (np.vstack(new_normals) @ world).astype(np.float32) if new_normals else None)
-    save_ply(inferred, space / "cloud-gaps.ply")
-    record["points"] = int(len(points))
+        record["surfaces"].append(entry)
+        log(f"  {surface['name']}: {entry['seen_share']:.0%} measured, {entry['recovered_m2']} m² recovered "
+            f"from frames, {entry['unseen_m2']} m² unseen; gaps: "
+            + (", ".join(f"{g['id']} {g['kind']} {g['area_m2']} m² ({g['recovered_share']:.0%} recovered)"
+                         f" -> {g['decision']}" for g in entry["gaps"]) or "none"))
+    for key, path in (("real", "cloud-gaps.ply"), ("unseen", "cloud-unseen.ply")):
+        pts, cols, nrm = out[key]
+        points = np.vstack(pts) if pts else np.zeros((0, 3))
+        save_ply(PointCloud((points @ world).astype(np.float32),        # back to the solve's frame
+                            (np.vstack(cols) if cols else np.zeros((0, 3))).astype(np.uint8),
+                            ((np.vstack(nrm) if nrm else np.zeros((0, 3))) @ world).astype(np.float32)),
+                 space / path)
+        record[f"{key}_points"] = int(len(points))
     record["claude"] = advisor is not None
     (space / "gaps.json").write_text(json.dumps(record, indent=1) + "\n")
-    log(f"Filled {len(points):,} inferred points -> {space / 'cloud-gaps.ply'}")
+    log(f"{record['real_points']:,} points from the video's own pixels -> cloud-gaps.ply; "
+        f"{record['unseen_points']:,} unseen cells -> cloud-unseen.ply")
     return record
 
 

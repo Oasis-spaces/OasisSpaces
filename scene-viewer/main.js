@@ -85,6 +85,8 @@ async function load() {
       node.userData.shell = true;
     }
   });
+  shell.scene.visible = manifest.shellShown !== false;     // the filmed splat is the room; the shell is its structure
+  shellRoot = shell.scene;
   scene.add(shell.scene);
 
   for (const info of manifest.pieces) addPiece(info);
@@ -186,6 +188,7 @@ const LOOK_SOURCE = {
   generated: ["Generated · not a measurement", "Made by an image-to-3D model from the frames; its size is fitted, not measured"],
   added: ["Added object", "Brought in from a file, not from the scan"],
 };
+let shellRoot = null;
 const shellMeshes = new Map();   // surface name -> its mesh in shell.glb
 let filledShown = false;
 function lookSource(piece) {
@@ -199,7 +202,7 @@ function describeSurfaces() {
   if (!list.length) { line.hidden = true; button.hidden = true; return; }
   const area = list.reduce((n, x) => n + (x.areaM2 || 1), 0);
   const share = (k) => Math.round(100 * list.reduce((n, x) => n + (x[k] || 0) * (x.areaM2 || 1), 0) / area);
-  line.textContent = `Walls, floor and ceiling: ${share("observed")}% filmed, ${share("inferred")}% plain paint continued, ${share("generated")}% filled in by inpainting`;
+  line.textContent = `Walls, floor and ceiling: ${share("observed")}% filmed, ${share("unseen")}% never seen (nothing is painted in)`;
 }
 async function showFilled(on) {
   filledShown = on;
@@ -218,7 +221,7 @@ async function showFilled(on) {
     }
     mesh.userData.overlay.visible = on;
   }
-  document.getElementById("show-filled").textContent = on ? "Hide filled areas" : "Show filled areas";
+  document.getElementById("show-filled").textContent = on ? "Hide unseen areas" : "Show unseen areas";
 }
 
 // ------------------------------------------------------------ added objects
@@ -615,6 +618,11 @@ picker.onchange = () => { addFiles([...picker.files]); picker.value = ""; };
 window.addEventListener("dragover", (event) => event.preventDefault());
 window.addEventListener("drop", (event) => { event.preventDefault(); addFiles([...event.dataTransfer.files]); });
 document.getElementById("show-filled").onclick = () => showFilled(!filledShown);
+document.getElementById("show-shell").onclick = (event) => {
+  if (!shellRoot) return;
+  shellRoot.visible = !shellRoot.visible;
+  event.target.textContent = shellRoot.visible ? "Hide room structure" : "Show room structure";
+};
 document.getElementById("tint").oninput = (event) => selected && setTint(selected, event.target.value);
 document.getElementById("untint").onclick = () => selected && setTint(selected, null);
 document.getElementById("height").onchange = (event) => {

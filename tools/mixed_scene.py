@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
-"""Build a room as a mixed scene: a clean textured shell, and the furniture as
-it was filmed, each piece on its own.
+"""Build a room as a mixed scene: the filmed splat, cut into the room and its
+furniture, each piece on its own.
 
-A splat of a phone video is soft where the room is plain (walls, floor) and
-cannot be edited: moving a bed leaves a hole, because the floor under it was
-never filmed. This turns a processed space into something that can:
+The trained splat is the result: it is the only thing that holds the real room's
+look. This makes it editable without painting anything over it:
 
-  shell.glb       the floor, walls and ceiling stage 3 measured, as flat
-                  meshes textured with the video's own frames. Every frame is
-                  projected onto each surface, keeping only views nothing
-                  blocks (tools/surface_fill.py), and what no frame saw (behind
-                  the wardrobe, under the bed) is continued by an inpainting
-                  model from the surface around it. So the background behind
-                  every piece of furniture already exists.
-  pieces/*.splat  the trained splat, cut up: one file per measured object (its
-                  own Gaussians, as filmed), one for the ceiling's fittings,
-                  one for the rest (clutter, curtains, things on the walls).
-                  The Gaussians that were the walls and floor are dropped: the
-                  shell replaces them.
-  models/*.glb    a clean stand-in for every piece: simple furniture of the
-                  piece's kind, at its measured size, in the scan's own
-                  colours, with its back to the wall the piece stands against.
-                  The viewer can show either; a poor scan starts as its model.
-  provenance/*.png  per surface, which texels were filmed (clear), continued as
-                  plain paint from the room's own colour (inferred) or invented
-                  by the inpainting model (generated): the Knowledge Book's rule
-                  that generated content is labelled and never measured.
+  pieces/*.splat  the trained splat, cut up: one file for the room as filmed
+                  (walls, floor, ceiling, what was seen through its door and
+                  window), one per measured object (its own Gaussians, as
+                  filmed), one for the ceiling's fittings, one for the rest
+                  (clutter, things on the walls). Moving a piece shows what the
+                  capture saw behind it, and a hole where it saw nothing.
+  shell.glb       the floor, walls and ceiling stage 3 measured, as flat meshes
+                  textured only with what the frames saw (tools/surface_fill.py
+                  keeps the views nothing blocks); what no frame saw is hatched
+                  grey as unseen. It starts hidden: it is the room's structure.
+  models/*.glb    a simple stand-in for every piece, at its measured size, in
+                  the scan's colours. Only shown when a person asks for it.
+  provenance/*.png  per surface, which texels were filmed and which are unseen.
   scene.json      what is where: each piece's label, box and anchor, in metres,
                   y up, the room's centre on the floor as origin (three.js
                   conventions), so a viewer can select, move, turn and hide
@@ -34,13 +26,11 @@ never filmed. This turns a processed space into something that can:
     python3 tools/mixed_scene.py spaces/<name> [--cell 0.005] [--splat splat.ply] [--claude]
 
 With --claude (and always in the pipeline, stage 4's `scene` step) Claude looks
-at every surface's texture beside what was actually filmed, and at every piece
-beside a frame of the real thing, and decides: keep a texture, keep only its
-filmed part, or paint the surface plain; show a piece as scanned, as its clean
-model, or not at all (review-surfaces.png, review-pieces.png, review.json).
+at every piece beside a frame of the real thing and says whether it is a real
+object (kept, as scanned) or a fragment (dropped back into the room), and what
+rests on what (review-pieces.png, review-layout.png, review.json).
 
-Needs stage 4's splat, stage 3's shapes.json, the frames in workspace/images
-and LaMa's weights (~/.cache/oasisspaces/big-lama.pt), like fill-room.
+Needs stage 4's splat, stage 3's shapes.json and the frames in workspace/images.
 """
 
 from __future__ import annotations
@@ -286,10 +276,13 @@ def cut_pieces(room, arr, scene, colours, alpha, floor_height, walls, log, detec
         rest = np.flatnonzero(pieces["rest"] & ~paint)
         paint[rest[~detected(scene[rest])]] = True
         pieces["rest"] &= ~paint
-        log(f"  dropped {int(paint.sum()):,} Gaussians on no detected object (paint hanging off the walls): "
-            f"{around:,} around the pieces, {int(paint.sum()) - around:,} from what was left")
-    log(f"  dropped {int((shell & ~outside).sum()):,} Gaussians that were walls, floor or ceiling, "
-        f"{int(outside.sum()):,} outside the room; {int(pieces['rest'].sum()):,} left as the rest")
+        log(f"  {int(paint.sum()):,} Gaussians on no detected object (the walls' own paint): "
+            f"{around:,} around the pieces, {int(paint.sum()) - around:,} from what was left; they stay with the room")
+    # The room itself, as filmed: its walls, floor and ceiling, what was seen through its
+    # door and window, and the wall-coloured Gaussians no piece may take along when moved.
+    pieces["room"] = (shell | paint) & ~taken & (alpha >= MIN_ALPHA)
+    log(f"  {int(pieces['room'].sum()):,} Gaussians are the room as filmed (walls, floor, ceiling, "
+        f"{int((outside & pieces['room']).sum()):,} seen beyond it); {int(pieces['rest'].sum()):,} left as the rest")
     return pieces
 
 
@@ -405,36 +398,37 @@ def hanging_mask(room, surface, dense) -> np.ndarray:
     return binary_closing(binary_dilation(mask, iterations=6), iterations=3)
 
 
-def texture(surface, photo, seen, blocked, log, plain=None) -> np.ndarray:
-    """The surface's texture: the filmed photo where it was filmed cleanly,
-    continued by inpainting everywhere else. A surface nobody filmed is
-    `plain` (the colour of the walls that were filmed)."""
-    from surface_fill import inpaint
+def unseen_pattern(shape, cell: float) -> np.ndarray:
+    """Grey diagonal hatching, 5 cm apart: what no frame saw, shown as unknown
+    rather than painted over."""
+    rows, cols = np.indices(shape[:2])
+    period = max(2, int(round(0.05 / cell)))
+    stripe = ((rows + cols) // max(1, period // 2)) % 2 == 0
+    return np.where(stripe[..., None], 120.0, 95.0) * np.ones(3)
 
+
+def texture(surface, photo, seen, blocked, log, cell_m: float = 0.005) -> np.ndarray:
+    """The surface's texture: the filmed photo where frames saw it cleanly,
+    the unseen hatching everywhere else. Nothing is painted or invented."""
     known = (seen > SEEN_WEIGHT) & ~blocked
     share = float(known.mean())
-    if share < 0.03:
-        colour = plain if plain is not None else np.array([200.0] * 3)
-        log(f"  {surface.name}: hardly filmed ({share:.0%}); painted like the other walls {colour.astype(int).tolist()}")
-        return np.broadcast_to(colour, photo.shape).copy()
     if share > 0.999:
         return photo
-    log(f"  {surface.name}: {share:.0%} filmed cleanly, the rest continued from it")
-    return inpaint(np.where(known[..., None], photo, 128), ~known, log)
+    log(f"  {surface.name}: {share:.0%} filmed cleanly; the rest is shown as unseen")
+    return np.where(known[..., None], photo, unseen_pattern(photo.shape, cell_m))
 
 
 # Provenance of a texel, as the Knowledge Book defines it: measured from frames that saw it,
-# inferred from the scene's own structure (a flat wall's paint continued), or generated by a model.
-OBSERVED, INFERRED, GENERATED = 0, 1, 2
-PROVENANCE_TINT = {INFERRED: (255, 170, 0, 110), GENERATED: (230, 0, 180, 140)}   # observed stays clear
+# inferred from the scene's own structure, or generated by a model. The surfaces here are only
+# ever observed or unseen: nothing is inferred or generated onto them.
+OBSERVED, INFERRED, GENERATED, UNSEEN = 0, 1, 2, 3
+PROVENANCE_TINT = {INFERRED: (255, 170, 0, 110), GENERATED: (230, 0, 180, 140),
+                   UNSEEN: (90, 90, 90, 150)}   # observed stays clear
 
 
-def provenance_map(known: np.ndarray, use: str) -> np.ndarray:
-    """Each texel's provenance for a surface finished with `use` (keep, filmed or
-    plain; texture() paints a hardly filmed surface plain whatever the review said)."""
-    if use == "plain" or known.mean() < 0.03:
-        return np.full(known.shape, INFERRED, np.uint8)
-    return np.where(known, OBSERVED, INFERRED if use == "filmed" else GENERATED).astype(np.uint8)
+def provenance_map(known: np.ndarray, use: str = "filmed") -> np.ndarray:
+    """Each texel's provenance: observed where frames saw it, unseen elsewhere."""
+    return np.where(known, OBSERVED, UNSEEN).astype(np.uint8)
 
 
 def provenance_png(codes: np.ndarray) -> Image.Image:
@@ -648,43 +642,24 @@ def write_glb(path: Path, meshes: list) -> None:
 # ------------------------------------------------------------------ review
 REVIEW_PROMPT = """You are the last check on a 3D scene built from one phone capture of an indoor space (a video or a set of photos), before people open it.
 
-WHAT THE SCENE IS. The room's flat surfaces (floor, walls, ceiling) have become textured meshes; each piece of furniture is a separate object that a person can click, drag across the floor, turn, hide, or swap between its scan and a clean model. So every decision below changes what someone can do in the room, not just how it looks. The bar is a room that looks smooth and polished from any angle and behaves sensibly when things are moved, not a faithful copy of a messy capture.
+WHAT THE SCENE IS. The room is the trained splat of the capture itself: its walls, floor and ceiling as they were filmed, holes and all. Each piece of furniture is a separate part of that splat that a person can click, drag across the floor, turn or hide. Nothing in the scene is painted, inpainted or invented: what the capture did not see stays unseen. The bar is a scene that is faithful to the real room, not one that looks polished.
 
-WHAT YOU ARE GIVEN. Sheet 1 the surfaces, sheet 2 the pieces, sheet 3 the room with every piece named, {faces_sheet}then frames of the real room. Judge only from these; where they do not show you something, say so in the reason rather than guessing.
+WHAT YOU ARE GIVEN. Sheet 1 the pieces, sheet 2 the room with every piece named, then frames of the real room. Judge only from these; where they do not show you something, say so in the reason rather than guessing.
 
-SHEET 1, SURFACES. One row per surface: on the left what the capture actually filmed of it (magenta = never filmed, or hidden behind furniture), on the right the finished texture, where an inpainting model continued the filmed part into the magenta. Surfaces: {surfaces}.
-For each surface choose "use":
-- "keep": the finished texture is believable everywhere. Paint continues as paint, tiles as tiles; real things on the wall (a door, a window, a curtain, a switch, a board, a picture) may stay, and so may honest wear.
-- "filmed": the filmed part is right but the continued part is not. The filmed part stays and the rest becomes plain paint, blended over a few centimetres. Choose this when the continuation invented objects, smeared furniture across the wall, or broke into seams and blotches.
-- "plain": even the filmed part is wrong for a clean surface, so the whole surface becomes flat paint in the room's own colour. Choose this when furniture or clutter is printed flat onto the surface, when it is heavily blurred, or when almost nothing was filmed and the texture is a guess.
-A surface is the background behind everything else, so a wrong texture is worse than a plain one: when you are undecided between "keep" and "filmed", choose "filmed"; between "filmed" and "plain", prefer the one that leaves no invented object visible.
-
-SHEET 2, PIECES. One row per piece: the scan from where the capture saw it best; the same scan from round the side and above, an angle nobody filmed; then the real frame. Pieces: {pieces}. When that is none (an empty room), there is no sheet 2: answer {{}} for "pieces" and "relations".
-People move and turn these pieces and look at the room from above, so the second picture is what they will mostly see. A scan is a cloud of soft blobs that only looks right from where it was filmed. Every piece also has a clean simple model of its kind, built to its measured size in its own colours.
+SHEET 1, PIECES. One row per piece: the scan from where the capture saw it best; the same scan from round the side and above, an angle nobody filmed; then the real frame. Pieces: {pieces}. When that is none (an empty room), there is no sheet 1: answer {{}} for "pieces" and "relations".
 For each piece choose "use":
-- "scan": the scan is recognisably that object and still clean from the unfilmed angle, with no haze, streaks or smears hanging off it.
-- "model": it is a real piece of furniture, but from the unfilmed angle the scan is hazy, streaked, full of holes, or a shapeless cloud. The clean model is shown instead. Prefer this for flat-sided furniture (wardrobes, cabinets, desks, tables, chests) whenever the scan is not crisp: smooth and polished beats faithful-but-foggy.
-- "drop": it is not a separate real object at all: part of a wall or floor, a duplicate of another piece, a fragment, or empty space. It disappears from the room, so do not use "drop" on a real object merely because its scan is poor; that is what "model" is for.
-Be fair to soft things: a bed under bedding, a pile of clothes or a cushion has no flat sides, so a simple model would lose what it is. Keep those as "scan" if one can tell what they are.
+- "scan": it is a real object of the room. It stays as filmed, however soft or incomplete the scan is from the unfilmed angle.
+- "drop": it is not a separate real object at all: part of a wall or floor, a duplicate of another piece, a fragment, or empty space. It goes back into the room as filmed and is no longer a piece of its own. Never drop a real object because its scan is poor.
 
-SHEET 3, THE ROOM, AND WHAT RESTS ON WHAT. Sheet 3 shows the room from above and from where it was filmed, with each piece named where it stands. Use it with the frames to work out how the pieces depend on each other, and fill in "relations" for every piece in the list.
+SHEET 2, THE ROOM, AND WHAT RESTS ON WHAT. Sheet 2 shows the room from above and from where it was filmed, with each piece named where it stands. Use it with the frames to work out how the pieces depend on each other, and fill in "relations" for every piece in the list.
 This decides what happens when a person edits the room. A piece that rests on another is carried by it: drag the bed and its pillows go along, hide the desk and what stood on it goes too. A piece that rests on the floor stays where it is when anything else moves.
 For each piece give {{"on": "<id of the piece it rests on>" or "floor" or "wall", "why": "..."}}:
 - "<id>": it sits on top of that piece, or is tucked into it, so it should travel with it. A pillow or cushion on a bed, a laptop or monitor on a desk, a lamp or books on a table, a basket on a shelf, a cushion on a chair.
 - "floor": it stands on the floor on its own, even if it touches another piece. A bedside table beside a bed, a chair pushed under a desk, a basket on the floor next to a wardrobe: none of these should follow the other piece.
 - "wall": it hangs on or is fixed to a wall and does not stand on the floor.
-The same kind of object can rest on different things in different rooms, so decide from the pictures, not from what is usual: a pillow can be on a bed, on a chair or on the floor. Where two pieces overlap, ask which one would fall if the other were taken away. If you cannot see what it rests on, answer "floor", which changes nothing.
-{faces_ask}
-Reply as JSON: {{"surfaces": {{"<name>": {{"use": "keep|filmed|plain", "why": "..."}}, ...}}, "pieces": {{"<id>": {{"use": "scan|model|drop", "why": "..."}}, ...}}, "relations": {{"<id>": {{"on": "<id>|floor|wall", "why": "..."}}, ...}}, "faces": {{"<name>": {{"use": "keep|plain", "why": "..."}}, ...}}, "summary": "one sentence on how the room will look and what moves with what"}}"""
+The same kind of object can rest on different things in different rooms, so decide from the pictures, not from what is usual. Where two pieces overlap, ask which one would fall if the other were taken away. If you cannot see what it rests on, answer "floor", which changes nothing.
 
-FACES_NOTE = ("sheet 4 the sides of those models that the capture filmed flat-on, as photographs to put on the model "
-              "(left: what was filmed, magenta = never seen or hidden; right: finished, the magenta continued by an "
-              "inpainting model; faces: {faces}),")
-FACES_ASK = """
-For each face on sheet 4 choose:
-- "keep": the finished photograph is believable as that side of the furniture (doors, drawers, handles, a table top), including where it was continued.
-- "plain": it is not (other objects printed flat onto it, smears, a ghost of what stood in front, heavy blur): leave that side of the model in its plain colour.
-"""
+Reply as JSON: {{"pieces": {{"<id>": {{"use": "scan|drop", "why": "..."}}, ...}}, "relations": {{"<id>": {{"on": "<id>|floor|wall", "why": "..."}}, ...}}, "summary": "one sentence on what the room holds and what moves with what"}}"""
 
 
 def claude_review(advisor, frames=(), log=print):
@@ -693,17 +668,10 @@ def claude_review(advisor, frames=(), log=print):
                face_sheet: Path | None = None, faces: list = (), layout_sheet: Path | None = None):
         if advisor is None or not advisor.available:
             return None
-        listed = ", ".join(f"{f['name']} = the {f['side']} of {f['piece']} ({f['filmed']:.0%} filmed)" for f in faces)
-        with_faces = bool(faces and face_sheet)
         prompt = REVIEW_PROMPT.format(
-            surfaces=", ".join(f"{s['name']} ({s['filmed']:.0%} filmed)" for s in surfaces),
-            pieces=", ".join(f"{p['id']} = {p['label']} ({p['size']})" for p in pieces) or "none",
-            faces_sheet=(FACES_NOTE.format(faces=listed) + " ") if with_faces else "",
-            faces_ask=FACES_ASK if with_faces else "")
-        images = ([surface_sheet] + ([piece_sheet] if pieces else [])
-                  + ([layout_sheet] if layout_sheet else []) + ([face_sheet] if with_faces else [])
-                  + list(frames))
-        verdict = advisor.ask_json(prompt, images, max_tokens=3500)
+            pieces=", ".join(f"{p['id']} = {p['label']} ({p['size']})" for p in pieces) or "none")
+        images = (([piece_sheet] if pieces else []) + ([layout_sheet] if layout_sheet else []) + list(frames))
+        verdict = advisor.ask_json(prompt, images, max_tokens=3000)
         if verdict:
             log(f"  Claude: {verdict.get('summary', '')}")
         return verdict
@@ -924,14 +892,11 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
 
     import surface_fill
     from pointcloud import load_ply
-    from scipy.ndimage import gaussian_filter
     from scipy.spatial import cKDTree
     from splat_edit import Room
     from splat_tools import read_splat
     from surface_fill import blob_arrays, floor_masks, object_surfaces, photograph, wall_masks, wall_surfaces
 
-    if not surface_fill.LAMA_PATH.exists():
-        sys.exit(f"LaMa weights not found at {surface_fill.LAMA_PATH} (see the README's fill-room)")
     surface_fill.PHOTO_CELL_M = cell_m
     room = Room(space)
     m = room.metre
@@ -987,12 +952,8 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     face_photos = (photograph(space, room, faces, log, occluders=solid, frame_step=1,
                               sharpness=PANEL_SHARPNESS, shrink=1) if faces else [])
 
-    # The paint of the walls that were filmed, for a wall that was not.
     knowns = [(seen > SEEN_WEIGHT) & ~block for block, (_p, seen, _t) in zip(blocked, photos)]
-    paints = [np.median(photo[known], axis=0) for surface, known, (photo, _s, _t) in zip(surfaces, knowns, photos)
-              if surface.name.startswith("wall") and known.mean() > 0.15]
-    paint = np.mean(paints, axis=0) if paints else None
-    finished = [texture(surface, photo, seen, block, log, plain=paint)
+    finished = [texture(surface, photo, seen, block, log, cell_m)
                 for surface, block, (photo, seen, _t) in zip(surfaces, blocked, photos)]
 
     # ---- the review: Claude (or whoever `review` is) sees what was made, and decides
@@ -1017,7 +978,7 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         if known.mean() < PANEL_MIN_FILMED:
             log(f"  {name}: only {known.mean():.0%} of it filmed; that side of the model stays plain")
             continue
-        final = texture(face, photo, seen, block, log)
+        final = texture(face, photo, seen, block, log, cell_m / finer)
         stand = (lambda image: image[::-1]) if face.normal[2] == 0 else (lambda image: image)
         rows.append((f"{name}   (filmed {known.mean():.0%} | finished)",
                      stand(np.where(known[..., None], photo, np.array([255.0, 0, 200]))), stand(final)))
@@ -1033,8 +994,16 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     verdict = review(surface_sheet, piece_sheet,
                      [{"name": s.name, "filmed": float(k.mean())} for s, k in zip(surfaces, knowns)], asked,
                      face_sheet, [panel["asked"] for panel in panels.values()], layout_sheet) if review else None
-    surface_use = {name: (v or {}).get("use", "keep") for name, v in ((verdict or {}).get("surfaces") or {}).items()}
-    piece_use = {ident: (v or {}).get("use", "scan") for ident, v in ((verdict or {}).get("pieces") or {}).items()}
+    surface_use = {s.name: "filmed" for s in surfaces}     # only what was filmed, never painted over
+    # A piece is shown as filmed, or dropped when it is no real object; its clean model
+    # is only ever shown when a person asks for it.
+    piece_use = {ident: "drop" if (v or {}).get("use") == "drop" else "scan"
+                 for ident, v in ((verdict or {}).get("pieces") or {}).items()}
+    for ident in [i for i, use in piece_use.items() if use == "drop" and i in masks and "room" in masks]:
+        why = ((verdict or {}).get("pieces") or {}).get(ident, {}).get("why", "")
+        log(f"  {ident}: not a piece of its own, back into the room as filmed ({why})")
+        masks["room"] = masks["room"] | masks[ident]
+        masks[ident] = np.zeros_like(masks[ident])
     face_use = {name: (v or {}).get("use", "keep") for name, v in ((verdict or {}).get("faces") or {}).items()}
     for name in [n for n in panels if face_use.get(n, "keep") != "keep"]:
         log(f"  {name}: plain ({((verdict or {}).get('faces') or {}).get(name, {}).get('why', '')})")
@@ -1048,8 +1017,8 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
     # and only what lies inside counts towards their area and how much of them was filmed.
     outline = (room.shapes.get("outline") or {}).get("polygons")
     for surface, known, (photo, _s, _t), final in zip(surfaces, knowns, photos, finished):
-        use = surface_use.get(surface.name, "keep")
-        codes = provenance_map(known, use)
+        use = surface_use[surface.name]
+        codes = provenance_map(known)
         provenance_png(codes).save(out / "provenance" / f"{surface.name}.png")
         within = (surface_inside(surface, outline) if outline and surface.name in ("floor", "ceiling")
                   else np.ones(codes.shape, bool))
@@ -1058,19 +1027,9 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         surface_list.append({"name": surface.name, "use": use, "mask": f"provenance/{surface.name}.png",
                              "areaM2": round(float(within.sum() * (surface.cell / m) ** 2), 2),
                              **{k: round(float((codes[within] == c).mean()), 3)
-                                for k, c in (("observed", OBSERVED), ("inferred", INFERRED), ("generated", GENERATED))}})
-        flat = np.median(photo[known], axis=0) if known.mean() > 0.05 else (paint if paint is not None else np.array([200.0] * 3))
-        if use == "plain":
-            image = np.broadcast_to(flat, final.shape).copy()
-        elif use == "filmed":
-            # The filmed part, fading into plain paint over a few centimetres.
-            weight = np.clip(gaussian_filter(known.astype(float), 0.03 / cell_m) * 2 - 1, 0, 1)[..., None]
-            image = weight * photo + (1 - weight) * flat
-        else:
-            image = final
-        if use != "keep":
-            log(f"  {surface.name}: {use} ({((verdict or {}).get('surfaces') or {}).get(surface.name, {}).get('why', '')})")
-        image = np.clip(image, 0, 255).astype(np.uint8)
+                                for k, c in (("observed", OBSERVED), ("inferred", INFERRED), ("generated", GENERATED),
+                                             ("unseen", UNSEEN))}})
+        image = np.clip(final, 0, 255).astype(np.uint8)
         jpeg = io.BytesIO()
         Image.fromarray(image).save(jpeg, "JPEG", quality=92)
         (out / "textures" / f"{surface.name}.jpg").write_bytes(jpeg.getvalue())
@@ -1121,16 +1080,15 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
                 entry["photographed"] = [mesh["name"].removeprefix("photo ") for mesh in photographed]
                 log(f"  {ident} {label}: its model carries {len(photographed)} photographed side(s)")
             entry.update(label=label, movable=True, model=f"models/{ident}.glb", modelKind=model_kind(label),
-                         show="model" if use == "model" else "scan",
+                         show="scan",
                          box={"min": (blo - anchor).round(3).tolist(), "max": (bhi - anchor).round(3).tolist()})
             why = ((verdict or {}).get("pieces") or {}).get(ident, {}).get("why")
             if why:
                 entry["why"] = why
-            if use == "model":
-                log(f"  {ident} {label}: shown as its clean model ({why or ''})")
         else:
             anchor = np.zeros(3)
-            entry.update(label={"rest": "everything else", "ceiling-fittings": "ceiling fittings"}[ident],
+            entry.update(label={"rest": "everything else", "ceiling-fittings": "ceiling fittings",
+                                "room": "the room as filmed"}[ident],
                          movable=False, box={"min": lo.round(3).tolist(), "max": hi.round(3).tolist()})
         entry["anchor"] = anchor.round(3).tolist()
         write_piece(out / entry["file"], arr[mask], frame, scene[mask], anchor)
@@ -1150,7 +1108,9 @@ def build(space: Path, cell_m: float, splat_name: str, log=print, review=None) -
         "inside": {"position": eye.round(3).tolist(), "target": [0.0, 1.1, 0.0]},
         "room": {"width": round(2 * room.half[0] / m, 3), "depth": round(2 * room.half[1] / m, 3),
                  "height": round(room.shapes["room_level"]["height"] / m, 3)},
-        "shell": "shell.glb", "source": splat_name, "texelMetres": cell_m, "surfaces": surface_list, "pieces": pieces,
+        # The filmed splat is the room; the shell (its measured surfaces, filmed texels only,
+        # the rest hatched as unseen) is there for structure and starts hidden.
+        "shell": "shell.glb", "shellShown": False, "source": splat_name, "texelMetres": cell_m, "surfaces": surface_list, "pieces": pieces,
         "reviewedBy": "claude" if verdict else None, "summary": (verdict or {}).get("summary"),
     }
     (out / "scene.json").write_text(json.dumps(manifest, indent=1) + "\n")

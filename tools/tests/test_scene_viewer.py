@@ -78,16 +78,16 @@ def make_scene(folder: Path) -> None:
     # A pillow on it, carried by it.
     splat(scene / "pieces" / "B1.splat", [-0.3, 0, -0.15], [0.3, 0.15, 0.15], (240, 240, 235), count=500, seed=1)
     splat(scene / "pieces" / "rest.splat", [-1.8, 0, -1.4], [-1.5, 1.0, -1.2], (90, 90, 90), count=500, seed=2)
-    # The floor was filmed on its left half; its right half was invented by the inpainter.
+    # The floor was filmed on its left half; its right half nobody saw (unseen).
     (scene / "provenance").mkdir()
     floor_known = np.zeros((16, 16), bool)
     floor_known[:, :8] = True
-    ms.provenance_png(ms.provenance_map(floor_known, "keep")).save(scene / "provenance" / "floor.png")
-    ms.provenance_png(ms.provenance_map(np.ones((16, 16), bool), "keep")).save(scene / "provenance" / "wall-0.png")
+    ms.provenance_png(ms.provenance_map(floor_known)).save(scene / "provenance" / "floor.png")
+    ms.provenance_png(ms.provenance_map(np.ones((16, 16), bool))).save(scene / "provenance" / "wall-0.png")
     manifest = {
         "space": "test-room",
         "surfaces": [{"name": "floor", "use": "keep", "mask": "provenance/floor.png", "areaM2": 12.0,
-                      "observed": 0.5, "inferred": 0.0, "generated": 0.5},
+                      "observed": 0.5, "inferred": 0.0, "generated": 0.0, "unseen": 0.5},
                      {"name": "wall-0", "use": "keep", "mask": "provenance/wall-0.png", "areaM2": 10.0,
                       "observed": 1.0, "inferred": 0.0, "generated": 0.0}], "units": "metres", "up": "y",
         "room": {"width": 4.0, "depth": 3.0, "height": 2.5}, "shell": "shell.glb",

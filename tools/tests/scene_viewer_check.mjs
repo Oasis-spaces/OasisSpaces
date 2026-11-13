@@ -67,12 +67,12 @@ const sources = await page.evaluate(() => {
 check(sources[0].startsWith("Clean model") && sources[1].startsWith("Generated") && sources[2] === "As filmed",
       `the selected piece says where each look comes from (${sources.join(" | ")})`);
 const filledLine = await page.textContent("#filled");
-check(filledLine.includes("73% filmed") && filledLine.includes("27% filled in by inpainting"),
+check(filledLine.includes("73% filmed") && filledLine.includes("27% never seen"),
       `the panel says how much of the room's surfaces was filmed (${filledLine})`);
 await page.evaluate(() => window.oasisScene.select(null));
 
 // ------------------------------------------------------------- filled areas
-// The floor's right half (+x) was invented: tinted magenta when filled areas show, its left half untouched.
+// The floor's right half (+x) was never seen: tinted grey when unseen areas show, its left half untouched.
 async function floorPixels() {
   const at = await page.evaluate(() => {
     const { camera } = window.oasisScene;
@@ -92,11 +92,11 @@ const plainFloor = await floorPixels();
 await page.click("#show-filled");
 await page.waitForFunction(() => [...window.oasisScene.shellMeshes.values()].some((m) => m.userData.overlay && m.userData.overlay.visible));
 const tintedFloor = await floorPixels();
-const redder = (a, b) => (a[0] - a[1]) - (b[0] - b[1]);
-check(redder(tintedFloor[0], plainFloor[0]) > 20 && Math.abs(redder(tintedFloor[1], plainFloor[1])) < 8,
-      `Show filled areas tints the invented half of the floor and leaves the filmed half (${plainFloor} -> ${tintedFloor})`);
+const darker = (a, b) => (b[0] + b[1] + b[2]) - (a[0] + a[1] + a[2]);
+check(darker(tintedFloor[0], plainFloor[0]) > 30 && Math.abs(darker(tintedFloor[1], plainFloor[1])) < 8,
+      `Show unseen areas tints the unseen half of the floor and leaves the filmed half (${plainFloor} -> ${tintedFloor})`);
 await page.click("#show-filled");
-check((await page.textContent("#show-filled")) === "Show filled areas", "and hides it again");
+check((await page.textContent("#show-filled")) === "Show unseen areas", "and hides it again");
 
 // ------------------------------------------------------------- colours
 // The colour on screen where the bed is: the screenshot read back in the page.

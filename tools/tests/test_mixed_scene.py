@@ -284,18 +284,23 @@ def test_a_review_sheet_takes_any_number_of_pictures_in_a_row():
 
 
 
-def test_each_texel_says_whether_it_was_filmed_continued_or_invented():
+def test_each_texel_is_filmed_or_unseen_never_painted():
     known = np.zeros((4, 6), bool)
     known[:, :4] = True                                          # two thirds filmed
-    kept = ms.provenance_map(known, "keep")
-    assert (kept[:, :4] == ms.OBSERVED).all() and (kept[:, 4:] == ms.GENERATED).all()
-    filmed = ms.provenance_map(known, "filmed")                 # the rest painted plain from the filmed part
-    assert (filmed[:, 4:] == ms.INFERRED).all() and (filmed[:, :4] == ms.OBSERVED).all()
-    assert (ms.provenance_map(known, "plain") == ms.INFERRED).all()
-    barely = np.zeros((10, 10), bool); barely[0, 0] = True       # texture() paints a hardly filmed surface plain
-    assert (ms.provenance_map(barely, "keep") == ms.INFERRED).all()
-    rgba = np.asarray(ms.provenance_png(kept))
+    codes = ms.provenance_map(known)
+    assert (codes[:, :4] == ms.OBSERVED).all() and (codes[:, 4:] == ms.UNSEEN).all()
+    rgba = np.asarray(ms.provenance_png(codes))
     assert rgba.shape == (4, 6, 4) and (rgba[:, :4, 3] == 0).all() and (rgba[:, 4:, 3] > 0).all()
+
+
+def test_texture_keeps_the_photo_and_hatches_the_rest():
+    photo = np.full((20, 30, 3), 200.0)
+    seen = np.zeros((20, 30)); seen[:, :10] = 1
+    out = ms.texture(type("S", (), {"name": "wall W0"})(), photo, seen, np.zeros((20, 30), bool),
+                     lambda *a: None, cell_m=0.005)
+    assert (out[:, :10] == 200).all()                            # the photo, as filmed
+    assert set(np.unique(out[:, 10:])) <= {95.0, 120.0}          # unseen: grey hatching, not the photo's colour
+    assert len(np.unique(out[:, 10:, 0])) == 2
 
 
 if __name__ == "__main__":

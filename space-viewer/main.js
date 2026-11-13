@@ -197,7 +197,7 @@ function setRemoved(id, removed, save = true) {
   if (save) persist();
   renderList();
   if (selected === id) showSelected();
-  say(removed ? `Took out the ${p.info.name}; the floor under it is filled in (inferred).` : `Put the ${p.info.name} back.`);
+  say(removed ? `Took out the ${p.info.name}; what other frames saw under it is shown; the rest was never filmed.` : `Put the ${p.info.name} back.`);
 }
 
 function highlightFilled(on) {

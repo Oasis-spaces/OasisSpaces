@@ -30,10 +30,12 @@ rearrange it without surprises:
 5. **Nothing is invented.** What was not seen is either inferred and marked as a
    guess (a wall nobody faced) or left out. Generated content is always labelled
    as generated and never treated as measured.
-6. **No holes where the room obviously continues.** Floor under the bed, wall
-   behind the wardrobe, ceiling the phone never looked up at: each is filled from
-   the surface around it (its tiles, its paint, its texture) and marked as
-   inferred. An opening (a doorway, a window, a balcony door behind a curtain)
+6. **Gaps get only what the video saw.** A hole in a surface is filled only
+   where other frames of the video saw that spot with nothing in the way and
+   agree on it; those points are marked as recovered, not measured. Everything
+   else stays unseen and is shown as unknown: no tile grid, paint or texture is
+   made up for floor under the bed or wall behind the wardrobe, however obvious
+   it looks. An opening (a doorway, a window, a balcony door behind a curtain)
    stays open.
 
 ## How the pipeline works, and where it goes wrong
@@ -67,10 +69,12 @@ rearrange it without surprises:
   inferred walls. Fittings are left where they were measured.
 - **Gaps (you, at the end of stage 3).** Each wall, the floor and the ceiling is
   mapped from the points and its gaps found: behind or under a piece, at an
-  opening, or never filmed. Each is filled from the surface around it, and you
-  are shown each surface as seen and as filled, with frames facing it: you say
-  what the surface really looks like, and for each gap whether it continues
-  (fill) or is an opening (leave open).
+  opening, or never filmed. Each gap cell is looked for in every frame; where
+  frames saw it clearly and agree, their colour is recovered. You are shown each
+  surface as measured and with what was recovered, with frames facing it: for
+  each gap you say whether what was recovered is this surface (keep), something
+  else painted onto it such as clothes or the side of the bed (drop), or an
+  opening (open).
 - **The score (room_score).** It measures the room you approve:
   - how well each piece's box covers that object's outlines in the frames;
   - minus overlapping pieces;

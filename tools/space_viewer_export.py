@@ -92,7 +92,8 @@ def export(space: Path, max_points: int = 450_000) -> Path:
                        "min": corners.min(axis=0).round(4).tolist(), "max": corners.max(axis=0).round(4).tolist(),
                        "mounted": bool(b.get("mounted")), "points": int(inside.sum())})
 
-    # Gaps the stage filled (pipeline/gaps.py): inferred, so marked with GUESSED.
+    # Gap cells recovered from other frames (pipeline/gaps.py): real pixels, but not
+    # measured by the dense cloud, so marked with GUESSED for the viewer to tell apart.
     guessed = 0
     gaps_path = space / "cloud-gaps.ply"
     if gaps_path.exists():
