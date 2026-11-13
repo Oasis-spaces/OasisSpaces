@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lighting lab</title>
+<style>
+  :root { --bg: #0b0c0e; --panel: rgba(20,22,26,.94); --line: #2c3138; --text: #e8eaed; --dim: #9aa1ab; --accent: #ff9f0a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
+               font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #view canvas { display: block; touch-action: none; }
+  body.placing canvas { cursor: crosshair; }
+  #views { position: fixed; top: 12px; left: 12px; right: 372px; display: flex; gap: 6px; flex-wrap: wrap; }
+  button, select, input { font: inherit; color: inherit; }
+  button { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+  button:hover { border-color: #6fb3ff; }
+  select, input[type=number], input[type=date] { background: #15181c; border: 1px solid var(--line); border-radius: 6px; padding: 3px 5px; }
+  input[type=number] { width: 64px; }
+  #panel { position: fixed; top: 0; right: 0; bottom: 0; width: 360px; overflow-y: auto; background: var(--panel);
+           border-left: 1px solid var(--line); padding: 12px 14px 40px; box-sizing: border-box; }
+  #toggle { position: fixed; top: 12px; right: 372px; display: none; }
+  body.collapsed #panel { display: none; }
+  body.collapsed #views { right: 12px; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 16px 0 6px; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+  .slider { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+  .slider input[type=range] { flex: 1; min-width: 0; }
+  .fine { color: var(--dim); font-size: 12px; margin: 3px 0; }
+  .fine em { color: #ffcc66; font-style: normal; }
+  .lamp { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 6px 0; }
+  .lamp select { width: 100%; margin: 4px 0; }
+  .lamphead { display: flex; justify-content: space-between; align-items: center; }
+  .del { padding: 0 6px; border: none; background: none; color: var(--dim); }
+  #energy { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #energy p { grid-column: 1 / -1; margin: 0; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  .stat b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--dim); font-size: 11px; }
+  #meter b { font-size: 18px; color: var(--accent); }
+  .mat { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; }
+  #legend { height: 10px; border-radius: 3px; margin: 4px 0;
+            background: linear-gradient(90deg, #0d0887, #5c01a6, #9c179e, #cc4778, #ed7953, #fdb42f, #f0f921); }
+  .ticks { display: flex; justify-content: space-between; color: var(--dim); font-size: 11px; }
+  body.shot #views, body.shot #toggle { display: none; }
+  @media (max-width: 760px) {
+    #panel { top: auto; left: 0; width: 100%; height: 52vh; border-left: none; border-top: 1px solid var(--line); }
+    #views { right: 12px; }
+    #toggle { display: block; top: auto; bottom: calc(52vh + 8px); right: 12px; }
+    body.collapsed #toggle { bottom: 12px; }
+  }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../scene-viewer/vendor/three/build/three.module.js",
+               "three/addons/": "../scene-viewer/vendor/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="view"></div>
+<div id="views"></div>
+<button id="toggle">Panel</button>
+<aside id="panel">
+  <h1>Lighting lab · bedroom</h1>
+  <div class="fine">Real bulbs, the real sun for a place and time, light bouncing off every surface. Click any surface to measure it.</div>
+
+  <h2>Outside</h2>
+  <div class="row"><input type="date" id="date"> <select id="sky"><option value="clear">Clear sky</option><option value="overcast">Overcast</option></select></div>
+  <label class="slider">Time <input type="range" id="time" min="0" max="1435" step="5"><output id="timeout"></output></label>
+  <div class="row">Lat <input type="number" id="lat" step="0.01"> Lon <input type="number" id="lon" step="0.01"> UTC+ <input type="number" id="utc" step="0.5"></div>
+  <div class="row">Window faces
+    <select id="facing"><option value="0">North</option><option value="45">North-east</option><option value="90">East</option><option value="135">South-east</option>
+      <option value="180">South</option><option value="225">South-west</option><option value="270">West</option><option value="315">North-west</option></select>
+    <select id="curtain"><option value="open">Curtains open</option><option value="closed">Curtains closed</option></select></div>
+  <div class="fine" id="sunline"></div>
+  <div class="fine" id="sunin"></div>
+  <div class="fine">Place, time and which way the window faces are placeholders until you set them. The opening behind the curtains is assumed (where the curtains hang).</div>
+
+  <h2>Lights</h2>
+  <div class="row"><select id="fixture"></select><button id="place">Place</button><button id="allon">All on</button><button id="alloff">All off</button></div>
+  <div id="lamps"></div>
+
+  <h2>Supply and cost</h2>
+  <label class="slider">Mains <input type="range" id="volts" min="80" max="270" step="1"><output id="voltsout"></output></label>
+  <div class="row">Tariff <input type="text" id="currency" size="2" style="width:28px;background:#15181c;border:1px solid var(--line);border-radius:6px;padding:3px 5px">
+    <input type="number" id="tariff" step="0.1"> per kWh · <input type="number" id="co2" step="0.01"> kg CO₂/kWh</div>
+  <div id="energy"></div>
+
+  <h2>Measure</h2>
+  <div id="meter" class="fine">Click a surface for its illuminance, where it comes from, and what it is made of.</div>
+
+  <h2>Glare and the eye</h2>
+  <div class="fine" id="glare"></div>
+  <div class="fine" id="adapt"></div>
+  <label class="slider">Exposure <input type="range" id="ev" min="-3" max="3" step="0.5"></label>
+
+  <h2>Show</h2>
+  <label class="row"><input type="checkbox" id="delit"> Take the filmed light out of the photos</label>
+  <label class="row"><input type="checkbox" id="glareon"> Bloom on bright things</label>
+  <label class="row"><input type="checkbox" id="heat"> Lux map</label>
+  <div id="legend"></div><div class="ticks"><span>1</span><span>10</span><span>100</span><span>1000</span><span>3000 lx</span></div>
+</aside>
+<script type="module" src="./lab.js"></script>
+</body>
+</html>
