@@ -166,6 +166,33 @@ JOBS = {
                 'python3 pipeline/splat_gsplat.py eval "$SPACE" splat-quick.ply splat-long.ply splat-gsplat.ply'
                 ' $(ls "$SPACE"/splat-gsplat_*.ply 2>/dev/null | xargs -rn1 basename)'],
     },
+    # Continue the gsplat training to 30000 steps on the first GPU while OpenSplat's quick
+    # and long runs are trained on the second WITHOUT the held-out frames: then every
+    # splat is scored on frames none of them saw, and the novel-view strips show what a
+    # web copy loses (flat colour only; cropped to the room and reduced to 300k splats).
+    "splat-resume": {
+        "inputs": ["cloud-dense.ply", "workspace/images/*.jpg", "workspace/sparse/0/*", "scene/scene.json",
+                   "splat-quick.ply", "splat-long.ply", "splat-gsplat.ply", "splat-gsplat.json",
+                   "tools-cache/opensplat"],
+        "install": [INSTALL_PYTHON, INSTALL_GSPLAT, INSTALL_OPENSPLAT],
+        "run": ["""set -x
+python3 pipeline/splat_seed.py "$SPACE"
+python3 pipeline/splat_seed.py "$SPACE" --hold-out "$SPACE/splat-gsplat.json"
+OPENSPLAT=/kaggle/temp/OpenSplat/build/opensplat
+( CUDA_VISIBLE_DEVICES=1 $OPENSPLAT "$SPACE/splat-project-heldout" -n 10000 -d 4 -o "$SPACE/splat-quick-heldout.ply" \
+  && CUDA_VISIBLE_DEVICES=1 $OPENSPLAT "$SPACE/splat-project-heldout" -n 30000 -d 2 -o "$SPACE/splat-long-heldout.ply" ) \
+  > "$SPACE/baseline-heldout.log" 2>&1 &
+CUDA_VISIBLE_DEVICES=0 python3 pipeline/splat_gsplat.py train "$SPACE" --steps 30000 --resume splat-gsplat.ply \
+  --start-step $(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['steps'])" "$SPACE/splat-gsplat.json") \
+  --output splat-gsplat-30k.ply --minutes 330
+rm -f "$SPACE"/splat-gsplat-30k_*.ply
+wait
+tail -3 "$SPACE/baseline-heldout.log"
+python3 pipeline/splat_gsplat.py eval "$SPACE" splat-quick.ply splat-long.ply splat-quick-heldout.ply \
+  splat-long-heldout.ply splat-gsplat.ply splat-gsplat-30k.ply splat-gsplat-30k.ply:dc splat-gsplat-30k.ply:dc300k
+python3 pipeline/splat_gsplat.py novel "$SPACE" splat-gsplat-30k.ply splat-gsplat-30k.ply:dc splat-gsplat-30k.ply:dc300k
+"""],
+    },
     "sam31-test": {
         "inputs": ["objects.json", "workspace/images/*.jpg"],
         "install": [INSTALL_PYTHON, INSTALL_SAM31],

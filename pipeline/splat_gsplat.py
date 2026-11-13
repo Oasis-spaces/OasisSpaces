@@ -59,7 +59,8 @@ EXPOSURE_REG = 1e-2          # pull towards no correction, so the room keeps the
 OPACITY_REG = 0.01           # MCMC's regularisers
 SCALE_REG = 0.01
 EVAL_DOWNSCALE = 2
-SAVE_AT = (15000,)
+SAVE_AT = (15000, 22000)
+BUDGET_RATE_SHARE = 0.85      # share of the probed rate the rest of the run is planned at
 BUDGET_PROBE = 300            # steps timed before fitting the run to its time budget
 SH_C0 = 0.28209479177387814
 
@@ -312,10 +313,15 @@ def init_params(xyz: np.ndarray, rgb: np.ndarray, device):
 
 def train(space: Path, steps: int = STEPS, downscale: int = DOWNSCALE, cap: int = CAP,
           use_depth: bool = True, use_exposure: bool = True, out_name: str = "splat-gsplat.ply",
-          rasterize=None, device=None, log_every: int = 500, minutes: float | None = None) -> dict:
+          rasterize=None, device=None, log_every: int = 500, minutes: float | None = None,
+          resume: Path | None = None, start_step: int = 0) -> dict:
     """Train and write spaces/<name>/<out_name> and splat-gsplat.json.
     With `minutes`, the step count is cut after BUDGET_PROBE steps to what
     fits the time (a GPU session that ends mid-run returns nothing).
+    With `resume` (a splat this trainer wrote) and the `start_step` it reached,
+    training continues from those splats towards `steps`, on the same schedule
+    as one uninterrupted run: learning rates, SH degree and the depth weight
+    are functions of the global step. Per-frame exposure starts again from none.
     `rasterize` replaces gsplat's (tests run a stand-in on the CPU)."""
     import torch
     import torch.nn.functional as F
@@ -324,7 +330,7 @@ def train(space: Path, steps: int = STEPS, downscale: int = DOWNSCALE, cap: int 
     if rasterize is None:
         from gsplat import rasterization as rasterize
         from gsplat.strategy import MCMCStrategy
-        strategy = MCMCStrategy(cap_max=cap, refine_start_iter=500,
+        strategy = MCMCStrategy(cap_max=cap, refine_start_iter=max(500, start_step),
                                 refine_stop_iter=int(steps * 0.85), refine_every=100)
     else:
         strategy = None
@@ -338,14 +344,19 @@ def train(space: Path, steps: int = STEPS, downscale: int = DOWNSCALE, cap: int 
     print(f"frames loaded and undistorted in {time.time() - t0:.0f} s", flush=True)
     depths = frame_depths(space, train_frames, device) if use_depth else {}
 
-    xyz, rgb = read_seed(space / "splat-project/points3D.bin")
-    params = init_params(xyz, rgb, device)
+    if resume:
+        raw = read_ply(resume)
+        params = torch.nn.ParameterDict({k: torch.nn.Parameter(torch.tensor(v, dtype=torch.float32, device=device))
+                                         for k, v in raw.items()})
+        print(f"resuming from {resume.name}: {len(params['means']):,} splats at step {start_step}", flush=True)
+    else:
+        xyz, rgb = read_seed(space / "splat-project/points3D.bin")
+        params = init_params(xyz, rgb, device)
     scale = scene_scale([f["view"] for f in all_frames])
     lrs = {"means": 1.6e-4 * scale, "scales": 5e-3, "quats": 1e-3, "opacities": 5e-2,
            "sh0": 2.5e-3, "shN": 2.5e-3 / 20}
     optimizers = {k: torch.optim.Adam([{"params": params[k], "lr": lr, "name": k}], eps=1e-15)
                   for k, lr in lrs.items()}
-    means_decay = 0.01 ** (1 / steps)
     exposure = torch.nn.Parameter(torch.eye(3, 4, device=device).repeat(len(train_frames), 1, 1))
     exposure_opt = torch.optim.Adam([exposure], lr=EXPOSURE_LR)
     identity = torch.eye(3, 4, device=device)
@@ -360,15 +371,14 @@ def train(space: Path, steps: int = STEPS, downscale: int = DOWNSCALE, cap: int 
     history = []
     t0 = time.time()
     requested = steps
-    step = 0
+    step = start_step
     while step < steps:
-        if minutes and step == BUDGET_PROBE:
-            rate = step / (time.time() - t0)
-            # densification gets busier as splats grow: allow for half the rate
-            fits = int(rate * 0.5 * (minutes * 60 - (time.time() - t0))) + step
+        if minutes and step == start_step + BUDGET_PROBE:
+            rate = BUDGET_PROBE / (time.time() - t0)
+            # densification gets busier as splats grow: allow for most of the rate
+            fits = int(rate * BUDGET_RATE_SHARE * (minutes * 60 - (time.time() - t0))) + step
             if fits < steps:
-                steps = max(fits, BUDGET_PROBE + 1000)
-                means_decay = 0.01 ** (1 / steps)
+                steps = max(fits, step + 1000)
                 if strategy:
                     strategy.refine_stop_iter = int(steps * 0.85)
                 print(f"time budget {minutes:.0f} min: {steps} steps instead of {requested}", flush=True)
@@ -421,12 +431,12 @@ def train(space: Path, steps: int = STEPS, downscale: int = DOWNSCALE, cap: int 
         exposure_opt.step()
         exposure_opt.zero_grad(set_to_none=True)
         for group in optimizers["means"].param_groups:
-            group["lr"] *= means_decay
+            group["lr"] = lrs["means"] * 0.01 ** ((step + 1) / steps)
         if strategy:
             strategy.step_post_backward(params, optimizers, state, step, info,
                                         lr=optimizers["means"].param_groups[0]["lr"])
         if step % log_every == 0 or step == steps - 1:
-            rate = (step + 1) / max(time.time() - t0, 1e-6)
+            rate = (step + 1 - start_step) / max(time.time() - t0, 1e-6)
             history.append({"step": step, "l1": round(float(l1.detach()), 4), "depth": round(float(depth_loss.detach()), 4),
                             "splats": len(params["means"])})
             print(f"step {step}/{steps}  l1 {history[-1]['l1']:.4f}  depth {history[-1]['depth']:.4f}  "
@@ -455,7 +465,7 @@ def save(params, path: Path) -> None:
 
 # ------------------------------------------------------------------------- eval
 
-def evaluate(space: Path, plys: list[Path], downscale: int = EVAL_DOWNSCALE, rasterize=None,
+def evaluate(space: Path, plys: list, downscale: int = EVAL_DOWNSCALE, rasterize=None,
              device=None) -> dict:
     """Score each splat on the held-out frames; write splat-eval.json and
     splat-eval/<frame>.jpg (the frame, then each splat's render)."""
@@ -474,23 +484,26 @@ def evaluate(space: Path, plys: list[Path], downscale: int = EVAL_DOWNSCALE, ras
         test = [f for f in all_frames if f["name"] in held] or test
     out_dir = space / "splat-eval"
     out_dir.mkdir(exist_ok=True)
-    results = {p.name: {"psnr": [], "ssim": [], "psnr_raw": []} for p in plys}
+    entries = [(p if isinstance(p, tuple) else (p, None)) for p in plys]
+    names = [path.name + (f":{variant}" if variant else "") for path, variant in entries]
+    results = {n: {"psnr": [], "ssim": [], "psnr_raw": []} for n in names}
     loaded = {}
-    for p in plys:
-        raw = read_ply(p)
+    for (p, variant), name in zip(entries, names):
+        raw = variant_arrays(read_ply(p), variant, space)
         t = lambda a: torch.tensor(a, dtype=torch.float32, device=device)  # noqa: E731
         degree = int(round(math.sqrt(raw["shN"].shape[1] + 1))) - 1
-        loaded[p.name] = (t(raw["means"]), t(raw["quats"]), torch.exp(t(raw["scales"])),
+        loaded[name] = (t(raw["means"]), t(raw["quats"]), torch.exp(t(raw["scales"])),
                           torch.sigmoid(t(raw["opacities"])),
                           torch.cat([t(raw["sh0"]), t(raw["shN"])], 1), degree)
-        trained_on[p.name] = "held-out frames were in its training" if "gsplat" not in p.name else "never saw them"
+        trained_on[name] = ("never saw them" if "gsplat" in p.name or "heldout" in p.name
+                            else "held-out frames were in its training")
     for frame in test:
         img, valid = load_image(space, frame)
         truth = img.astype(np.float32) / 255
         w, h = frame["size"]
         tiles = [img]
-        for p in plys:
-            means, quats, scales, opac, colours, degree = loaded[p.name]
+        for name in names:
+            means, quats, scales, opac, colours, degree = loaded[name]
             with torch.no_grad():
                 renders, _, _ = rasterize(
                     means=means, quats=quats, scales=scales, opacities=opac, colors=colours,
@@ -499,14 +512,14 @@ def evaluate(space: Path, plys: list[Path], downscale: int = EVAL_DOWNSCALE, ras
                     width=w, height=h, sh_degree=degree, rasterize_mode="antialiased")
             render = renders[0, ..., :3].clamp(0, 1).cpu().numpy()
             matched = colour_match(render, truth, valid).astype(np.float32)
-            r = results[p.name]
+            r = results[name]
             r["psnr_raw"].append(psnr(render, truth, valid))
             r["psnr"].append(psnr(matched, truth, valid))
             r["ssim"].append(float(ssim(torch.tensor(matched).permute(2, 0, 1)[None],
                                         torch.tensor(truth).permute(2, 0, 1)[None])))
             tiles.append((render * 255).astype(np.uint8))
         strip = np.concatenate(tiles, axis=1)
-        labels = ["video frame"] + [p.stem for p in plys]
+        labels = ["video frame"] + [n.removesuffix(".ply").replace(".ply", "") for n in names]
         for k, label in enumerate(labels):
             cv2.putText(strip, label, (k * w + 20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (255, 255, 0), 3)
         small = cv2.resize(strip, (strip.shape[1] // 2, strip.shape[0] // 2), interpolation=cv2.INTER_AREA)
@@ -526,6 +539,104 @@ def evaluate(space: Path, plys: list[Path], downscale: int = EVAL_DOWNSCALE, ras
     return summary
 
 
+# ------------------------------------------------------- web-viewer stand-ins, novel views
+WEB_SPLATS = 300_000         # what a web page can carry of a splat
+ROOM_BOX_M = (1.7, 1.95, -0.15, 2.85)   # |x|, |z| and the y range of the room in the viewer's frame, metres
+
+
+def room_to_viewer(space: Path):
+    """The map from the solve's frame to the viewer's (metres, y up, floor 0, room centred)."""
+    sf = json.loads((space / "scene" / "scene.json").read_text())["solveFrame"]
+    W, T, o, m = np.array(sf["world"]), np.array(sf["toViewer"]), np.array(sf["origin"]), sf["unitsPerMetre"]
+    return (lambda p: (((p @ W.T) - o) / m) @ T.T), m
+
+
+def variant_arrays(raw: dict, variant: str | None, space: Path) -> dict:
+    """The splat as a web page would carry it. `dc`: flat colour only (no
+    view-dependent shine). `dc300k`: also cropped to the room and reduced to the
+    WEB_SPLATS most important splats (opacity times volume), like the page's copy."""
+    if not variant:
+        return raw
+    out = dict(raw)
+    out["shN"] = np.zeros((len(raw["means"]), 0, 3), np.float32)
+    if variant == "dc":
+        return out
+    if variant != "dc300k":
+        raise SystemExit(f"unknown variant {variant}")
+    to_viewer, _ = room_to_viewer(space)
+    v = to_viewer(raw["means"].astype(np.float64))
+    bx, bz, y0, y1 = ROOM_BOX_M
+    inside = (np.abs(v[:, 0]) < bx) & (np.abs(v[:, 2]) < bz) & (v[:, 1] > y0) & (v[:, 1] < y1)
+    importance = 1 / (1 + np.exp(-raw["opacities"])) * np.exp(raw["scales"]).prod(1)
+    importance[~inside] = -1
+    keep = np.argsort(-importance)[:WEB_SPLATS]
+    keep = keep[importance[keep] >= 0]
+    return {k: val[keep] for k, val in out.items()}
+
+
+def perturbed(view: np.ndarray, shift: float, degrees: float) -> np.ndarray:
+    """A camera near this one: turned about its own vertical axis and moved sideways."""
+    a = math.radians(degrees)
+    Ry = np.array([[math.cos(a), 0, math.sin(a)], [0, 1, 0], [-math.sin(a), 0, math.cos(a)]])
+    R = Ry @ view[:3, :3]
+    centre = -view[:3, :3].T @ view[:3, 3] + view[:3, :3].T @ np.array([shift, 0, 0])
+    out = np.eye(4)
+    out[:3, :3], out[:3, 3] = R, -R @ centre
+    return out
+
+
+def novel(space: Path, variants: list[tuple[Path, str | None]], downscale: int = EVAL_DOWNSCALE,
+          rasterize=None, device=None, shift_m: float = 0.25, degrees: float = 9.0) -> None:
+    """Renders of the splat from cameras beside the held-out frames (moved
+    sideways and turned): views nobody trained on or filmed. One strip per frame:
+    the nearest filmed frame, then each variant. splat-novel/<frame>.jpg."""
+    import cv2
+    import torch
+
+    device = device or "cuda"
+    if rasterize is None:
+        from gsplat import rasterization as rasterize
+    _, m = room_to_viewer(space)
+    held = set(json.loads((space / "splat-gsplat.json").read_text()).get("held_out", []))
+    shown = [f for f in frames(space, downscale) if f["name"] in held]
+    out_dir = space / "splat-novel"
+    out_dir.mkdir(exist_ok=True)
+    t = lambda a: torch.tensor(a, dtype=torch.float32, device=device)  # noqa: E731
+    loaded = []
+    for path, variant in variants:
+        raw = variant_arrays(read_ply(path), variant, space)
+        degree = int(round(math.sqrt(raw["shN"].shape[1] + 1))) - 1
+        loaded.append((f"{path.stem}{':' + variant if variant else ''} ({len(raw['means']):,})",
+                       t(raw["means"]), t(raw["quats"]), torch.exp(t(raw["scales"])),
+                       torch.sigmoid(t(raw["opacities"])), torch.cat([t(raw["sh0"]), t(raw["shN"])], 1), degree))
+    for i, frame in enumerate(shown):
+        img, _ = load_image(space, frame)
+        w, h = frame["size"]
+        view = perturbed(frame["view"], (1 if i % 2 == 0 else -1) * shift_m * m, degrees * (1 if i % 2 == 0 else -1))
+        tiles = [img]
+        for label, means, quats, scales, opac, colours, degree in loaded:
+            with torch.no_grad():
+                renders, _, _ = rasterize(means=means, quats=quats, scales=scales, opacities=opac, colors=colours,
+                                          viewmats=t(view[None]), Ks=t(frame["K"][None]), width=w, height=h,
+                                          sh_degree=degree, rasterize_mode="antialiased")
+            tiles.append((renders[0, ..., :3].clamp(0, 1).cpu().numpy() * 255).astype(np.uint8))
+        strip = np.concatenate(tiles, axis=1)
+        for k, label in enumerate(["filmed frame (nearby)"] + [x[0] for x in loaded]):
+            cv2.putText(strip, label, (k * w + 12, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+        small = cv2.resize(strip, (strip.shape[1] // 2, strip.shape[0] // 2), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(out_dir / f"{Path(frame['name']).stem}.jpg"), small[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 85])
+    print(f"wrote {len(shown)} novel-view strips to {out_dir}", flush=True)
+
+
+def parse_variants(space: Path, names: list[str]) -> list[tuple[Path, str | None]]:
+    out = []
+    for name in names:
+        file, _, variant = name.partition(":")
+        path = Path(file)
+        out.append((path if path.is_absolute() else space / path, variant or None))
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -538,17 +649,26 @@ def main() -> None:
     t.add_argument("--no-exposure", action="store_true")
     t.add_argument("--output", default="splat-gsplat.ply")
     t.add_argument("--minutes", type=float, help="time budget for the training loop")
+    t.add_argument("--resume", type=Path, help="continue from a splat this trainer wrote")
+    t.add_argument("--start-step", type=int, default=0, help="the step that splat had reached")
     e = sub.add_parser("eval")
     e.add_argument("space", type=Path)
     e.add_argument("plys", nargs="+")
     e.add_argument("--downscale", type=int, default=EVAL_DOWNSCALE)
+    n = sub.add_parser("novel", help="renders beside the held-out frames, for looking at")
+    n.add_argument("space", type=Path)
+    n.add_argument("plys", nargs="+", help="splat files, each optionally :dc or :dc300k")
+    n.add_argument("--downscale", type=int, default=EVAL_DOWNSCALE)
     args = ap.parse_args()
     if args.cmd == "train":
         train(args.space, args.steps, args.downscale, args.cap, not args.no_depth, not args.no_exposure,
-              args.output, minutes=args.minutes)
+              args.output, minutes=args.minutes,
+              resume=(args.resume if args.resume is None or args.resume.is_absolute() else args.space / args.resume),
+              start_step=args.start_step)
+    elif args.cmd == "eval":
+        evaluate(args.space, parse_variants(args.space, args.plys), args.downscale)
     else:
-        evaluate(args.space, [p if p.is_absolute() else args.space / p for p in map(Path, args.plys)],
-                 args.downscale)
+        novel(args.space, parse_variants(args.space, args.plys), args.downscale)
 
 
 if __name__ == "__main__":

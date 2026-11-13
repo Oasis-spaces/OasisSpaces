@@ -28,6 +28,28 @@ sys.path.insert(0, str(Path(__file__).parent))
 from pointcloud import PointCloud, load_ply, space_model_dir, voxel_downsample
 
 
+def without_images(src: Path, dst: Path, drop: set[str]) -> int:
+    """images.bin without the named frames (their records copied byte for byte):
+    a splat trained on the rest has never seen them. Returns how many were dropped."""
+    data = src.read_bytes()
+    count = struct.unpack_from("<Q", data, 0)[0]
+    at, kept, dropped = 8, [], 0
+    for _ in range(count):
+        start = at
+        at += 4 + 32 + 24 + 4                       # id, quaternion, translation, camera id
+        end = data.index(b"\x00", at)
+        name = data[at:end].decode()
+        at = end + 1
+        points = struct.unpack_from("<Q", data, at)[0]
+        at += 8 + 24 * points
+        if name in drop:
+            dropped += 1
+        else:
+            kept.append(data[start:at])
+    dst.write_bytes(struct.pack("<Q", len(kept)) + b"".join(kept))
+    return dropped
+
+
 def write_points3d_bin(cloud: PointCloud, path: Path) -> None:
     """COLMAP points3D.bin with empty tracks; OpenSplat reads xyz and rgb."""
     record = np.dtype([("id", "<u8"), ("xyz", "<f8", 3), ("rgb", "u1", 3),
@@ -59,6 +81,9 @@ def main() -> None:
     parser.add_argument("space", help="space folder (e.g. spaces/walkthrough)")
     parser.add_argument("--max-points", type=int, default=250_000,
                         help="seed point budget (default 250000; more uses more memory)")
+    parser.add_argument("--hold-out", type=Path, metavar="REPORT.json",
+                        help="splat-gsplat.json: leave its held-out frames out of the project (written to "
+                             "splat-project-heldout), for a splat that has never seen them")
     parser.add_argument("--sparse", action="store_true",
                         help="seed from COLMAP's sparse points instead of the dense cloud")
     args = parser.parse_args()
@@ -70,12 +95,17 @@ def main() -> None:
         sys.exit(f"no camera model in {space / 'workspace' / 'sparse'}")
     print(f"Cameras from {model_dir}")
 
-    project = space / "splat-project"
+    drop = set(json.loads(args.hold_out.read_text())["held_out"]) if args.hold_out else set()
+    project = space / ("splat-project-heldout" if drop else "splat-project")
     if project.exists():
         shutil.rmtree(project)
     project.mkdir()
-    for name in ("cameras.bin", "images.bin"):
-        (project / name).symlink_to((model_dir / name).resolve())
+    (project / "cameras.bin").symlink_to((model_dir / "cameras.bin").resolve())
+    if drop:
+        dropped = without_images(model_dir / "images.bin", project / "images.bin", drop)
+        print(f"Left out {dropped} held-out frames")
+    else:
+        (project / "images.bin").symlink_to((model_dir / "images.bin").resolve())
     (project / "images").symlink_to((space / "workspace" / "images").resolve())
 
     dense = space / "cloud-dense.ply"
