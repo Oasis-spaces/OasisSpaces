@@ -137,9 +137,12 @@ def inside_polygons(polygons, x, y) -> np.ndarray:
 
 
 def grid(surface: dict, scene: np.ndarray, colours: np.ndarray, cell: float, near: float, labels=None,
-         in_front=()):
+         in_front=(), weights=None):
     """The surface's colour image (rows: v, cols: u), the cells seen, the cells
-    that are part of the surface, and the in-plane coordinates of each cell."""
+    that are part of the surface, and the in-plane coordinates of each cell.
+    With `weights` (each point's opacity, for a cloud made from a splat), a cell
+    is seen when the opacity stacked on it reaches SEEN_ALPHA, as a camera
+    looking at the surface would see it, and colours are opacity-weighted."""
     w, h = surface["size"]
     cols, rows = max(2, int(np.ceil(w / cell))), max(2, int(np.ceil(h / cell)))
     rel = scene - surface["origin"]
@@ -148,23 +151,28 @@ def grid(surface: dict, scene: np.ndarray, colours: np.ndarray, cell: float, nea
     on = (np.abs(d) < near) & (su >= 0) & (su < w) & (sv >= 0) & (sv < h)
     c, r = (su[on] / cell).astype(int), (sv[on] / cell).astype(int)
     flat = r * cols + c
-    count = np.bincount(flat, minlength=rows * cols).reshape(rows, cols)
+    w_on = np.ones(int(on.sum())) if weights is None else np.asarray(weights, float)[on]
+    count = np.bincount(flat, weights=w_on, minlength=rows * cols).reshape(rows, cols)
     image = np.zeros((rows, cols, 3))
     for k in range(3):
-        image[..., k] = np.bincount(flat, weights=colours[on, k], minlength=rows * cols).reshape(rows, cols)
-    seen = count > 0
-    image[seen] /= count[seen][:, None]
+        image[..., k] = np.bincount(flat, weights=colours[on, k] * w_on, minlength=rows * cols).reshape(rows, cols)
+    if weights is None:
+        seen = count > 0
+    else:
+        clear = np.bincount(flat, weights=np.log1p(-np.clip(w_on, 0, 0.999)), minlength=rows * cols)
+        seen = (1 - np.exp(clear.reshape(rows, cols))) >= SEEN_ALPHA
+    image[count > 0] /= count[count > 0][:, None]
     named = np.zeros((rows, cols))
     front = np.zeros((rows, cols))
     if labels is not None:
-        named = np.bincount(flat, weights=(labels[on] > 0).astype(float), minlength=rows * cols).reshape(rows, cols)
+        named = np.bincount(flat, weights=(labels[on] > 0) * w_on, minlength=rows * cols).reshape(rows, cols)
         if len(in_front):
-            front = np.bincount(flat, weights=np.isin(labels[on], in_front).astype(float),
+            front = np.bincount(flat, weights=np.isin(labels[on], in_front) * w_on,
                                 minlength=rows * cols).reshape(rows, cols)
-    surface["named_share"] = np.where(seen, named / np.maximum(count, 1), 0.0)
+    surface["named_share"] = np.where(seen, named / np.maximum(count, 1e-9), 0.0)
     # A cell whose points are mostly a piece standing in front (the headboard, a
     # wardrobe's doors, clothes) shows that piece, not this surface: unseen.
-    seen = seen & ~(front > 0.5 * np.maximum(count, 1))
+    seen = seen & ~(front > 0.5 * np.maximum(count, 1e-9))
     uu, vv = np.meshgrid((np.arange(cols) + 0.5) * cell, (np.arange(rows) + 0.5) * cell)
     if "polygons" in surface:
         world = surface["origin"][:2] + uu[..., None] * surface["u"][:2] + vv[..., None] * surface["v"][:2]
@@ -579,13 +587,70 @@ def ask_claude(space: Path, surface: dict, gaps: list[dict], pic: Path, world, m
 
 
 # ---------------------------------------------------------------- main
-def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print) -> dict:
+SPLAT_MAX_THICK_M = 0.02      # splats thicker than this are haze filling the air, not a surface
+SEEN_ALPHA = 0.5              # opacity stacked on a cell (from a splat) that counts as seeing it
+SPLAT_SAMPLES = 32            # most samples laid across one splat's footprint
+SPLAT_MAX_POINTS = 8_000_000  # the whole cloud made from the splat
+SPLAT_LABEL_REACH_M = 0.05    # a sample takes the label of the dense-cloud point this close, if any
+
+
+def quaternion_matrices(q: np.ndarray) -> np.ndarray:
+    """(N, 3, 3) rotations of (N, 4) quaternions w, x, y, z."""
+    q = q / np.linalg.norm(q, axis=1, keepdims=True)
+    w, x, y, z = q.T
+    return np.stack([np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], 1),
+                     np.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], 1),
+                     np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], 1)], 1)
+
+
+def splat_cloud(space: Path, splat: Path, metre: float, cell_m: float = CELL_M, log=print):
+    """The trained splat as a cloud. A splat trains on every frame, so it covers
+    what the dense cloud (a few dozen keyframes) misses. Walls and floors are
+    mostly large, flat, thin splats, each covering an area: every opaque, thin
+    splat is sampled across its footprint (within one standard deviation, about
+    one sample per grid cell, at most SPLAT_SAMPLES) in its base colour, each
+    sample carrying the splat's opacity: a surface is many faint splats stacked,
+    so grid() adds their opacity up per cell. Thick soft splats are haze in the
+    air and are left out. Labels come from the nearest dense-cloud point, so
+    pieces and belongings are still known. Returns the cloud and the opacities."""
+    from scipy.spatial import cKDTree
+    from splat_gsplat import SH_C0, read_ply
+
+    raw = read_ply(splat)
+    opacity = 1 / (1 + np.exp(-raw["opacities"]))
+    scales = np.exp(raw["scales"])
+    keep = (opacity >= 0.01) & (scales.min(1) <= SPLAT_MAX_THICK_M * metre)
+    means, scales, quats = raw["means"][keep], scales[keep], raw["quats"][keep]
+    colours = np.clip((0.5 + SH_C0 * raw["sh0"][keep, 0]) * 255, 0, 255)
+    order = np.sort(scales, axis=1)
+    cell = cell_m * metre
+    count = np.clip(np.ceil(np.pi * order[:, 2] * order[:, 1] / cell ** 2), 1, SPLAT_SAMPLES).astype(int)
+    if count.sum() > SPLAT_MAX_POINTS:
+        count = np.maximum(1, (count * SPLAT_MAX_POINTS / count.sum()).astype(int))
+    owner = np.repeat(np.arange(len(means)), count)
+    rng = np.random.default_rng(0)
+    local = rng.standard_normal((len(owner), 3))
+    local /= np.maximum(1.0, np.linalg.norm(local, axis=1, keepdims=True))   # within one standard deviation
+    R = quaternion_matrices(quats.astype(np.float64))
+    points = (means[owner] + np.einsum("nij,nj->ni", R[owner], local * scales[owner])).astype(np.float32)
+    dense = load_ply(space / "cloud-dense.ply")
+    labels = None
+    if dense.labels is not None:
+        dist, idx = cKDTree(dense.points).query(points, workers=-1)
+        labels = np.where(dist < SPLAT_LABEL_REACH_M * metre, dense.labels[idx], 0).astype(dense.labels.dtype)
+    log(f"  {splat.name}: {int(keep.sum()):,} of {len(keep):,} splats are thin enough to be surfaces; "
+        f"{len(points):,} points laid across them")
+    return PointCloud(points, colours[owner].astype(np.uint8), None, labels, dense.label_names), opacity[keep][owner]
+
+
+def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print, splat: Path | None = None) -> dict:
     import cv2
 
     shapes = json.loads((space / "shapes.json").read_text())
     metre = json.loads((space / "densify.json").read_text())["colmap_units_per_metre"]
     world = np.array(shapes["world"], float)
-    cloud = load_ply(space / "cloud-dense.ply")
+    dense = load_ply(space / "cloud-dense.ply")
+    cloud, weights = splat_cloud(space, splat, metre, cell_m, log) if splat else (dense, None)
     scene = cloud.points.astype(np.float64) @ world.T
     colours = cloud.colors.astype(np.float64)
     cell, near = cell_m * metre, NEAR_SURFACE_M * metre
@@ -610,15 +675,16 @@ def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print)
                         if masks_dir.exists() else set())
     front_masks = [n for n in mask_names if vocabulary.role(n) in front_roles]
     views = load_views(space, metre, front_masks, log)
-    pts, front = occluders(cloud, metre, set(in_front.tolist()))
+    pts, front = occluders(dense, metre, set(in_front.tolist()))
     pts_scene = pts @ world.T
-    record = {"cell_m": cell_m, "rule": "only colours the video saw; the rest is unseen", "surfaces": []}
+    record = {"cell_m": cell_m, "rule": "only colours the video saw; the rest is unseen",
+              "measured_from": splat.name if splat else "cloud-dense.ply", "surfaces": []}
     out = {"real": ([], [], []), "unseen": ([], [], [])}
     work = space / "gaps"
     work.mkdir(exist_ok=True)
     states, references = [], []
     for surface in surfaces(shapes, metre):
-        image, seen, part, uv = grid(surface, scene, colours, cell, near, cloud.labels, in_front)
+        image, seen, part, uv = grid(surface, scene, colours, cell, near, cloud.labels, in_front, weights)
         holes, closed, _ = find_gaps(seen, part, cell)
         covered = cover(surface, pieces, uv, metre, cell, seen.shape)
         # Each unseen cell takes its cause: an opening in the wall, the piece in
@@ -764,8 +830,11 @@ def main() -> None:
     parser.add_argument("space", type=Path)
     parser.add_argument("--no-claude", action="store_true")
     parser.add_argument("--cell", type=float, default=CELL_M, help="grid cell in metres")
+    parser.add_argument("--splat", type=Path, help="measure the surfaces from this trained splat (e.g. "
+                        "splat-gsplat.ply) instead of the keyframes' dense cloud")
     args = parser.parse_args()
-    run(args.space, use_claude=not args.no_claude, cell_m=args.cell)
+    splat = args.splat if args.splat is None or args.splat.is_absolute() else args.space / args.splat
+    run(args.space, use_claude=not args.no_claude, cell_m=args.cell, splat=splat)
 
 
 if __name__ == "__main__":

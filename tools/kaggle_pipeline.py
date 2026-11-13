@@ -290,6 +290,29 @@ def pack(files: list[Path], base: Path, out: Path, stamp: str | None = None) -> 
             t.addfile(info, __import__("io").BytesIO(data))
 
 
+def stamp_listed(slug: str, since: float) -> bool:
+    """Whether the dataset's files (listed a page at a time) include a stamp made after `since`."""
+    token = None
+    for _ in range(50):
+        out = kaggle("datasets", "files", slug, "--page-size", "200", *(["--page-token", token] if token else []),
+                     check=False)
+        token = None
+        for line in out.splitlines():
+            parts = line.split()
+            if line.startswith("Next Page Token = "):
+                token = line.split("=", 1)[1].strip()
+            elif parts and parts[0] == STAMP and len(parts) >= 4:
+                try:
+                    when = __import__("calendar").timegm(time.strptime(f"{parts[2]} {parts[3][:8]}", "%Y-%m-%d %H:%M:%S"))
+                except ValueError:
+                    continue
+                if when >= since:
+                    return True
+        if not token:
+            return False
+    return False
+
+
 def publish_dataset(slug: str, title: str, archive: Path, stem: str) -> None:
     """Create or version a private dataset holding one archive; wait until Kaggle has
     this version ready. "ready" alone describes the dataset, which the last version
@@ -310,15 +333,8 @@ def publish_dataset(slug: str, title: str, archive: Path, stem: str) -> None:
         time.sleep(10)
         if "ready" not in kaggle("datasets", "status", slug, check=False).lower():
             continue
-        for line in kaggle("datasets", "files", slug, "--page-size", "1000", check=False).splitlines():
-            parts = line.split()
-            if parts and parts[0] == STAMP and len(parts) >= 4:
-                try:
-                    when = __import__("calendar").timegm(time.strptime(f"{parts[2]} {parts[3][:8]}", "%Y-%m-%d %H:%M:%S"))
-                except ValueError:
-                    continue
-                if when >= uploaded:
-                    return
+        if stamp_listed(slug, uploaded):
+            return
     raise SystemExit(f"dataset {slug}: this upload did not become ready in 30 minutes")
 
 
