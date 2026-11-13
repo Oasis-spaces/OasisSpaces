@@ -628,6 +628,40 @@ def novel(space: Path, variants: list[tuple[Path, str | None]], downscale: int =
     print(f"wrote {len(shown)} novel-view strips to {out_dir}", flush=True)
 
 
+DEPTH_MAP_DOWNSCALE = 8      # depth and coverage maps for gap recovery, per solved frame
+
+
+def depth_maps(space: Path, ply: Path, downscale: int = DEPTH_MAP_DOWNSCALE, rasterize=None, device=None) -> Path:
+    """What the trained splat shows from every solved camera: the expected depth
+    (solve units) and the opacity it has gathered, per pixel of the undistorted
+    frame at 1/downscale. Gap recovery uses them to know what each frame really
+    sees (walls, clutter and all) instead of guessing from the keyframes' cloud.
+    Written to splat-depths.npz: <name>/depth (float16), <name>/alpha (uint8),
+    and the downscale."""
+    import torch
+
+    device = device or "cuda"
+    if rasterize is None:
+        from gsplat import rasterization as rasterize
+    raw = read_ply(ply)
+    t = lambda a: torch.tensor(a, dtype=torch.float32, device=device)  # noqa: E731
+    means, quats, scales = t(raw["means"]), t(raw["quats"]), torch.exp(t(raw["scales"]))
+    opac, colours = torch.sigmoid(t(raw["opacities"])), t(raw["sh0"])
+    out = {"downscale": np.array(downscale)}
+    for frame in frames(space, downscale):
+        w, h = frame["size"]
+        with torch.no_grad():
+            renders, alphas, _ = rasterize(means=means, quats=quats, scales=scales, opacities=opac, colors=colours,
+                                           viewmats=t(frame["view"][None]), Ks=t(frame["K"][None]), width=w, height=h,
+                                           sh_degree=0, render_mode="RGB+ED", rasterize_mode="antialiased")
+        out[f"{frame['name']}/depth"] = renders[0, ..., 3].cpu().numpy().astype(np.float16)
+        out[f"{frame['name']}/alpha"] = (alphas[0, ..., 0].clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+    path = space / "splat-depths.npz"
+    np.savez_compressed(path, **out)
+    print(f"wrote {path.name}: depth and coverage for {(len(out) - 1) // 2} frames from {ply.name}", flush=True)
+    return path
+
+
 def parse_variants(space: Path, names: list[str]) -> list[tuple[Path, str | None]]:
     out = []
     for name in names:
@@ -655,6 +689,9 @@ def main() -> None:
     e.add_argument("space", type=Path)
     e.add_argument("plys", nargs="+")
     e.add_argument("--downscale", type=int, default=EVAL_DOWNSCALE)
+    d = sub.add_parser("depths", help="depth and coverage per solved frame, for gap recovery")
+    d.add_argument("space", type=Path)
+    d.add_argument("ply")
     n = sub.add_parser("novel", help="renders beside the held-out frames, for looking at")
     n.add_argument("space", type=Path)
     n.add_argument("plys", nargs="+", help="splat files, each optionally :dc or :dc300k")
@@ -665,6 +702,8 @@ def main() -> None:
               args.output, minutes=args.minutes,
               resume=(args.resume if args.resume is None or args.resume.is_absolute() else args.space / args.resume),
               start_step=args.start_step)
+    elif args.cmd == "depths":
+        depth_maps(args.space, args.space / args.ply)
     elif args.cmd == "eval":
         evaluate(args.space, parse_variants(args.space, args.plys), args.downscale)
     else:

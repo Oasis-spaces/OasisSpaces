@@ -170,6 +170,7 @@ JOBS = {
     # and long runs are trained on the second WITHOUT the held-out frames: then every
     # splat is scored on frames none of them saw, and the novel-view strips show what a
     # web copy loses (flat colour only; cropped to the room and reduced to 300k splats).
+    # The finished splat's depth and coverage from every camera come back for gap recovery.
     "splat-resume": {
         "inputs": ["cloud-dense.ply", "workspace/images/*.jpg", "workspace/sparse/0/*", "scene/scene.json",
                    "splat-quick.ply", "splat-long.ply", "splat-gsplat.ply", "splat-gsplat.json",
@@ -187,6 +188,7 @@ CUDA_VISIBLE_DEVICES=0 python3 pipeline/splat_gsplat.py train "$SPACE" --steps 3
   --start-step $(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['steps'])" "$SPACE/splat-gsplat.json") \
   --output splat-gsplat-30k.ply --minutes 330
 rm -f "$SPACE"/splat-gsplat-30k_*.ply
+python3 pipeline/splat_gsplat.py depths "$SPACE" splat-gsplat-30k.ply
 wait $BASELINE || echo "the held-out baselines failed; scoring without them"
 tail -3 "$SPACE/baseline-heldout.log"
 HELD=""; for f in splat-quick-heldout.ply splat-long-heldout.ply; do if [ -f "$SPACE/$f" ]; then HELD="$HELD $f"; fi; done

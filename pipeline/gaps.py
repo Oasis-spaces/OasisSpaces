@@ -73,6 +73,7 @@ PERIOD_RANGE_M = (0.15, 1.3)  # tile and panel sizes looked for
 PERIOD_MIN_CORR = 0.3         # autocorrelation peak that counts as a repeating pattern
 PERIOD_MIN_CONTRAST = 20.0    # measured luminance spread (0..255) below which a surface is plain
 PERIOD_REPEAT_SHARE = 0.5     # the second repeat must keep this share of the first's correlation
+SPLAT_SEES_ALPHA = 128        # coverage (0..255) a splat depth map needs at a pixel to say what is there
 MIN_PATCH_M2 = 0.01           # recovered cells must form patches this large: lone cells are chance agreement
 MIN_BASELINE_M = 0.15         # and stand at least this far apart
 MAX_SPREAD = 18.0             # their brightness may differ this much (median absolute, 0..255)
@@ -239,7 +240,7 @@ def project(points: np.ndarray, view: dict) -> tuple[np.ndarray, np.ndarray]:
     return np.column_stack([K[0, 0] * xd + K[0, 2], K[1, 1] * yd + K[1, 2]]), z
 
 
-def load_views(space: Path, metre: float, mask_names: list[str], log=print) -> list[dict]:
+def load_views(space: Path, metre: float, mask_names: list[str], log=print, depths: Path | None = None) -> list[dict]:
     """Every solved frame: pose, lens, the frame at 1/FRAME_REDUCE, and the
     tracked masks of the pieces and belongings that stand in front of
     surfaces."""
@@ -269,6 +270,16 @@ def load_views(space: Path, metre: float, mask_names: list[str], log=print) -> l
         views.append({"name": info["name"], "R": info["R"], "t": info["t"], "K": K, "dist": dist,
                       "size": (cam["width"], cam["height"]), "image": img[:, :, ::-1],
                       "centre": -info["R"].T @ info["t"], "mask": masks.get(info["name"])})
+    if depths is not None and depths.exists():
+        with np.load(depths) as maps:
+            ds = int(maps["downscale"])
+            for view in views:
+                key = f"{view['name']}/depth"
+                if key in maps.files:
+                    view["splat_depth"] = maps[key]
+                    view["splat_alpha"] = maps[f"{view['name']}/alpha"]
+                    view["splat_downscale"] = ds
+        log(f"  {sum('splat_depth' in v for v in views)} frames see through the trained splat's depth ({depths.name})")
     log(f"  {len(views)} frames read to recover gaps from")
     return views
 
@@ -331,7 +342,7 @@ def recover(targets: list[dict], views: list[dict], pts: np.ndarray, front: np.n
     clearly) to each target."""
     found = [([], [], [], []) for _ in targets]
     for vi, view in enumerate(views):
-        P, Z = project(pts, view)
+        P, Z = project(pts, view) if "splat_depth" not in view else (None, None)
         W, H = view["size"]
         centre_scene = view["centre"] @ world.T if world is not None else None
         for t, (idx_all, rgb_all, centre_all, view_all) in zip(targets, found):
@@ -346,20 +357,34 @@ def recover(targets: list[dict], views: list[dict], pts: np.ndarray, front: np.n
             idx = np.nonzero(inside)[0][facing >= MIN_FACING]
             if not len(idx):
                 continue
-            others = ~t["own"]
-            depth, is_front = depth_buffer(P[others], Z[others], front[others], (W, H))
             p, z_in = px[idx], z[idx]
-            q = np.minimum((p / DEPTH_REDUCE).astype(int), [depth.shape[1] - 1, depth.shape[0] - 1])
-            nearest = depth[q[:, 1], q[:, 0]]
             margin = IN_THE_WAY_M * metre + 0.03 * z_in
-            clear = z_in <= nearest + margin                        # nothing nearer in the way
-            clear &= ~(is_front[q[:, 1], q[:, 0]] & (nearest < z_in + margin))   # nor a piece at the cell
+            if "splat_depth" in view:
+                # The trained splat's own view from this camera (undistorted, pinhole): the
+                # frame sees the cell only where the splat's surface is the cell, opaque.
+                cam = cells[idx] @ view["R"].T + view["t"]
+                K, ds = view["K"], view["splat_downscale"]
+                mu = (K[0, 0] * cam[:, 0] / cam[:, 2] + K[0, 2]) / ds
+                mv = (K[1, 1] * cam[:, 1] / cam[:, 2] + K[1, 2]) / ds
+                sd, sa = view["splat_depth"], view["splat_alpha"]
+                inside_map = (mu >= 0) & (mu < sd.shape[1]) & (mv >= 0) & (mv < sd.shape[0])
+                col = np.clip(mu.astype(int), 0, sd.shape[1] - 1)
+                row = np.clip(mv.astype(int), 0, sd.shape[0] - 1)
+                surface = sd[row, col].astype(np.float64)
+                clear = inside_map & (sa[row, col] >= SPLAT_SEES_ALPHA) & (np.abs(surface - z_in) <= margin)
+            else:
+                others = ~t["own"]
+                depth, is_front = depth_buffer(P[others], Z[others], front[others], (W, H))
+                q = np.minimum((p / DEPTH_REDUCE).astype(int), [depth.shape[1] - 1, depth.shape[0] - 1])
+                nearest = depth[q[:, 1], q[:, 0]]
+                clear = z_in <= nearest + margin                        # nothing nearer in the way
+                clear &= ~(is_front[q[:, 1], q[:, 0]] & (nearest < z_in + margin))   # nor a piece at the cell
             m = view["mask"]
             if m is not None:
                 mq = np.minimum((p * m.shape[0] / H).astype(int), [m.shape[1] - 1, m.shape[0] - 1])
                 clear &= ~m[mq[:, 1], mq[:, 0]]
             idx, p = idx[clear], p[clear]
-            if len(idx) and len(boxes) and centre_scene is not None:
+            if len(idx) and len(boxes) and centre_scene is not None and "splat_depth" not in view:
                 ends = cells[idx] @ world.T
                 blocked = np.zeros(len(idx), bool)
                 for lo, hi in boxes:
@@ -643,7 +668,10 @@ def splat_cloud(space: Path, splat: Path, metre: float, cell_m: float = CELL_M, 
     return PointCloud(points, colours[owner].astype(np.uint8), None, labels, dense.label_names), opacity[keep][owner]
 
 
-def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print, splat: Path | None = None) -> dict:
+def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print, splat: Path | None = None,
+        depths: Path | None = None) -> dict:
+    """With `depths` (splat-depths.npz, used when present unless another is given), what
+    each frame sees comes from the trained splat's depth from that camera."""
     import cv2
 
     shapes = json.loads((space / "shapes.json").read_text())
@@ -674,11 +702,14 @@ def run(space: Path, use_claude: bool = True, cell_m: float = CELL_M, log=print,
     mask_names = sorted({p.name.split(".")[0].replace("-", " ") for p in masks_dir.glob("*.v3.npz")}
                         if masks_dir.exists() else set())
     front_masks = [n for n in mask_names if vocabulary.role(n) in front_roles]
-    views = load_views(space, metre, front_masks, log)
+    depths = depths if depths is not None else space / "splat-depths.npz"
+    views = load_views(space, metre, front_masks, log, depths)
     pts, front = occluders(dense, metre, set(in_front.tolist()))
     pts_scene = pts @ world.T
     record = {"cell_m": cell_m, "rule": "only colours the video saw; the rest is unseen",
-              "measured_from": splat.name if splat else "cloud-dense.ply", "surfaces": []}
+              "measured_from": splat.name if splat else "cloud-dense.ply",
+              "visibility_from": depths.name if depths.exists() else "cloud-dense.ply and the pieces' boxes",
+              "surfaces": []}
     out = {"real": ([], [], []), "unseen": ([], [], [])}
     work = space / "gaps"
     work.mkdir(exist_ok=True)

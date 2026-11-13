@@ -77,3 +77,28 @@ def test_pattern_recognition_finds_tiles_and_ignores_plain_surfaces():
     assert gaps.period(plain, seen, 0.02)[:2] == (None, None)
     noisy = 128 + rng.normal(0, 40, (120, 120))                     # clutter: contrast, but no repeat
     assert gaps.period(noisy, seen, 0.02)[:2] == (None, None)
+
+
+def test_splat_depth_decides_what_a_frame_sees(monkeypatch):
+    """With the trained splat's depth map, a frame sees a cell only where the
+    splat's surface is that cell: nearer means something is in the way."""
+    monkeypatch.setattr(gaps, "FRAME_REDUCE", 1)
+    red = np.zeros((400, 400, 3), np.uint8)
+    red[..., 0] = 200
+    cells = np.array([[0.0, 0, 0]])
+    views = [_view(np.array([0.0, -1, 2]), [0, 0, 0], red), _view(np.array([0.5, -1, 2]), [0, 0, 0], red)]
+    pts, front = np.zeros((0, 3)), np.zeros(0, bool)
+
+    def with_map(depth_value):
+        for v in views:
+            z = (v["R"] @ cells[0] + v["t"])[2]
+            v["splat_depth"] = np.full((50, 50), depth_value if depth_value is not None else z, np.float16)
+            v["splat_alpha"] = np.full((50, 50), 255, np.uint8)
+            v["splat_downscale"] = 8
+        target = {"cells": cells, "normal": np.array([0, 0, 1.0]), "own": np.zeros(0, bool)}
+        gaps.recover([target], views, pts, front, metre=1.0)
+        return bool(target["ok"][0])
+
+    assert with_map(None)            # the splat's surface is at the cell: seen
+    assert not with_map(0.5)         # something half a metre from the camera stands in front
+    assert not with_map(9.0)         # the splat has nothing there: the frame shows what lies beyond
