@@ -69,6 +69,11 @@ pip -q install --no-deps --ignore-requires-python "git+https://github.com/ByteDa
 INSTALL_OPENSPLAT = """
 apt-get -qq -o DPkg::Lock::Timeout=600 update > /dev/null
 apt-get -qq -o DPkg::Lock::Timeout=600 install -y libopencv-dev > /dev/null
+# A binary built by an earlier job comes back with the space (tools-cache/).
+CACHED=$(ls /kaggle/temp/repo/spaces/*/tools-cache/opensplat 2>/dev/null | head -1)
+if [ -n "$CACHED" ] && "$CACHED" --help > /dev/null 2>&1; then
+  mkdir -p /kaggle/temp/OpenSplat/build && cp "$CACHED" /kaggle/temp/OpenSplat/build/opensplat
+fi
 if [ ! -x /kaggle/temp/OpenSplat/build/opensplat ]; then
   cd /kaggle/temp && rm -rf OpenSplat
   git clone -q https://github.com/WebODM/OpenSplat.git
@@ -124,10 +129,12 @@ JOBS = {
     # choices between trainings, fills and scenes are made here afterwards).
     "splat-train": {
         "inputs": ["objects.json", "densify.json", "shapes.json", "cloud-dense.ply", "agent-report.json",
-                   "frames-chosen.json", "workspace/images/*.jpg", "workspace/sparse/0/*"],
+                   "frames-chosen.json", "workspace/images/*.jpg", "workspace/sparse/0/*", "tools-cache/opensplat"],
         "install": [INSTALL_PYTHON, INSTALL_OPENSPLAT],
-        "run": ['OPENSPLAT=/kaggle/temp/OpenSplat/build/opensplat python3 pipeline/agent.py none --name "$(basename "$SPACE")" '
-                '--stage splat --splat-steps train-quick train-long --long-splat on --no-claude --accept-warnings'],
+        "run": ['mkdir -p "$SPACE/tools-cache" && cp -n /kaggle/temp/OpenSplat/build/opensplat "$SPACE/tools-cache/" ; '
+                'OPENSPLAT=/kaggle/temp/OpenSplat/build/opensplat python3 pipeline/agent.py "$SPACE/workspace/images" '
+                '--name "$(basename "$SPACE")" --stage splat --splat-steps train-quick train-long --long-splat on '
+                '--no-claude --accept-warnings'],
     },
     "sam31-test": {
         "inputs": ["objects.json", "workspace/images/*.jpg"],
@@ -235,7 +242,7 @@ def run_job(space: Path, job: str, user: str, keep: Path) -> int:
     name = space.name
     inputs = sorted({p for pattern in spec["inputs"] for p in space.glob(pattern) if p.is_file()})
     missing = [pattern for pattern in spec["inputs"] if not any(space.glob(pattern))
-               and not pattern.endswith("dropped-frames.json")]
+               and not pattern.endswith("dropped-frames.json") and not pattern.startswith("tools-cache/")]
     if missing:
         raise SystemExit(f"{space} lacks what the {job} job needs: {', '.join(missing)}")
     with tempfile.TemporaryDirectory(dir=keep) as tmp:
