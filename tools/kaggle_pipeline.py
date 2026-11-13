@@ -64,6 +64,26 @@ pip -q install click scipy trimesh einops omegaconf safetensors imageio e3nn add
 pip -q install --no-deps --force-reinstall "git+https://github.com/microsoft/MoGe.git"
 pip -q install --no-deps --ignore-requires-python "git+https://github.com/ByteDance-Seed/Depth-Anything-3.git"   # it declares python <= 3.13, which pip reads as 3.13.0
 """
+# OpenSplat (AGPL-3.0), built against the machine's PyTorch for its GPU, pinned to the
+# commit the pipeline was tested with (the notebook's install-opensplat cell).
+INSTALL_OPENSPLAT = """
+apt-get -qq -o DPkg::Lock::Timeout=600 update > /dev/null
+apt-get -qq -o DPkg::Lock::Timeout=600 install -y libopencv-dev > /dev/null
+if [ ! -x /kaggle/temp/OpenSplat/build/opensplat ]; then
+  cd /kaggle/temp && rm -rf OpenSplat
+  git clone -q https://github.com/WebODM/OpenSplat.git
+  cd OpenSplat && git checkout -q 2947938b7a2152b560489a963e47e961825dd32a
+  export PATH=/usr/local/cuda/bin:$PATH
+  TORCH_PREFIX=$(python -c "import torch; print(torch.utils.cmake_prefix_path)")
+  ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+  mkdir -p build && cd build
+  cmake -DCMAKE_PREFIX_PATH="$TORCH_PREFIX" -DGPU_RUNTIME=CUDA \\
+        -DCMAKE_CUDA_ARCHITECTURES="$ARCH" -DCMAKE_BUILD_TYPE=Release .. > cmake.log 2>&1 || { tail -40 cmake.log; exit 1; }
+  echo "Building OpenSplat (about 10 minutes)..."
+  make -j"$(nproc)" opensplat > make.log 2>&1 || { tail -60 make.log; exit 1; }
+fi
+ls -la /kaggle/temp/OpenSplat/build/opensplat
+"""
 INSTALL_SAM31 = """
 pip -q install einops 'git+https://github.com/facebookresearch/sam3.git'
 pip -q install 'numpy>=2.3'     # sam3 pulls numpy 1.26, which the rest no longer builds against
@@ -92,6 +112,15 @@ JOBS = {
         "inputs": ["objects.json", "densify.json", "workspace/images/*.jpg", "workspace/sparse/0/*"],
         "install": [INSTALL_PYTHON, INSTALL_DEPTH_NEW],
         "run": ['python3 pipeline/densify.py "$SPACE" --depth-model da3 --no-semantics --output "$SPACE/cloud-da3.ply"'],
+    },
+    # Stage 4's training: the quick and the long splat, without Claude (the
+    # choices between trainings, fills and scenes are made here afterwards).
+    "splat-train": {
+        "inputs": ["objects.json", "densify.json", "shapes.json", "cloud-dense.ply", "agent-report.json",
+                   "frames-chosen.json", "workspace/images/*.jpg", "workspace/sparse/0/*"],
+        "install": [INSTALL_PYTHON, INSTALL_OPENSPLAT],
+        "run": ['OPENSPLAT=/kaggle/temp/OpenSplat/build/opensplat python3 pipeline/agent.py none --name "$(basename "$SPACE")" '
+                '--stage splat --splat-steps train-quick train-long --long-splat on --no-claude --accept-warnings'],
     },
     "sam31-test": {
         "inputs": ["objects.json", "workspace/images/*.jpg"],
