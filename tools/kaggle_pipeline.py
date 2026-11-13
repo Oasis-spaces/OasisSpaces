@@ -96,6 +96,25 @@ if [ ! -x /kaggle/temp/OpenSplat/build/opensplat ]; then
 fi
 ls -la /kaggle/temp/OpenSplat/build/opensplat
 """
+# gsplat (Apache-2.0), compiled for the machine's GPU and PyTorch; a tiny render
+# right after proves the build before hours of training depend on it.
+INSTALL_GSPLAT = """
+export PATH=/usr/local/cuda/bin:$PATH
+export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
+export MAX_JOBS=$(nproc)
+pip -q install ninja jaxtyping rich
+echo "Building gsplat (about 10-20 minutes)..."
+pip install --no-build-isolation "git+https://github.com/nerfstudio-project/gsplat.git@v1.5.3" > /kaggle/temp/gsplat-build.log 2>&1 \
+  || { tail -80 /kaggle/temp/gsplat-build.log; exit 1; }
+python3 -c "
+import torch; from gsplat import rasterization
+n = 1000; d = 'cuda'
+r, a, _ = rasterization(torch.randn(n, 3, device=d) + torch.tensor([0, 0, 5.], device=d),
+    torch.nn.functional.normalize(torch.randn(n, 4, device=d), dim=-1), torch.rand(n, 3, device=d) * 0.05,
+    torch.rand(n, device=d), torch.rand(n, 3, device=d), torch.eye(4, device=d)[None],
+    torch.tensor([[[300., 0, 160], [0, 300, 120], [0, 0, 1]]], device=d), 320, 240)
+print('gsplat renders:', tuple(r.shape), float(a.mean()))"
+"""
 INSTALL_SAM31 = """
 pip -q install einops 'git+https://github.com/facebookresearch/sam3.git'
 pip -q install 'numpy>=2.3'     # sam3 pulls numpy 1.26, which the rest no longer builds against
@@ -135,6 +154,17 @@ JOBS = {
                 'OPENSPLAT=/kaggle/temp/OpenSplat/build/opensplat python3 pipeline/agent.py "$SPACE/workspace/images" '
                 '--name "$(basename "$SPACE")" --stage splat --splat-steps train-quick train-long --long-splat on '
                 '--no-claude --accept-warnings'],
+    },
+    # The gsplat training (exposure per frame, MoGe depth, full resolution), then
+    # every splat scored on the frames it held out (pipeline/splat_gsplat.py).
+    "splat-gsplat": {
+        "inputs": ["cloud-dense.ply", "workspace/images/*.jpg", "workspace/sparse/0/*",
+                   "splat-quick.ply", "splat-long.ply"],
+        "install": [INSTALL_PYTHON, INSTALL_GSPLAT],
+        "run": ['python3 pipeline/splat_seed.py "$SPACE" && '
+                'python3 pipeline/splat_gsplat.py train "$SPACE" --minutes 390 && '
+                'python3 pipeline/splat_gsplat.py eval "$SPACE" splat-quick.ply splat-long.ply splat-gsplat.ply'
+                ' $(ls "$SPACE"/splat-gsplat_*.ply 2>/dev/null | xargs -rn1 basename)'],
     },
     "sam31-test": {
         "inputs": ["objects.json", "workspace/images/*.jpg"],
